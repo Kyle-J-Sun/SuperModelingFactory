@@ -2,8 +2,6 @@
 import os
 from tracemalloc import start
 import numpy as np
-from numpy.core.defchararray import mod
-from numpy.lib.utils import info
 import pandas as pd
 from pandas.core.groupby.generic import NamedAgg
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
@@ -1920,7 +1918,7 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True):
     else:
         equid_df['lower_limit'] = list(equid_df['min_score'][:-1]) + [-np.inf, ]
         equid_df['upper_limit'] = [np.inf, ] + list(equid_df['min_score'][:-1])
-    lift_df = pd.merge(lift_df.assign(key=1), equid_df.assign(key=1), how='left', on='key', suffixes=('', '_actual')).drop('key', 1)
+    lift_df = pd.merge(lift_df.assign(key=1), equid_df.assign(key=1), how='left', on='key', suffixes=('', '_actual')).drop(columns=['key'])
 
     # 根据lift的升降(lift_ascending)求解切分数据
     # 升则取不高于lift的最大值, 降则取不低于lift的最小值

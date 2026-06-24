@@ -145,14 +145,17 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None):
 
     lgb_params = {k: v for k, v in params_dict.items() if k != 'eval_metric'}
     model = lgb.LGBMClassifier(**lgb_params)
+    # NOTE: `verbose=False` was removed from .fit() in lightgbm>=4. Log control
+    # is now handled by callbacks (lgb.early_stopping(..., verbose=False) and
+    # lgb.log_evaluation(period=0) if needed).
     model.fit(
         x, y,
         eval_set=[(valx, valy)],
         eval_metric=params_dict['eval_metric'] if 'eval_metric' in params_dict else params_dict['metric'],
         callbacks=[
-            lgb.early_stopping(stopping_rounds=params_dict['early_stopping_rounds'], verbose=False)
+            lgb.early_stopping(stopping_rounds=params_dict['early_stopping_rounds'], verbose=False),
+            lgb.log_evaluation(period=0),
         ],
-        verbose=False,
         sample_weight=wgt,
         init_score=init_score   # 新增
     )
