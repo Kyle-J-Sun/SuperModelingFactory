@@ -148,6 +148,26 @@ em.close_workbook()
 - 类名采用 PascalCase，函数名采用 snake_case
 - 以 `_` 开头的函数/方法为内部实现，不对外暴露
 
+## 持续集成
+
+本仓库的 GitHub Actions(`.github/workflows/tests.yml`)会在 push 到 `main` 与 PR 上自动跑 pytest,矩阵为:
+
+- **Python**:`3.11`、`3.12`
+- **依赖矩阵**:
+  - `legacy` — `numpy<2` + `scipy<1.13` + `lightgbm<4`
+  - `modern` — `numpy>=2` + `scipy>=1.13` + `lightgbm>=4`
+- **共同约束**:`pandas>=2.0,<2.3`(等 [issue #2](https://github.com/Kyle-J-Sun/SuperModelingFactory/issues/2) 修复后放宽)
+
+测试用例托管在独立仓库 [`SuperModelingFactory_pytest`](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest)(私有),workflow 通过 `secrets.PYTEST_REPO_TOKEN` 跨仓 clone。
+
+### 配置 PAT(只需做一次)
+
+1. 进入 [GitHub Settings · Tokens (classic)](https://github.com/settings/tokens) 生成新 token,scope 勾选 `repo`(只读访问私有仓库即可)
+2. 进入本仓库 **Settings → Secrets and variables → Actions → New repository secret**
+3. Name: `PYTEST_REPO_TOKEN`,Value: 粘贴 token
+
+如改用 Fine-grained PAT,需将其授权访问 `SuperModelingFactory_pytest` 仓库的 *Contents: Read* 权限。
+
 ## 版本
 
 - **Version**: 1.0.0
