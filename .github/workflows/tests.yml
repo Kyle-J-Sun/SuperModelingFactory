@@ -1,0 +1,91 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch to save CI minutes.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: ${{ matrix.deps }} · Py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+        deps: [legacy, modern]
+
+    steps:
+      - name: Checkout main package
+        uses: actions/checkout@v4
+        with:
+          path: SuperModelingFactory
+
+      - name: Checkout test suite (private)
+        uses: actions/checkout@v4
+        with:
+          repository: Kyle-J-Sun/SuperModelingFactory_pytest
+          token: ${{ secrets.PYTEST_REPO_TOKEN }}
+          path: SuperModelingFactory_pytest
+          ref: main
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install base test deps
+        run: |
+          python -m pip install --upgrade pip
+          # pandas always pinned <2.3 until main repo issue #2 (_bin_num KeyError) is fixed.
+          pip install "pandas>=2.0,<2.3" pytest
+
+      - name: Install numpy / scipy / lightgbm (legacy)
+        if: matrix.deps == 'legacy'
+        run: pip install "numpy<2" "scipy<1.13" "lightgbm<4"
+
+      - name: Install numpy / scipy / lightgbm (modern)
+        if: matrix.deps == 'modern'
+        run: pip install "numpy>=2" "scipy>=1.13" "lightgbm>=4"
+
+      - name: Install main package runtime deps
+        working-directory: SuperModelingFactory
+        run: |
+          # Install the runtime requirements declared by the main package.
+          # Tolerate missing requirements.txt — fall back to pip-installing
+          # whatever the package itself declares via setup.py/pyproject.toml.
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            pip install -e . || true
+          fi
+          # Belt-and-suspenders: install the libs the test suite imports directly.
+          pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn
+
+      - name: Show resolved versions
+        run: |
+          python - <<'PY'
+          import importlib, sys
+          mods = ["numpy","scipy","pandas","lightgbm","xgboost","sklearn"]
+          print("python:", sys.version.split()[0])
+          for m in mods:
+              try:
+                  print(f"{m}:", importlib.import_module(m).__version__)
+              except Exception as e:
+                  print(f"{m}: NOT INSTALLED ({e})")
+          PY
+
+      - name: Run pytest
+        working-directory: SuperModelingFactory_pytest
+        env:
+          PYTHONPATH: ${{ github.workspace }}/SuperModelingFactory
+        run: python -m pytest --no-header -q -rN
