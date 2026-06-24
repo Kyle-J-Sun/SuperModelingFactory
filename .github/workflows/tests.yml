@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12"]
-        deps: [legacy, modern]
+        deps: [legacy, modern, bleeding]
 
     steps:
       - name: Checkout main package
@@ -45,16 +45,19 @@ jobs:
       - name: Install base test deps
         run: |
           python -m pip install --upgrade pip
-          # pandas always pinned <2.3 until main repo issue #2 (_bin_num KeyError) is fixed.
-          pip install "pandas>=2.0,<2.3" pytest
+          pip install pytest
 
-      - name: Install numpy / scipy / lightgbm (legacy)
+      - name: Install deps (legacy — numpy<2 / lightgbm<4 / pandas<2.3)
         if: matrix.deps == 'legacy'
-        run: pip install "numpy<2" "scipy<1.13" "lightgbm<4"
+        run: pip install "numpy<2" "scipy<1.13" "pandas>=2.0,<2.3" "lightgbm<4"
 
-      - name: Install numpy / scipy / lightgbm (modern)
+      - name: Install deps (modern — numpy 2.x / lightgbm 4.x / pandas 2.2.x)
         if: matrix.deps == 'modern'
-        run: pip install "numpy>=2" "scipy>=1.13" "lightgbm>=4"
+        run: pip install "numpy>=2" "scipy>=1.13" "pandas>=2.2,<2.3" "lightgbm>=4"
+
+      - name: Install deps (bleeding — latest pandas, validates Bug 3 fix)
+        if: matrix.deps == 'bleeding'
+        run: pip install "numpy>=2" "scipy>=1.13" "pandas>=2.3" "lightgbm>=4"
 
       - name: Install main package runtime deps
         working-directory: SuperModelingFactory
