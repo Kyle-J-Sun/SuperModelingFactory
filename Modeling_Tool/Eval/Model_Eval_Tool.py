@@ -90,7 +90,10 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
         # 计算各项指标
         min_val = group[score].min()
         max_val = group[score].max()
-        n = group['_bin_num'].count()
+        # NOTE: pandas 2.3+ 起 groupby(...).apply(func) 传入 func 的 group
+        # DataFrame 不再包含分组列,不能再用 group['_bin_num']。
+        # len(group) 与原 .count() 数值等价(_bin_num 为分组主键,不为 NaN)。
+        n = len(group)
         avg_score = group[score].mean()
         unique_score = group[score].nunique()
 
