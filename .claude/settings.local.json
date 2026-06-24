@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn \"from Report\\\\|import Report\\\\|Report\\\\.Report_Tool\\\\|Report\\\\.get_\\\\|Report\\\\.single_model_perf\\\\|Report\\\\.write_var_info\\\\|Report\\\\.plot_woe\\\\|Report_Tool\" /opt/workspace/sunjingkai_personal_drive/git-repo/SuperModelingFactory --include=\"*.py\" -not -path \"*__pycache__*\" -not -path \"*.ipynb_checkpoints*\")",
+      "Bash(grep -rn \"ExcelMaster\\\\|ExcelMaster\\\\.ExcelMaster\" /opt/workspace/sunjingkai_personal_drive/git-repo/SuperModelingFactory --include=\"*.py\" -not -path \"*__pycache__*\" -not -path \"*.ipynb_checkpoints*\")",
+      "Bash(python3 -c ' *)",
+      "Bash(grep -v \":0$\")",
+      "Bash(mkdocs --version)",
+      "Bash(pip show *)",
+      "Bash(pip install *)",
+      "Bash(python3 -c \"import mkdocstrings; print\\('mkdocstrings:', mkdocstrings.__version__\\)\")",
+      "Bash(python3 -c \"import material; print\\('material ok'\\)\")",
+      "Bash(curl -sI http://127.0.0.1:8000/)",
+      "Bash(curl -s http://127.0.0.1:8000/)",
+      "Bash(env)",
+      "Bash(curl -sI http://localhost:8888/sunjingkai_modeling_env/jupyter/proxy/absolute/8000/)",
+      "Bash(curl -sI http://127.0.0.1:8888/sunjingkai_modeling_env/jupyter/proxy/absolute/8000/)",
+      "Bash(netstat -tlnp)",
+      "Bash(python3 -c \"import jupyter_server_proxy; print\\('jupyter-server-proxy:', jupyter_server_proxy.__version__\\)\")",
+      "Bash(curl -s http://localhost:8888/sunjingkai_modeling_env/jupyter/api/status)",
+      "Bash(curl -sI \"http://localhost:8888/sunjingkai_modeling_env/jupyter/proxy/8000/\")",
+      "Bash(curl -s http://localhost:8888/sunjingkai_modeling_env/jupyter/proxy/8000/)",
+      "Bash(curl -sI http://localhost:8888/sunjingkai_modeling_env/jupyter/proxy/8000/quickstart/)",
+      "Bash(curl -sI http://localhost:8888/sunjingkai_modeling_env/jupyter/proxy/8000/api/woe/)",
+      "Bash(python3)",
+      "Bash(python3 *)",
+      "Bash(curl -sI http://127.0.0.1:8000/guides/odps/)",
+      "Bash(curl -sI http://127.0.0.1:8000/api/core/)",
+      "Bash(grep -v 'logger\\\\|logging\\\\.\\\\\\(info\\\\|error\\\\|debug\\\\|warning\\\\\\)$')",
+      "Bash(grep -E '\":\\\\s*,|\",\\\\s*$')",
+      "Bash(awk NR>=73 && NR<=120 *)"
+    ]
+  }
+}
