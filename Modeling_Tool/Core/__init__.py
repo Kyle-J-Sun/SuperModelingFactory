@@ -16,7 +16,14 @@ from .Binning_Tool import (
     quick_binning,
 )
 
-from .ODPS_Tool import ODPSRunner
+# ODPSRunner is lazy-loaded so the package import doesn't require pyodps
+# (and its libcst -> Rust toolchain chain). Users who actually call
+# ODPSRunner must `pip install supermodelingfactory[odps]`.
+def __getattr__(name):
+    if name == "ODPSRunner":
+        from .ODPS_Tool import ODPSRunner as _ODPSRunner
+        return _ODPSRunner
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from .Slope_Tool import (
     calculate_slope_sklearn,

@@ -5,6 +5,9 @@ import pandas as pd
 import numpy as np
 from matplotlib.font_manager import FontProperties
 import matplotlib.pyplot as plt
+# Fix: calc_iv was used below without being imported — bug latent under pure
+# Python (NameError on first call), exposed at compile time by Cython.
+from Modeling_Tool.Core.utils import calc_iv
 zhfont = FontProperties(fname=os.path.join(os.path.dirname(__file__), "../ref_font/KaiTi.ttf"))
 
 palette = {

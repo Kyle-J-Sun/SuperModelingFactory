@@ -1,0 +1,113 @@
+# =============================================================================
+# SuperModelingFactory — PEP 517 build configuration
+# =============================================================================
+# build-system tells pip how to build the wheel: it needs setuptools + Cython
+# available *before* setup.py executes. cibuildwheel reuses this exact stanza
+# inside the per-platform manylinux / macOS / windows containers.
+# =============================================================================
+
+[build-system]
+requires = [
+    "setuptools>=68",
+    "wheel",
+    "cython>=3.0",
+    # numpy is pre-installed during the build because several core modules
+    # depend on numpy's C-API (only relevant if any closed-source module
+    # uses `cimport numpy`; harmless otherwise).
+    "numpy>=1.23",
+]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "SuperModelingFactory"
+version = "0.1.0"
+description = "Credit risk modeling factory: WOE binning, scorecards, LightGBM, Excel reporting."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BUSL-1.1" }
+authors = [
+    { name = "Kyle Sun", email = "jingkai.sun20@alumni.imperial.ac.uk" },
+]
+keywords = [
+    "credit-risk", "scorecard", "woe", "lightgbm",
+    "psi", "iv", "modeling", "fintech",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "License :: Other/Proprietary License",
+]
+
+# Runtime deps — duplicated in requirements.txt for dev convenience.
+dependencies = [
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "scipy>=1.9.0",
+    "scikit-learn>=1.1.0",
+    "joblib>=1.2.0",
+    "python-dateutil>=2.8.0",
+    "lightgbm>=2.3.0",
+    "xgboost>=1.7.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+    "xlsxwriter>=3.0.0",
+    "openpyxl>=3.0.0",
+    "Pillow>=9.0.0",
+    "tqdm>=4.64.0",
+]
+
+[project.optional-dependencies]
+optuna  = ["optuna>=4.0.0"]
+stats   = ["statsmodels>=0.13.0"]
+imblearn = ["imbalanced-learn>=0.10.0"]
+# pyodps drags libcst which needs Rust in manylinux2014. Kept optional so the
+# Linux wheel build container doesn't need a Rust toolchain. Users who need
+# ODPSRunner install with `pip install supermodelingfactory[odps]`.
+odps    = ["pyodps>=0.11.0"]
+
+[project.urls]
+Homepage      = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
+Documentation = "https://kyle-j-sun.github.io/SuperModelingFactory_doc"
+Source        = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
+
+
+# -----------------------------------------------------------------------------
+# cibuildwheel — invoked by .github/workflows/build.yml on every push.
+# We target CPython 3.10 / 3.11 / 3.12 across Linux x86_64, macOS arm64, and
+# Windows amd64. Each wheel embeds the compiled .so / .pyd; no source is shipped.
+# -----------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip  = "*-musllinux_* *-win32 *_i686"
+
+# Before pytest runs inside the wheel container, make sure the wheel itself
+# imports cleanly — this validates that .so files were produced and shipped.
+test-command = "python -c \"import Modeling_Tool, Modeling_Tool.WOE.WOE_Master, Modeling_Tool.Model.LRM_Tool; print('SMF wheel ok:', Modeling_Tool.__name__)\""
+
+[tool.cibuildwheel.linux]
+# manylinux_2_28 is the modern PEP 600 baseline (RHEL/Rocky 8 glibc 2.28).
+# manylinux2014 (CentOS 7, glibc 2.17) is EOL and recent scipy / numpy no
+# longer publish wheels for it, which forces a source build that fails
+# because OpenBLAS isn't pre-installed in the test container.
+manylinux-x86_64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+# Apple Silicon only. Building x86_64 on the ARM macos-14 runner requires
+# Rosetta 2 + an x86_64 Homebrew prefix to install libomp for lightgbm,
+# which GitHub-hosted runners don't provision. Intel-Mac users (rare on
+# the team) can pip-install from the sdist published in each release.
+archs = ["arm64"]
+# lightgbm wheels on macOS dynamically link libomp.dylib from Homebrew.
+# Install it before the smoke-import so 'import lightgbm' (and therefore
+# 'import Modeling_Tool.Model.LRM_Tool') doesn't crash with
+# 'Library not loaded: @rpath/libomp.dylib'.
+before-test = "brew install libomp"
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]

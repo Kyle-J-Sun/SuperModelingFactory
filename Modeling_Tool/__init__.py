@@ -4,10 +4,13 @@ __author__ = "Jingkai Sun"
 __version__ = "1.0.0"
 
 # Core module - base data structures
+# ODPSRunner is intentionally omitted from this eager import so that
+# `import Modeling_Tool` does not require pyodps. Access it via
+# `from Modeling_Tool.Core import ODPSRunner` after installing the
+# `[odps]` extra (`pip install supermodelingfactory[odps]`).
 from .Core import (
     Binning,
     super_binning,
-    ODPSRunner,
     SlopeCalculator,
     DataFrameProcessor,
     FilePathManager,
@@ -83,6 +86,15 @@ from .Feature import (
     calculate_psi_within_dataset,
 )
 
+# Lazy attribute access for ODPSRunner — keeps pyodps optional but preserves
+# the public API `from Modeling_Tool import ODPSRunner`.
+def __getattr__(name):
+    if name == "ODPSRunner":
+        from .Core import ODPSRunner
+        return ODPSRunner
+    raise AttributeError(f"module 'Modeling_Tool' has no attribute {name!r}")
+
+
 __all__ = [
     # Version info
     '__author__',
@@ -91,7 +103,7 @@ __all__ = [
     # Core
     'Binning',
     'super_binning',
-    'ODPSRunner',
+    'ODPSRunner',  # lazy: requires `pip install supermodelingfactory[odps]`
     'SlopeCalculator',
     'DataFrameProcessor',
     'FilePathManager',

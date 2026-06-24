@@ -1,0 +1,36 @@
+# =============================================================================
+# verify.yml — fast PR gate for closed-source invariants
+# -----------------------------------------------------------------------------
+# Runs in ~10 seconds. Catches the common mistake of adding/renaming a module
+# in setup.py without also updating gen_stubs.py and MANIFEST.in.
+#
+# A separate, slower job in build.yml runs invariants 4 & 5 against the
+# actually-built wheels (which takes minutes).
+# =============================================================================
+name: Verify protection
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invariants:
+    name: setup.py / gen_stubs.py / MANIFEST.in parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run verifier
+        run: python scripts/verify_protection.py

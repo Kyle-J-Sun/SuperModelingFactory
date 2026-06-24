@@ -1,6 +1,38 @@
 # SuperModelingFactory
 
+[![PyPI](https://img.shields.io/pypi/v/supermodelingfactory.svg)](https://pypi.org/project/supermodelingfactory/)
+[![Python](https://img.shields.io/pypi/pyversions/supermodelingfactory.svg)](https://pypi.org/project/supermodelingfactory/)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue.svg)](LICENSE)
+[![Build wheels](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml/badge.svg)](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml)
+
 风控建模工厂 —— 一套面向信用评分卡开发与模型管理的完整 Python 工具链。
+
+## 安装
+
+```bash
+pip install supermodelingfactory
+```
+
+macOS 用户额外需要安装 OpenMP 运行时（lightgbm 依赖）：
+
+```bash
+brew install libomp
+```
+
+支持的环境：Python 3.10 / 3.11 / 3.12 / 3.13，平台 macOS arm64 / Linux x86_64 / Windows x86_64。
+
+详见 [INSTALL.md](INSTALL.md)。
+
+## 许可证
+
+本项目采用 **Business Source License 1.1**，Change Date 为 **2030-06-24**。之前：
+
+- ✅ 允许：个人学习、学术研究、内部评估、原型、教学
+- ❌ 不允许：任何生产 / 商业 / 营收性使用
+
+2030-06-24 后自动转为 Apache 2.0。商业授权请联系作者。
+
+核心算法模块（22 个，分布在 `WOE / Feature / Model / Eval / Sample / Core`）通过 Cython 编译为 `.so` / `.pyd` 后分发，源码可在仓库阅读但**不**包含在 wheel 中。
 
 ## 项目概述
 
