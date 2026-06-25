@@ -14,7 +14,9 @@ requires = [
     # numpy is pre-installed during the build because several core modules
     # depend on numpy's C-API (only relevant if any closed-source module
     # uses `cimport numpy`; harmless otherwise).
-    "numpy>=1.23",
+    # Upper-bound <2 is required: all .so/.pyd extensions shipped in this
+    # package were compiled against NumPy 1.x ABI and will crash under 2.x.
+    "numpy>=1.23,<2",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -45,14 +47,18 @@ classifiers = [
 ]
 
 # Runtime deps — duplicated in requirements.txt for dev convenience.
+# NOTE: numpy is pinned <2 because the compiled .so/.pyd extensions in this
+# package were built against NumPy 1.x C-API. NumPy 2.x changed its ABI
+# (_ARRAY_API), causing AttributeError at import time. Recompile all
+# extensions before removing the upper bound.
 dependencies = [
     "pandas>=1.5.0",
-    "numpy>=1.23.0",
+    "numpy>=1.23.0,<2",
     "scipy>=1.9.0",
     "scikit-learn>=1.1.0",
     "joblib>=1.2.0",
     "python-dateutil>=2.8.0",
-    "lightgbm>=2.3.0",
+    "lightgbm>=3.3.0",
     "xgboost>=1.7.0",
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
