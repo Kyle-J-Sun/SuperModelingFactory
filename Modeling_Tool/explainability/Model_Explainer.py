@@ -126,11 +126,14 @@ class ModelExplainer:
     @staticmethod
     def _resolve_estimator(model):
         """Unwrap the underlying fitted estimator from an SMF wrapper."""
-        # GradientBoostingModel -> model.model_instance.model (raw booster)
-        instance = getattr(model, "model_instance", None)
-        if instance is not None and getattr(instance, "model", None) is not None:
-            return instance.model
-        # LRMaster -> model.model (sklearn LogisticRegression)
+        # GradientBoostingModel keeps the inner LightGBMModel / XGBoostModel at
+        # ._model (older builds expose it as .model_instance); that inner
+        # wrapper's .model is the raw LGBMClassifier / XGBClassifier.
+        for wrapper_attr in ("_model", "model_instance"):
+            wrapper = getattr(model, wrapper_attr, None)
+            if wrapper is not None and getattr(wrapper, "model", None) is not None:
+                return wrapper.model
+        # LRMaster keeps the sklearn LogisticRegression at .model.
         inner = getattr(model, "model", None)
         if inner is not None and (hasattr(inner, "predict") or hasattr(inner, "coef_")):
             return inner
@@ -163,10 +166,13 @@ class ModelExplainer:
         """Infer feature ordering from explicit arg / wrapper / booster."""
         if feature_names is not None:
             return list(feature_names)
-        for attr in ("varlist", "feature_cols", "feature_names"):
+        for attr in ("varlist", "feature_cols", "feature_names", "feature_names_"):
             value = getattr(self.model, attr, None)
-            if value and not callable(value):
-                return list(value)
+            if value is not None and not callable(value):
+                try:
+                    return list(value)
+                except TypeError:
+                    pass
         estimator = self.estimator
         for attr in ("feature_names_in_", "feature_name_"):
             value = getattr(estimator, attr, None)
