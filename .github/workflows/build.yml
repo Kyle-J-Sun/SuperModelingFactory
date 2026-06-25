@@ -2,9 +2,14 @@
 # Build wheels — cross-platform Cython compilation of SuperModelingFactory
 # -----------------------------------------------------------------------------
 # Trigger:
-#   * push to main / a release branch
-#   * git tag matching v*  → wheel set is attached to a GitHub Release
+#   * git tag matching v*  → wheel set is built, attached to a GitHub Release,
+#     and published to PyPI (publish_pypi job below)
+#   * pull_request to main → smoke-test that PRs don't break the build
 #   * workflow_dispatch    → manual rebuild from the Actions tab
+#
+# NOT triggered on push to main: cross-platform wheel builds (esp. Linux
+# manylinux) take 20-40 min and are wasted CI time for documentation /
+# CI-config / test-only commits. Real release verification happens at tag time.
 #
 # Outputs:
 #   * one wheel per (OS × Python) combination, uploaded as build artifacts
@@ -18,7 +23,6 @@ name: Build wheels
 
 on:
   push:
-    branches: [main, release/**]
     tags: ["v*"]
   pull_request:
     branches: [main]
