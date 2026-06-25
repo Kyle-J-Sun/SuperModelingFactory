@@ -51,8 +51,12 @@ classifiers = [
 # package were built against NumPy 1.x C-API. NumPy 2.x changed its ABI
 # (_ARRAY_API), causing AttributeError at import time. Recompile all
 # extensions before removing the upper bound.
+# pandas is pinned <3 because pandas 3.x requires numpy>=2 and refuses to
+# install otherwise, which on Python 3.13 silently mixes pandas 3.x with
+# numpy 1.26 and produces an Access Violation (0xC0000005) at import time.
+# Lift this cap only after the .so/.pyd are rebuilt against the numpy 2.x ABI.
 dependencies = [
-    "pandas>=1.5.0",
+    "pandas>=1.5.0,<3",
     "numpy>=1.23.0,<2",
     "scipy>=1.9.0",
     "scikit-learn>=1.1.0",
