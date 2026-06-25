@@ -56,7 +56,15 @@ def cre_psi_table(woe_grp_df, exp_values, value_name="p"):
     value_df = extract_group_value(woe_grp_df, value_name)
     psi_df = {}
     for g in value_df.columns:
-        psi_df.update({g: [calc_iv(x, y) for x, y in zip(value_df[g], exp_values)]}) # psi计算函数与iv相同
+        components = []
+        for actual, expected in zip(value_df[g], exp_values):
+            pair = pd.DataFrame(
+                {"actual": [actual], "expected": [expected]}
+            )
+            components.append(
+                calc_iv(pair, "actual", "expected").iloc[0]
+            )
+        psi_df.update({g: components}) # psi计算函数与iv相同
     psi_df = pd.DataFrame(psi_df, index=value_df.reset_index()['Bin_Value'])
     psi_df.loc["psi"] = psi_df.apply(sum)
     psi_df.loc[:, "avg_psi"] = psi_df.apply(np.mean, axis=1)
