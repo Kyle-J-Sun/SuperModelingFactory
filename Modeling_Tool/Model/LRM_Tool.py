@@ -24,24 +24,28 @@ def _sanitize_lr_params(params):
 
 def _patch_calibrated_model(cal_model):
     """
-    Backward-compatibility patch for CalibratedClassifierCV.
+    Backward-compatibility patch for pickled calibrated classifiers.
 
     sklearn 1.2 renamed the constructor parameter (and instance attribute)
-    ``base_estimator`` to ``estimator``.  Models serialised with sklearn < 1.2
-    therefore lack the ``estimator`` attribute, causing::
+    ``base_estimator`` to ``estimator``. Models serialised with sklearn <= 1.1
+    may therefore lack the ``estimator`` attribute on both the outer
+    ``CalibratedClassifierCV`` and its fitted ``_CalibratedClassifier``
+    instances, causing::
 
-        AttributeError: 'CalibratedClassifierCV' object has no attribute 'estimator'
+        AttributeError: '_CalibratedClassifier' object has no attribute 'estimator'
 
-    This function transparently adds the missing attribute before any sklearn
-    method that inspects it (predict_proba, predict, check_is_fitted …) is
-    called.  It is a no-op when the attribute already exists or when *cal_model*
-    is not a CalibratedClassifierCV instance.
+    Add the new alias before any calibrated prediction method is called. This
+    is a no-op for models already using the current sklearn attribute layout.
     """
-    from sklearn.calibration import CalibratedClassifierCV
-    if not isinstance(cal_model, CalibratedClassifierCV):
+    if cal_model is None:
         return
+
     if not hasattr(cal_model, 'estimator') and hasattr(cal_model, 'base_estimator'):
         cal_model.estimator = cal_model.base_estimator
+
+    for classifier in getattr(cal_model, 'calibrated_classifiers_', []):
+        if not hasattr(classifier, 'estimator') and hasattr(classifier, 'base_estimator'):
+            classifier.estimator = classifier.base_estimator
 
 
 def lr_model(mdlx, mdly, valx, valy, params_dict):
