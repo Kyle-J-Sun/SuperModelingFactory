@@ -16,7 +16,6 @@
 import os
 import logging
 import pandas as pd
-from ExcelMaster.ExcelMaster import ExcelMaster
 def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt = None, var_dict = None): ...
 
 class WoeReportBuilder:

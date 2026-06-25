@@ -1,7 +1,11 @@
 import os
 import logging
 import pandas as pd
-from ExcelMaster.ExcelMaster import ExcelMaster
+# NOTE: ExcelMaster is an optional internal dependency. The user passes an
+# already-initialized ExcelMaster instance via the `em` parameter, so this
+# module does not need to import the class at module load time. Importing it
+# eagerly here would break public installs (e.g. from PyPI) where the
+# internal ExcelMaster package is not available.
 
 def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=None, var_dict=None):
     import os
