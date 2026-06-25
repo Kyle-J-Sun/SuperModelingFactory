@@ -57,6 +57,17 @@ jobs:
           # CIBW_BUILD comes from pyproject.toml ([tool.cibuildwheel].build).
           # We override here only to make the targets explicit in CI logs.
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          # Skip Python 3.13 on Windows. Reason: our closed-source .so/.pyd
+          # are compiled against the numpy 1.x C-API (numpy<2 is hard-pinned in
+          # pyproject.toml). numpy 1.x has no official cp313 wheel for
+          # Windows, so pip builds numpy from source there — the resulting
+          # numpy 1.26 + Python 3.13 + Windows combination is broken upstream
+          # (RuntimeWarning: invalid value encountered in exp2/log10/nextafter,
+          # followed by Access Violation 0xC0000005 at import time).
+          # macOS/Linux cp313 build fine because manylinux/macOS provide
+          # stable numpy 1.26 cp313 wheels.
+          # Lift this skip after the extensions are rebuilt against numpy>=2.
+          CIBW_SKIP: ${{ matrix.os == 'windows-latest' && 'cp313-*' || '' }}
           CIBW_BUILD_VERBOSITY: "1"
 
       - name: Verify wheels contain no closed-source .py
