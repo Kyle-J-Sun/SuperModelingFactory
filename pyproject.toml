@@ -94,13 +94,25 @@ Source        = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
 # -----------------------------------------------------------------------------
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-*"
-skip  = "*-musllinux_* *-win32 *_i686"
+# musllinux (Alpine) wheels skipped — not enough demand to justify the
+# OpenBLAS-from-source dance. win32 skipped — we only ship 64-bit Windows.
+# i686 is excluded at the arch level (see [tool.cibuildwheel.linux] below).
+skip  = "*-musllinux_* *-win32"
 
 # Before pytest runs inside the wheel container, make sure the wheel itself
 # imports cleanly — this validates that .so files were produced and shipped.
 test-command = "python -c \"import Modeling_Tool, Modeling_Tool.WOE.WOE_Master, Modeling_Tool.Model.LRM_Tool; print('SMF wheel ok:', Modeling_Tool.__name__)\""
 
 [tool.cibuildwheel.linux]
+# Only build for 64-bit Intel/AMD Linux. The default cibuildwheel arch list
+# on Linux is 'auto', which expands to ['x86_64', 'i686'] on x86_64 runners
+# and tries to also build manylinux_i686 wheels. That fails because scipy /
+# pandas no longer publish i686 wheels — pip falls back to a source build
+# which then crashes when OpenBLAS isn't installed in the test container.
+# Note that the [tool.cibuildwheel].skip = "*_i686" filter only suppresses
+# the matching identifiers; cibuildwheel still pulls the i686 image first,
+# so being explicit here is more robust.
+archs = ["x86_64"]
 # manylinux_2_28 is the modern PEP 600 baseline (RHEL/Rocky 8 glibc 2.28).
 # manylinux2014 (CentOS 7, glibc 2.17) is EOL and recent scipy / numpy no
 # longer publish wheels for it, which forces a source build that fails
