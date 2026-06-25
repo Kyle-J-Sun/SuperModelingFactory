@@ -9,11 +9,16 @@
 # NumPy 2.x 修改了 C-API (_ARRAY_API)，会导致 import 时触发
 # AttributeError: _ARRAY_API not found，进而引发整条依赖链崩溃。
 # 待所有扩展模块以 NumPy 2.x 重新编译后，方可移除此上限。
+#
+# NOTE: pandas 上限固定为 <3。
+# pandas 3.x 要求 numpy>=2，但本包 numpy<2，在 Python 3.13 上
+# pip 会静默装出 pandas 3.x + numpy 1.26 的不兼容组合，
+# 导致 import 时 Access Violation (0xC0000005)。
 
 # ---------------------------------------------------------------------------
 # 核心依赖（所有子项目必需）
 # ---------------------------------------------------------------------------
-pandas>=1.5.0
+pandas>=1.5.0,<3
 numpy>=1.23.0,<2
 scipy>=1.9.0
 
