@@ -316,7 +316,8 @@ class ExcelFormat:
             'font_name': 'Calibri',
             'font_size': 11,
             'font_color': '#000000',
-            'bg_color': None,
+            # No 'bg_color' key = no fill. xlsxwriter >= 3.2 rejects None via
+            # Color._from_value(None) -> TypeError, so omit the key entirely.
             'align': 'center',
             'valign': 'vcenter',
             'text_wrap': False,
