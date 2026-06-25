@@ -4,8 +4,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/supermodelingfactory.svg)](https://pypi.org/project/supermodelingfactory/)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue.svg)](LICENSE)
 [![Build wheels](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml/badge.svg)](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml)
+[![Docs](https://img.shields.io/badge/docs-mkdocs-blue.svg)](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)
 
 风控建模工厂 —— 一套面向信用评分卡开发与模型管理的完整 Python 工具链。
+
+📖 **[在线文档](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)** · 安装、快速上手、API 参考、用户指南一应俱全。
 
 ## 安装
 
@@ -39,7 +42,7 @@ brew install libomp
 SuperModelingFactory 整合了信贷风控建模全流程所需的三大能力：
 
 | 子项目 | 功能定位 | 核心能力 |
-|--------|---------|---------|
+|--------|---------|---------| 
 | **[Modeling_Tool](Modeling_Tool/)** | 建模引擎 | 数据分箱、WOE 编码、特征分析、模型训练与评估、样本管理 |
 | **[ExcelMaster](ExcelMaster/)** | 报告引擎 | 程序化 Excel 工作簿生成，支持图表、条件格式、光标流式写入 |
 | **[Report](Report/)** | 报告模板 | 模型性能报告、WOE 图批量导出、多模型对比报告 |
