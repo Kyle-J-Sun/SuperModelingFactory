@@ -75,16 +75,19 @@ from .Feature import (
 )
 
 # ---------------------------------------------------------------------------
-# Lazy attribute access for heavy optional modules (Model, ODPSRunner).
+# Lazy attribute access for heavy optional modules (Model, ODPSRunner,
+# explainability.ModelExplainer).
 #
 # Motivation: GBM_Tool.py (inside Model) imports lightgbm at the top level.
 # lightgbm/compat.py in turn attempts `from dask.array import ...`, and old
 # dask versions (<2022) reference `np.float` which was removed in NumPy 1.20+,
 # causing `AttributeError: module 'numpy' has no attribute 'float'` whenever
 # anyone does `from Modeling_Tool.Core import *` — even if they never use GBM.
+# ModelExplainer is deferred for the same reason: it pulls in the optional
+# `shap` dependency only when actually used.
 #
-# Solution: defer the entire Model sub-package import to the first attribute
-# access, matching the pattern already used for ODPSRunner.
+# Solution: defer these imports to the first attribute access, matching the
+# pattern already used for ODPSRunner.
 # ---------------------------------------------------------------------------
 
 _MODEL_EXPORTS = frozenset({
@@ -98,10 +101,17 @@ _MODEL_EXPORTS = frozenset({
     'BackwardVariableEliminator',
 })
 
+_EXPLAIN_EXPORTS = frozenset({
+    'ModelExplainer',
+})
+
 def __getattr__(name):
     if name in _MODEL_EXPORTS:
         from . import Model as _Model
         return getattr(_Model, name)
+    if name in _EXPLAIN_EXPORTS:
+        from . import explainability as _explain
+        return getattr(_explain, name)
     if name == "ODPSRunner":
         from .Core import ODPSRunner
         return ODPSRunner
@@ -138,6 +148,9 @@ __all__ = [
     'LRMaster',
     'FeatureSelectionAnalyzer',
     'BackwardVariableEliminator',
+
+    # Explainability (lazy — requires `pip install supermodelingfactory[explain]`)
+    'ModelExplainer',
 
     # Eval
     'cross_risk',
