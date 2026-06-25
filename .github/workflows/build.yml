@@ -26,6 +26,22 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+    # Only run wheel builds for PRs that touch build-relevant files.
+    # Pure-Python edits (e.g. ExcelMaster/*.py, README, tests) don't need
+    # a 30-min cross-platform wheel verification.
+    paths:
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'requirements.txt'
+      - '.github/workflows/build.yml'
+      - 'Makefile'
+      - 'gen_stubs.py'
+      - 'scripts/**'
+      - 'Modeling_Tool/**/*.pyx'
+      - 'Modeling_Tool/**/*.pxd'
+      - 'Modeling_Tool/**/*.c'
+      - 'Modeling_Tool/**/*.h'
   workflow_dispatch:
 
 concurrency:
