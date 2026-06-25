@@ -6,33 +6,24 @@ using various algorithms including LightGBM and XGBoost.
 
 Classes
 -------
-BaseModel : Abstract base class for all models.
-LGBMModel : LightGBM model wrapper.
-XGBModel : XGBoost model wrapper.
+LRMaster : Logistic Regression master wrapper.
+GradientBoostingModel : LightGBM / XGBoost model wrapper.
+BackwardEliminationAnalyzer : Backward variable elimination.
 
 Examples
 --------
->>> from Modeling_Tool_refactored.model import LGBMModel
->>> model = LGBMModel()
->>> model.fit(X_train, y_train)
->>> predictions = model.predict(X_test)
+>>> from Modeling_Tool.Model import LRMaster
+>>> model = LRMaster(params={'C': 1.0})
+>>> model.fit(train_df, varlist, 'target')
+>>> predictions = model.predict(test_df)
 """
-
-# from .base_models import BaseModel, ModelFactory
-# from .lgb_models import LGBMModel
-# from .xgb_models import XGBModel
 
 from .LRM_Tool import (
     lr_model,
     lr_varimp,
     get_lr_statsmodel_summary,
-    get_lr_sklearn_model_summary,
-    visualise_pvalue,
-    calculate_aic_bic,
-    calculate_feature_importance,
-    get_lr_varimp_summary,
-    reorder_by_correlation,
-    lr_stepwise_var_selection,
+    compute_aic,
+    compute_bic,
     LRMaster,
     FeatureSelectionAnalyzer,
 )
@@ -60,10 +51,7 @@ from .Backward_Tool import (
 __all__ = [
     # LRM_Tool - Functions
     'lr_model', 'lr_varimp', 'get_lr_statsmodel_summary',
-    'get_lr_sklearn_model_summary', 'visualise_pvalue',
-    'calculate_aic_bic', 'calculate_feature_importance',
-    'get_lr_varimp_summary', 'reorder_by_correlation',
-    'lr_stepwise_var_selection',
+    'compute_aic', 'compute_bic',
 
     # LRM_Tool - Classes
     'LRMaster', 'FeatureSelectionAnalyzer',
