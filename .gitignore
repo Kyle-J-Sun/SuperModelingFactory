@@ -169,3 +169,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Backup folders (any 'backup' directory anywhere in the tree)
+backup/
