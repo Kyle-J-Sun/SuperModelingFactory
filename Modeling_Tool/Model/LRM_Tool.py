@@ -368,6 +368,7 @@ class LRMaster:
     - Statistical summary generation
     - Stepwise variable selection
     - AIC/BIC calculation
+    - Optional feature standardization (off by default)
 
     Parameters
     ----------
@@ -384,6 +385,10 @@ class LRMaster:
         List of feature names
     tgt_name : str
         Target variable name
+    standardize : bool
+        Whether feature standardization is enabled
+    standardizer : sklearn-like scaler or None
+        Fitted scaler (None until fit() runs with standardize=True)
 
     Examples
     --------
@@ -391,9 +396,15 @@ class LRMaster:
     >>> lr.fit(train_df, ['age', 'income'], 'target')
     >>> predictions = lr.predict(test_df)
     >>> importance = lr.get_variable_importance()
+
+    >>> # With standardization (defaults to StandardScaler)
+    >>> lr = LRMaster(params={'C': 1.0}, standardize=True)
+    >>> lr.fit(train_df, ['age', 'income'], 'target')
+    >>> proba = lr.predict_proba(test_df)  # test_df is scaled with the fitted scaler
     """
 
-    def __init__(self, params=None, model=None, varlist=None, tgt_name=None):
+    def __init__(self, params=None, model=None, varlist=None, tgt_name=None,
+                 standardize=False, scaler=None):
         """
         Initialize LRMaster instance.
 
@@ -409,6 +420,16 @@ class LRMaster:
         tgt_name : str, optional
             Target variable name. Useful when wrapping an existing fitted model and later
             calling summary/evaluation methods.
+        standardize : bool, default False
+            If True, fit a scaler on the training features during `fit` /
+            `stepwise_selection` and apply it consistently in every prediction /
+            evaluation entry point. Default False keeps the original behavior
+            (no standardization) for full backward compatibility.
+        scaler : sklearn-like transformer, optional
+            Custom scaler prototype to use when `standardize=True` (e.g.
+            `MinMaxScaler()`). The prototype is cloned before fitting, so the
+            passed instance is never mutated. Defaults to `StandardScaler` when
+            not provided.
         """
         self.params = _sanitize_lr_params(params)
         self.model = model
@@ -416,7 +437,55 @@ class LRMaster:
         self.varlist = varlist
         self.tgt_name = tgt_name
         self._data = None
+        self.standardize = standardize
+        # Unfitted prototype used to derive the fitted scaler during fit().
+        self._scaler_proto = scaler
+        # Fitted scaler; stays None until fit()/stepwise runs with standardize=True.
         self.standardizer = None
+
+    def _make_scaler(self):
+        """
+        Return a fresh, unfitted scaler instance for standardization.
+
+        Uses the user-provided `scaler` prototype when given (cloned so the
+        original stays unfitted); otherwise defaults to `StandardScaler`.
+        """
+        from sklearn.preprocessing import StandardScaler
+        if self._scaler_proto is not None:
+            from sklearn.base import clone as _sk_clone
+            return _sk_clone(self._scaler_proto)
+        return StandardScaler()
+
+    def _fit_standardizer(self, x):
+        """
+        Fit a scaler on `x` and store it as `self.standardizer`.
+
+        Returns the standardized `x` (a DataFrame when `x` is one). When
+        `self.standardize` is False this is a no-op that clears any scaler and
+        returns `x` unchanged.
+        """
+        if not self.standardize:
+            self.standardizer = None
+            return x
+        scaler = self._make_scaler()
+        scaler.fit(x)
+        self.standardizer = scaler
+        return self._apply_standardizer(x)
+
+    def _apply_standardizer(self, x):
+        """
+        Apply the fitted standardizer to `x`, preserving DataFrame layout.
+
+        No-op when no fitted standardizer is present (e.g. `standardize=False`
+        or when wrapping an externally fitted model), so existing behavior is
+        unchanged unless standardization was explicitly enabled and fitted.
+        """
+        if self.standardizer is None:
+            return x
+        values = self.standardizer.transform(x)
+        if hasattr(x, 'columns'):
+            return pd.DataFrame(values, columns=x.columns, index=x.index)
+        return values
 
     def set_data(self, data):
         """
@@ -437,6 +506,10 @@ class LRMaster:
     def fit(self, data, varlist, tgt_name, val_data=None, val_varlist=None, val_tgt_name=None):
         """
         Train the logistic regression model.
+
+        When `standardize=True`, a scaler is fitted on the training features and
+        stored as `self.standardizer`; the model is then trained on the scaled
+        features. The same scaler is reused at prediction / evaluation time.
 
         Parameters
         ----------
@@ -461,10 +534,18 @@ class LRMaster:
         self.tgt_name = tgt_name
         self._data = data
 
+        train_x = data[varlist]
+        if self.standardize:
+            train_x = self._fit_standardizer(train_x)
+        else:
+            self.standardizer = None
+
         val_x = val_data[val_varlist] if val_data is not None and val_varlist is not None else None
         val_y = val_data[val_tgt_name] if val_data is not None and val_tgt_name is not None else None
-            
-        self.model = lr_model(data[varlist], data[tgt_name], val_x, val_y, self.params)
+        if val_x is not None:
+            val_x = self._apply_standardizer(val_x)
+
+        self.model = lr_model(train_x, data[tgt_name], val_x, val_y, self.params)
         return self
     
     def calibrate_model(self, model = None, train_df = None, method='sigmoid', cv=5):
@@ -500,12 +581,16 @@ class LRMaster:
                 "Please pass a fitted LR model object or use cv=5 to refit during calibration."
             )
 
+        # Standardize calibration features with the fitted scaler so the
+        # calibrated model operates in the same feature space as self.model.
+        cal_x = self._apply_standardizer(train_df[varlist])
+
         # sklearn 1.2+ renamed base_estimator -> estimator; support both
         try:
             calibrated_model = CalibratedClassifierCV(estimator=model, method=method, cv=cv)
         except TypeError:
             calibrated_model = CalibratedClassifierCV(base_estimator=model, method=method, cv=cv)
-        calibrated_model.fit(train_df[varlist], train_df[self.tgt_name])
+        calibrated_model.fit(cal_x, train_df[self.tgt_name])
         
         self.calibrated_model = calibrated_model
         
@@ -546,6 +631,9 @@ class LRMaster:
         """
         Predict using the trained model.
 
+        When standardization is enabled, the input features are scaled with the
+        scaler fitted during `fit` before being passed to the model.
+
         Parameters
         ----------
         data : pandas.DataFrame
@@ -560,16 +648,21 @@ class LRMaster:
         """
         if varlist is None:
             varlist = self.varlist
-        
+
+        x = self._apply_standardizer(data[varlist])
+
         if calibrated_model:
             _patch_calibrated_model(self.calibrated_model)
-            return self.calibrated_model.predict(data[varlist])
+            return self.calibrated_model.predict(x)
             
-        return self.model.predict(data[varlist])
+        return self.model.predict(x)
 
     def predict_proba(self, data, varlist=None, calibrated_model = False):
         """
         Predict class probabilities.
+
+        When standardization is enabled, the input features are scaled with the
+        scaler fitted during `fit` before being passed to the model.
 
         Parameters
         ----------
@@ -585,12 +678,14 @@ class LRMaster:
         """
         if varlist is None:
             varlist = self.varlist
-            
+
+        x = self._apply_standardizer(data[varlist])
+
         if calibrated_model:
             _patch_calibrated_model(self.calibrated_model)
-            return self.calibrated_model.predict_proba(data[varlist])
+            return self.calibrated_model.predict_proba(x)
             
-        return self.model.predict_proba(data[varlist])
+        return self.model.predict_proba(x)
 
     def get_variable_importance(self):
         """
@@ -601,6 +696,12 @@ class LRMaster:
         pandas.DataFrame
             DataFrame with columns ['varlist', 'coef', 'importance'] sorted by
             importance in descending order
+
+        Notes
+        -----
+        When standardization is enabled the coefficients are expressed in the
+        standardized feature space (i.e. they are directly comparable in
+        magnitude across features).
         """
         return lr_varimp(self.model)
 
@@ -621,6 +722,11 @@ class LRMaster:
         -------
         pandas.DataFrame
             Summary table with coefficients, standard errors, z-scores and p-values
+
+        Notes
+        -----
+        When standardization is enabled the summary is computed on the
+        standardized feature space, consistent with how the model was trained.
         """
         if data is None:
             data = self._data
@@ -631,7 +737,7 @@ class LRMaster:
 
         return get_lr_statsmodel_summary(
             self.model,
-            data[varlist],
+            self._apply_standardizer(data[varlist]),
             data[tgt_name],
             feature_names=varlist
         )
@@ -656,7 +762,7 @@ class LRMaster:
             varlist = self.varlist
         if tgt_name is None:
             tgt_name = self.tgt_name
-        return compute_aic(self.model, data[varlist], data[tgt_name])
+        return compute_aic(self.model, self._apply_standardizer(data[varlist]), data[tgt_name])
 
     def get_bic(self, data=None, varlist=None, tgt_name=None):
         """
@@ -678,7 +784,7 @@ class LRMaster:
             varlist = self.varlist
         if tgt_name is None:
             tgt_name = self.tgt_name
-        return compute_bic(self.model, data[varlist], data[tgt_name])
+        return compute_bic(self.model, self._apply_standardizer(data[varlist]), data[tgt_name])
 
     def stepwise_selection(
         self,
@@ -694,6 +800,10 @@ class LRMaster:
         Perform stepwise variable selection.
 
         Iteratively adds or removes features based on AIC/BIC improvement.
+
+        When `standardize=True`, all interim fits and the final model are
+        trained on standardized features, and the fitted scaler for the selected
+        columns is stored on the instance for later prediction.
 
         Parameters
         ----------
@@ -722,15 +832,28 @@ class LRMaster:
         else:
             score_fn = compute_bic
 
+        # When standardizing, operate on a once-standardized feature frame.
+        # Column-wise scalers (StandardScaler / MinMaxScaler) make slicing a
+        # subset of columns equivalent to standardizing that subset.
+        if self.standardize:
+            interim_scaler = self._make_scaler()
+            interim_scaler.fit(data[varlist])
+            work = pd.DataFrame(
+                interim_scaler.transform(data[varlist]),
+                columns=list(varlist), index=data.index,
+            )
+        else:
+            work = data
+
         current_vars = list(varlist) if direction != 'forward' else []
         remaining_vars = list(varlist) if direction == 'forward' else []
 
         best_model = lr_model(
-            data[current_vars] if current_vars else pd.DataFrame(index=data.index),
+            work[current_vars] if current_vars else pd.DataFrame(index=data.index),
             data[tgt_name], None, None, self.params
         ) if current_vars else None
 
-        best_score = score_fn(best_model, data[current_vars], data[tgt_name]) if best_model else float('inf')
+        best_score = score_fn(best_model, work[current_vars], data[tgt_name]) if best_model else float('inf')
 
         for iteration in range(max_iter):
             improved = False
@@ -741,8 +864,8 @@ class LRMaster:
                 for var in remaining_vars:
                     trial_vars = current_vars + [var]
                     try:
-                        model = lr_model(data[trial_vars], data[tgt_name], None, None, self.params)
-                        scores[var] = score_fn(model, data[trial_vars], data[tgt_name])
+                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params)
+                        scores[var] = score_fn(model, work[trial_vars], data[tgt_name])
                     except Exception:
                         continue
                 if scores:
@@ -761,8 +884,8 @@ class LRMaster:
                 for var in current_vars:
                     trial_vars = [v for v in current_vars if v != var]
                     try:
-                        model = lr_model(data[trial_vars], data[tgt_name], None, None, self.params)
-                        scores[var] = score_fn(model, data[trial_vars], data[tgt_name])
+                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params)
+                        scores[var] = score_fn(model, work[trial_vars], data[tgt_name])
                     except Exception:
                         continue
                 if scores:
@@ -784,16 +907,34 @@ class LRMaster:
 
         self.varlist = current_vars
         self.tgt_name = tgt_name
-        self.model = lr_model(data[current_vars], data[tgt_name], None, None, self.params)
+        self._data = data
+
+        if self.standardize:
+            self.standardizer = self._make_scaler()
+            self.standardizer.fit(data[current_vars])
+            final_x = self._apply_standardizer(data[current_vars])
+        else:
+            self.standardizer = None
+            final_x = data[current_vars]
+
+        self.model = lr_model(final_x, data[tgt_name], None, None, self.params)
         return current_vars
 
     def clone(self):
         """
         Create a copy of this LRMaster with the same parameters.
 
+        The standardization configuration (`standardize` flag and scaler
+        prototype) is carried over, but no fitted model or fitted scaler is
+        copied.
+
         Returns
         -------
         LRMaster
-            New instance with same params but no fitted model
+            New instance with same params/standardization config but no fitted model
         """
-        return LRMaster(params=dict(self.params))
+        return LRMaster(
+            params=dict(self.params),
+            standardize=self.standardize,
+            scaler=self._scaler_proto,
+        )
