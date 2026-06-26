@@ -90,6 +90,53 @@ def _apply_excel_font(em, font_name: str) -> None:
         fmt.font_name = font_name
 
 
+_EXCEL_SHEET_MAX_LEN = 31
+_EXCEL_SHEET_INVALID_CHARS = str.maketrans({
+    "[": "(",
+    "]": ")",
+    ":": "-",
+    "*": "_",
+    "?": "_",
+    "/": "_",
+    "\\": "_",
+})
+
+
+def _sanitize_excel_sheet_name(name: str) -> str:
+    """Return a xlsxwriter-compatible worksheet name before de-duplication."""
+    sheet_name = str(name).translate(_EXCEL_SHEET_INVALID_CHARS).strip()
+    sheet_name = sheet_name.strip("'")
+    return sheet_name or "Sheet"
+
+
+def _make_unique_excel_sheet_name(raw_name: str, used_sheet_names: set[str]) -> str:
+    """Create a valid, case-insensitively unique Excel worksheet name.
+
+    Excel worksheet names are limited to 31 characters and xlsxwriter treats
+    duplicate names case-insensitively.  UAT feature sheet names are generated
+    from raw feature names, so two long names can collide after truncation.
+    This helper truncates only after reserving room for a deterministic suffix.
+    ``used_sheet_names`` stores lower-cased names and is updated in-place.
+    """
+    base_name = _sanitize_excel_sheet_name(raw_name)
+    candidate = base_name[:_EXCEL_SHEET_MAX_LEN].strip("'") or "Sheet"
+
+    if candidate.lower() not in used_sheet_names:
+        used_sheet_names.add(candidate.lower())
+        return candidate
+
+    counter = 2
+    while True:
+        suffix = f"_{counter:02d}" if counter < 100 else f"_{counter}"
+        max_base_len = _EXCEL_SHEET_MAX_LEN - len(suffix)
+        stem = base_name[:max_base_len].strip("'") or "Sheet"[:max_base_len]
+        candidate = f"{stem}{suffix}"
+        if candidate.lower() not in used_sheet_names:
+            used_sheet_names.add(candidate.lower())
+            return candidate
+        counter += 1
+
+
 def safe_eq(a: pd.Series, b: pd.Series) -> pd.Series:
     """Return a == b after coercing both to numeric (errors → NaN)."""
     return pd.to_numeric(a, errors="coerce") == pd.to_numeric(b, errors="coerce")
@@ -822,13 +869,20 @@ class UATConsistencyChecker:
         TOL_FEAT  = self.cfg.tol_feat
         df_both   = self.df_both   # 一致性对比基准（load_data 中已派生，与 §3/§5/§6/§9 同口径）
         info_cols = [c for c in self._info_cols if c in df_both.columns]
+        used_sheet_names: set[str] = set()
+
+        def _reserve_sheet_name(raw_name: str) -> str:
+            return _make_unique_excel_sheet_name(raw_name, used_sheet_names)
+
+        def _add_worksheet(raw_name: str, **kwargs):
+            return em.add_worksheet(_reserve_sheet_name(raw_name), **kwargs)
 
         def _sel(*value_cols):
             """逐 flow_id 明细表取列：flow_id + info_list 字段 + 业务列（去重保序）。"""
             return list(dict.fromkeys(["flow_id"] + info_cols + list(value_cols)))
 
         # ── Sheet 1: Executive Summary ─────────────────────────────────────
-        ws0 = em.add_worksheet("Executive Summary", zoom_perc=90)
+        ws0 = _add_worksheet("Executive Summary", zoom_perc=90)
         em.merge_col(ws0, ncols=4,
                      text="Online-Offline Consistency Check — Executive Summary",
                      cformat="BLUE_H4")
@@ -910,7 +964,7 @@ class UATConsistencyChecker:
         logger.info("  ✅ Executive Summary")
 
         # ── Sheet 2: Main Score Mismatch ───────────────────────────────────
-        ws1 = em.add_worksheet("Main Score Mismatch", zoom_perc=90)
+        ws1 = _add_worksheet("Main Score Mismatch", zoom_perc=90)
         em.merge_col(ws1, ncols=6, text="Main Model Score Mismatch — Detail", cformat="BLUE_H4")
 
         if self.offline_score_col and self.online_score_col:
@@ -933,7 +987,7 @@ class UATConsistencyChecker:
         logger.info("  ✅ Main Score Mismatch")
 
         # ── Sheet 3: Submodel Score Detail ─────────────────────────────────
-        ws2 = em.add_worksheet("Submodel Score Detail", zoom_perc=90)
+        ws2 = _add_worksheet("Submodel Score Detail", zoom_perc=90)
         em.merge_col(ws2, ncols=6,
                      text="Submodel Score Mismatch — Per Submodel Detail", cformat="BLUE_H4")
 
@@ -964,15 +1018,31 @@ class UATConsistencyChecker:
 
         # ── Sheet 4: Feature Mismatch Summary ──────────────────────────────
         if self.diff_summary is not None:
-            ws3 = em.add_worksheet("Feature Mismatch Summary", zoom_perc=90)
-            em.merge_col(ws3, ncols=5,
+            ws3 = _add_worksheet("Feature Mismatch Summary", zoom_perc=90)
+            em.merge_col(ws3, ncols=6,
                          text="Feature Variable Mismatch — Full Summary", cformat="BLUE_H4")
 
             feat_bad = self.diff_summary[self.diff_summary["n_mismatch"] > 0].sort_values(
                 "n_mismatch", ascending=False
             )
+            top10_feats = feat_bad["feature"].tolist()[:10]
+            feature_detail_sheets: Dict[str, str] = {}
+            for feat in top10_feats:
+                on_col = feat + "_online"
+                if on_col not in df_both.columns:
+                    continue
+                mask = mismatch_mask(df_both[on_col], df_both[feat], TOL_FEAT)
+                if mask.sum() == 0:
+                    continue
+                feature_detail_sheets[feat] = _reserve_sheet_name(f"Feat_{feat}")
+
+            feat_bad_report = feat_bad.copy()
+            if len(feat_bad_report) > 0:
+                feat_bad_report["detail_sheet"] = (
+                    feat_bad_report["feature"].map(feature_detail_sheets).fillna("")
+                )
             em.write_dataframe(
-                ws3, feat_bad,
+                ws3, feat_bad_report,
                 title=f"All Features with Mismatches (TOL={TOL_FEAT}, n={len(feat_bad)})",
                 index=False,
             )
@@ -984,7 +1054,6 @@ class UATConsistencyChecker:
             logger.info("  ✅ Feature Mismatch Summary")
 
             # ── Sheets 5-N: Per-Feature Detail (Top 10) ──────────────────
-            top10_feats = feat_bad["feature"].tolist()[:10]
             for feat in top10_feats:
                 on_col = feat + "_online"
                 if on_col not in df_both.columns:
@@ -993,11 +1062,7 @@ class UATConsistencyChecker:
                 mask = mismatch_mask(df_both[on_col], df_both[feat], TOL_FEAT)
                 if mask.sum() == 0:
                     continue
-                sname = (
-                    f"Feat_{feat}"[:31]
-                    .replace("[", "(").replace("]", ")").replace(":", "-")
-                    .replace("*", "_").replace("?", "_").replace("/", "_").replace("\\", "_")
-                )
+                sname = feature_detail_sheets[feat]
                 ws_f = em.add_worksheet(sname, zoom_perc=90)
                 fd_det = df_both.loc[mask, _sel(feat, on_col)].copy()
                 fd_det["diff (online - offline)"] = fd[mask]
@@ -1011,7 +1076,7 @@ class UATConsistencyChecker:
 
         # ── Sheet: Time Field Consistency ──────────────────────────────────
         if self.time_summary is not None and len(self.time_summary) > 0:
-            ws_t = em.add_worksheet("Time Field Consistency", zoom_perc=90)
+            ws_t = _add_worksheet("Time Field Consistency", zoom_perc=90)
             em.merge_col(ws_t, ncols=6,
                          text=f"Time Field Consistency (tol={self.cfg.tol_time_seconds:.0f}s)",
                          cformat="BLUE_H4")
@@ -1037,7 +1102,7 @@ class UATConsistencyChecker:
 
         # ── Sheet: Per Flow-ID Report ───────────────────────────────────────
         if self.per_flow_df is not None:
-            ws_flow = em.add_worksheet("Per Flow-ID Report", zoom_perc=90)
+            ws_flow = _add_worksheet("Per Flow-ID Report", zoom_perc=90)
             em.merge_col(ws_flow, ncols=5, text="Per Flow-ID Consistency Report", cformat="BLUE_H4")
 
             issues = self.per_flow_df[self.per_flow_df["n_feature_mismatch"] > 0].sort_values(
