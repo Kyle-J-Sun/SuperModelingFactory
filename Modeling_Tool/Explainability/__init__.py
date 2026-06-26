@@ -11,7 +11,7 @@ raw fitted estimators.
 
 Examples
 --------
->>> from Modeling_Tool.explainability import ModelExplainer
+>>> from Modeling_Tool.Explainability import ModelExplainer
 >>> exp = ModelExplainer(gbm)
 >>> exp.feature_importance(test_X).head()
 """
