@@ -28,6 +28,43 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _import_excel_master():
+    """Import the bundled ExcelMaster class with a source-tree fallback."""
+    try:
+        from ExcelMaster.ExcelMaster import ExcelMaster
+        return ExcelMaster
+    except ModuleNotFoundError as exc:
+        if exc.name and not exc.name.startswith("ExcelMaster"):
+            raise
+
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        excelmaster_dir = os.path.join(project_root, "ExcelMaster")
+
+        if os.path.isdir(excelmaster_dir):
+            import sys as _sys
+
+            if project_root not in _sys.path:
+                _sys.path.insert(0, project_root)
+            try:
+                from ExcelMaster.ExcelMaster import ExcelMaster
+                return ExcelMaster
+            except ModuleNotFoundError as fallback_exc:
+                if (
+                    fallback_exc.name
+                    and not fallback_exc.name.startswith("ExcelMaster")
+                ):
+                    raise
+
+        raise ImportError(
+            "ExcelMaster could not be imported. This usually means the "
+            "installed SuperModelingFactory package was built without the "
+            "bundled ExcelMaster package. Reinstall/upgrade to a build that "
+            "includes SuperModelingFactory/ExcelMaster/."
+        ) from exc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 数值比较工具函数
 # ─────────────────────────────────────────────────────────────────────────────
@@ -772,17 +809,7 @@ class UATConsistencyChecker:
         5-N. Feat_<name>          — Top 10 不一致特征的逐 flow_id 明细
         N+1. Per Flow-ID Report   — 按 flow_id 汇总的问题报告
         """
-        try:
-            import sys as _sys
-            _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-            if _root not in _sys.path:
-                _sys.path.insert(0, _root)
-            from ExcelMaster.ExcelMaster import ExcelMaster
-        except ImportError as exc:
-            raise ImportError(
-                "ExcelMaster not found. Expected at SuperModelingFactory/ExcelMaster/. "
-                f"Tried adding '{_root}' to sys.path — verify the directory exists."
-            ) from exc
+        ExcelMaster = _import_excel_master()
 
         logger.info("=" * 60)
         logger.info("§10  Excel 报告输出 → %s", self.cfg.excel_output_path)
