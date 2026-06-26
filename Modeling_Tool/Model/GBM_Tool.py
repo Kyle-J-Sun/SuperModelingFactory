@@ -71,6 +71,56 @@ def _get_xgb():
     except ImportError:
         raise ImportError("xgboost is required. Install with: pip install xgboost>=1.7.0")
 
+
+def _coerce_feature_names(feature_names):
+    """Normalize estimator feature-name metadata to a non-empty list."""
+    if feature_names is None:
+        return None
+    try:
+        names = list(feature_names)
+    except TypeError:
+        return None
+    return names or None
+
+
+def _extract_estimator_feature_names(estimator):
+    """Extract feature names across sklearn / LightGBM / XGBoost versions."""
+    for attr in ("feature_names_in_", "feature_name_", "feature_names_"):
+        names = _coerce_feature_names(getattr(estimator, attr, None))
+        if names is not None:
+            return names
+
+    booster = getattr(estimator, "booster_", None)
+    feature_name = getattr(booster, "feature_name", None)
+    if callable(feature_name):
+        names = _coerce_feature_names(feature_name())
+        if names is not None:
+            return names
+
+    get_booster = getattr(estimator, "get_booster", None)
+    if callable(get_booster):
+        try:
+            booster = get_booster()
+        except Exception:
+            booster = None
+        names = _coerce_feature_names(getattr(booster, "feature_names", None))
+        if names is not None:
+            return names
+
+    return None
+
+
+def _ensure_feature_names_in(estimator, feature_names):
+    """Backfill sklearn-style feature_names_in_ on legacy estimators if possible."""
+    if feature_names is None or hasattr(estimator, "feature_names_in_"):
+        return
+    try:
+        estimator.feature_names_in_ = np.asarray(feature_names, dtype=object)
+    except Exception:
+        # Some third-party estimators expose read-only / slot-backed metadata.
+        # __getattr__ on the wrapper still provides a compatible fallback.
+        pass
+
 # ============================================================================
 # 工具函数（保持独立）
 # ============================================================================
@@ -903,9 +953,10 @@ class GradientBoostingModel:
             params = estimator.get_params() if hasattr(estimator, 'get_params') else {}
         obj = cls(mt, params)
         obj._model.model = estimator
-        feat = getattr(estimator, 'feature_names_in_', None)
+        feat = _extract_estimator_feature_names(estimator)
         if feat is not None:
-            obj._model.feature_names_ = list(feat)
+            obj._model.feature_names_ = feat
+            _ensure_feature_names_in(estimator, feat)
         return obj
 
     def __getattr__(self, name):
@@ -922,6 +973,12 @@ class GradientBoostingModel:
         inner = getattr(model, 'model', None) if model is not None else None
         if inner is not None and hasattr(inner, name):
             return getattr(inner, name)
+        if name == 'feature_names_in_' and model is not None:
+            feat = getattr(model, 'feature_names_', None)
+            if feat is None and inner is not None:
+                feat = _extract_estimator_feature_names(inner)
+            if feat is not None:
+                return np.asarray(feat, dtype=object)
         raise AttributeError(name)
 
     @staticmethod
