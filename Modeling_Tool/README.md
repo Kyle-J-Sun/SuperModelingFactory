@@ -6,7 +6,7 @@
 
 `Modeling_Tool` 提供信用评分卡开发和机器学习建模的全流程能力，涵盖数据分箱、WOE 编码、特征工程、模型训练、性能评估和样本管理。
 
-- **Version**: 1.0.0
+- **Version**: 0.1.3
 - **Author**: Jingkai Sun
 
 ## 架构
