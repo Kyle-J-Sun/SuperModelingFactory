@@ -169,7 +169,7 @@ em.close_workbook()
            ▼         ▼   ▼       ▼         ▼
          WOE      Model  Eval  Feature   Sample
            │         │              │        │
-           └─────────┴──────────────┴────────┘
+           └─────────┴──────────────┴────────
                 (均单向依赖 Core，模块间延迟导入)
 ```
 
@@ -205,7 +205,7 @@ em.close_workbook()
 
 ## 版本
 
-- **Version**: 1.0.0
+- **Version**: 0.1.3
 - **Author**: Jingkai Sun
 
 ## 许可证
