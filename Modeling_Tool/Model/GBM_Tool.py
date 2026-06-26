@@ -48,6 +48,7 @@ Examples
 """
 
 import pandas as pd
+import numpy as np
 from Modeling_Tool.Core.utils import load_model, save_model
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import brier_score_loss, roc_auc_score
@@ -628,7 +629,7 @@ class XGBoostModel:
         self.model = model
         self.feature_names_ = None
 
-    def fit(self, x, y, valx, valy, sample_weight=None, sample_weight_eval_set=None):
+    def fit(self, x, y, valx, valy, sample_weight=None, sample_weight_eval_set=None, base_margin=None):
         """训练XGBoost模型。
 
         Parameters
@@ -645,6 +646,8 @@ class XGBoostModel:
             样本权重
         sample_weight_eval_set : list, optional
             验证集样本权重列表
+        base_margin : array-like, optional
+            基础边际（init_score / log-odds 偏移），用于增量训练（warm-start）。
 
         Returns
         -------
@@ -654,7 +657,8 @@ class XGBoostModel:
             x=x, y=y, valx=valx, valy=valy,
             params_dict=self.params,
             sample_weight=sample_weight,
-            sample_weight_eval_set=sample_weight_eval_set
+            sample_weight_eval_set=sample_weight_eval_set,
+            base_margin=base_margin
         )
         if hasattr(x, 'columns'):
             self.feature_names_ = list(x.columns)
@@ -806,6 +810,13 @@ class GradientBoostingModel:
     >>> model = GradientBoostingModel('lgb', params)
     >>> model.fit(x_train, y_train, x_val, y_val)
     >>> preds = model.predict(x_test)
+
+    # 增量学习（warm-start）
+    >>> base_margin = init_model.get_base_margin(x_train)
+    >>> new_model = GradientBoostingModel('xgb', params)
+    >>> new_model.fit(x_train, y_train, x_val, y_val, init_score=base_margin)
+    >>> proba = new_model.predict_with_base_margin(
+    ...     x_score, init_model.get_base_margin(x_score))
     """
 
     def __init__(self, model_type, params):
@@ -833,24 +844,112 @@ class GradientBoostingModel:
         else:
             self._model = XGBoostModel(params)
 
-    def fit(self, x, y, valx, valy, **kwargs):
-        """训练模型。
+    @staticmethod
+    def _sigmoid(z):
+        """数值稳定的 Sigmoid（log-odds → 概率）。"""
+        z = np.clip(np.asarray(z, dtype=float), -709, 709)
+        return 1.0 / (1.0 + np.exp(-z))
+
+    def fit(self, x, y, valx, valy, init_score=None, **kwargs):
+        """训练模型（支持增量学习 warm-start）。
+
+        当传入 ``init_score`` 时，以其作为 log-odds 偏移在新数据上继续训练：
+        LightGBM 走 ``init_score``，XGBoost 走 ``base_margin``（两者语义一致，
+        本方法统一对外暴露为 ``init_score``）。
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
+            训练集特征
         y : array-like
+            训练集标签
         valx : array-like or pd.DataFrame
+            验证集特征
         valy : array-like
+            验证集标签
+        init_score : array-like, optional
+            初始 log-odds 偏移（增量学习起点）。一般由基准模型的
+            :meth:`get_base_margin` 产生。``None`` 时即普通从头训练。
         **kwargs
-            额外参数，传递给底层模型
+            其余参数透传给底层模型（如 lgb 的 ``wgt``、xgb 的
+            ``sample_weight`` / ``sample_weight_eval_set``）。
 
         Returns
         -------
         self
+
+        Notes
+        -----
+        与既有生产流程一致，偏移仅作用于训练集；验证集未注入偏移，因此早停
+        的 eval 指标是在“未加偏移”的空间上评估的。如需严格一致，可后续透传
+        lgb 的 ``eval_init_score`` / xgb 的 ``base_margin_eval_set``。
         """
-        self._model.fit(x, y, valx, valy, **kwargs)
+        if self.model_type == 'lgb':
+            self._model.fit(x, y, valx, valy, init_score=init_score, **kwargs)
+        else:
+            self._model.fit(x, y, valx, valy, base_margin=init_score, **kwargs)
         return self
+
+    def get_base_margin(self, x):
+        """返回本模型对 ``x`` 的原始 log-odds（base margin / init score）。
+
+        统一兼容两种框架取“未经 sigmoid 的原始分数”：
+
+        - XGBoost: ``predict(x, output_margin=True)``
+        - LightGBM: ``predict(x, raw_score=True)``
+
+        该结果可作为下一个增量模型 :meth:`fit` 的 ``init_score``，或喂给
+        :meth:`predict_with_base_margin` 做融合预测。
+
+        Parameters
+        ----------
+        x : array-like or pd.DataFrame
+            待计算的特征
+
+        Returns
+        -------
+        np.ndarray
+            一维 log-odds 数组，形状 ``(n_samples,)``
+
+        Raises
+        ------
+        RuntimeError
+            当模型尚未训练（``fit`` 之前）时
+        """
+        est = self._model.model
+        if est is None:
+            raise RuntimeError("model is not fitted yet; call fit() first")
+        if self.model_type == 'lgb':
+            margin = est.predict(x, raw_score=True)
+        else:
+            margin = est.predict(x, output_margin=True)
+        return np.asarray(margin).ravel()
+
+    def predict_with_base_margin(self, x, base_margin, return_prob=True):
+        """融合预测：``sigmoid(base_margin + 本模型 raw score)``。
+
+        把一个基准模型的 log-odds（``base_margin``，通常来自
+        ``init_model.get_base_margin(x)``）与本（增量）模型自身的 raw score
+        在 log-odds 空间相加，再做 sigmoid。这种手动融合是唯一对 lgb 与 xgb
+        行为一致的方式——LightGBM 在预测期并不支持注入 init_score。
+
+        Parameters
+        ----------
+        x : array-like or pd.DataFrame
+            待预测的特征
+        base_margin : array-like
+            基准模型的 log-odds 偏移，形状须与 ``x`` 的样本数一致
+        return_prob : bool, default True
+            ``True`` 返回概率（sigmoid 后）；``False`` 返回融合后的原始
+            log-odds
+
+        Returns
+        -------
+        np.ndarray
+            一维数组，``return_prob=True`` 时取值于 ``[0, 1]``
+        """
+        combined = np.asarray(base_margin).ravel() + self.get_base_margin(x)
+        return self._sigmoid(combined) if return_prob else combined
 
     def predict(self, x):
         """预测样本的概率。
