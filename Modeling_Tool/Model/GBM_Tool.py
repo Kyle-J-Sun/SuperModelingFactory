@@ -143,19 +143,6 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None):
     """
     lgb = _get_lgb()
 
-    # lgb_params = {k: v for k, v in params_dict.items() if k != 'eval_metric'}
-    # model = lgb.LGBMClassifier(**lgb_params)
-    # model.fit(
-    #     x, y,
-    #     eval_set=[(valx, valy)],
-    #     eval_metric=params_dict['eval_metric'] if 'eval_metric' in params_dict else params_dict['metric'],
-    #     callbacks=[
-    #         lgb.early_stopping(stopping_rounds=params_dict['early_stopping_rounds'], verbose=False)
-    #     ],
-    #     verbose=False,
-    #     sample_weight=wgt
-    # )
-
     lgb_params = {k: v for k, v in params_dict.items() if k != 'eval_metric'}
     model = lgb.LGBMClassifier(**lgb_params)
     # NOTE: `verbose=False` was removed from .fit() in lightgbm>=4. Log control
@@ -817,6 +804,10 @@ class GradientBoostingModel:
     >>> new_model.fit(x_train, y_train, x_val, y_val, init_score=base_margin)
     >>> proba = new_model.predict_with_base_margin(
     ...     x_score, init_model.get_base_margin(x_score))
+
+    # 适配已训练好的裸估计器（如历史直接 pickle 的 XGBClassifier）
+    >>> init_model = GradientBoostingModel.from_fitted(load_model(path))
+    >>> init_model.get_base_margin(x_train)
     """
 
     def __init__(self, model_type, params):
@@ -843,6 +834,95 @@ class GradientBoostingModel:
             self._model = LightGBMModel(params)
         else:
             self._model = XGBoostModel(params)
+
+    @staticmethod
+    def _detect_model_type(estimator):
+        """从已训练的估计器类名 / 模块推断 'lgb' 或 'xgb'。
+
+        Parameters
+        ----------
+        estimator : object
+            已 fit 的 XGBClassifier / LGBMClassifier 等。
+
+        Returns
+        -------
+        str
+            'lgb' 或 'xgb'。
+
+        Raises
+        ------
+        ValueError
+            无法从类型推断时。
+        """
+        cls = type(estimator)
+        tag = f"{cls.__module__}.{cls.__name__}".lower()
+        if 'xgboost' in tag or 'xgb' in tag:
+            return 'xgb'
+        if 'lightgbm' in tag or 'lgb' in tag:
+            return 'lgb'
+        raise ValueError(
+            f"cannot infer model_type from {cls.__name__!r}; "
+            "pass model_type='lgb' or 'xgb' explicitly"
+        )
+
+    @classmethod
+    def from_fitted(cls, model, model_type=None, params=None):
+        """用一个【已训练好】的估计器（或封装）构造 GradientBoostingModel。
+
+        用于适配历史上直接以 sklearn 估计器（``XGBClassifier`` /
+        ``LGBMClassifier``）形式保存的模型，使其无需重训即可使用
+        :meth:`get_base_margin` / :meth:`predict_with_base_margin` 等统一接口。
+
+        Parameters
+        ----------
+        model : object
+            已 fit 的 ``XGBClassifier`` / ``LGBMClassifier``，或
+            ``LightGBMModel`` / ``XGBoostModel`` / ``GradientBoostingModel`` 封装。
+        model_type : {'lgb', 'xgb'}, optional
+            不传则按估计器类型自动推断。
+        params : dict, optional
+            参数字典；不传则尽量从估计器的 ``get_params()`` 读取。
+
+        Returns
+        -------
+        GradientBoostingModel
+
+        Raises
+        ------
+        ValueError
+            传入未 fit / 空模型时。
+        """
+        if isinstance(model, cls):
+            return model
+        # 解包 LightGBMModel / XGBoostModel（它们把裸估计器放在 .model）
+        estimator = getattr(model, 'model', model)
+        if estimator is None:
+            raise ValueError("from_fitted received an unfitted / empty model")
+        mt = model_type or cls._detect_model_type(estimator)
+        if params is None:
+            params = estimator.get_params() if hasattr(estimator, 'get_params') else {}
+        obj = cls(mt, params)
+        obj._model.model = estimator
+        feat = getattr(estimator, 'feature_names_in_', None)
+        if feat is not None:
+            obj._model.feature_names_ = list(feat)
+        return obj
+
+    def __getattr__(self, name):
+        """把未知属性委托给底层已训练估计器。
+
+        使封装实例成为原始 LGBM/XGB 估计器的超集（如 ``get_params`` /
+        ``feature_names_in_`` / ``predict_proba`` 等可直接透传）。仅在常规
+        属性查找失败时调用；对 dunder 名与 ``_model`` 缺失（如反序列化
+        中途）安全抛出 AttributeError，以免干扰 pickle / copy。
+        """
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
+        model = self.__dict__.get('_model', None)
+        inner = getattr(model, 'model', None) if model is not None else None
+        if inner is not None and hasattr(inner, name):
+            return getattr(inner, name)
+        raise AttributeError(name)
 
     @staticmethod
     def _sigmoid(z):
