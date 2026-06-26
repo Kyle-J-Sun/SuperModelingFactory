@@ -1,7 +1,7 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # Core module - base data structures
 # ODPSRunner is intentionally omitted from this eager import so that
