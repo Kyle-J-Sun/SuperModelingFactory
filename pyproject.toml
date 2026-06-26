@@ -77,7 +77,7 @@ dependencies = [
 optuna  = ["optuna>=4.0.0"]
 stats   = ["statsmodels>=0.13.0"]
 imblearn = ["imbalanced-learn>=0.10.0"]
-# SHAP-based model explainability (Modeling_Tool.explainability.ModelExplainer).
+# SHAP-based model explainability (Modeling_Tool.Explainability.ModelExplainer).
 # Optional + lazily imported so the base install stays light and
 # `import Modeling_Tool` never pulls shap.
 explain = ["shap>=0.44.0"]

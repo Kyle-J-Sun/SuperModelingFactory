@@ -76,7 +76,7 @@ from .Feature import (
 
 # ---------------------------------------------------------------------------
 # Lazy attribute access for heavy optional modules (Model, ODPSRunner,
-# explainability.ModelExplainer).
+# Explainability.ModelExplainer).
 #
 # Motivation: GBM_Tool.py (inside Model) imports lightgbm at the top level.
 # lightgbm/compat.py in turn attempts `from dask.array import ...`, and old
@@ -110,7 +110,7 @@ def __getattr__(name):
         from . import Model as _Model
         return getattr(_Model, name)
     if name in _EXPLAIN_EXPORTS:
-        from . import explainability as _explain
+        from . import Explainability as _explain
         return getattr(_explain, name)
     if name == "ODPSRunner":
         from .Core import ODPSRunner
