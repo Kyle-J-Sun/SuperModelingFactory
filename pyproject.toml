@@ -106,7 +106,7 @@ skip  = "*-musllinux_* *-win32"
 
 # Before pytest runs inside the wheel container, make sure the wheel itself
 # imports cleanly — this validates that .so files were produced and shipped.
-test-command = "python -c \"import Modeling_Tool, Modeling_Tool.WOE.WOE_Master, Modeling_Tool.Model.LRM_Tool; print('SMF wheel ok:', Modeling_Tool.__name__)\""
+test-command = "python -c \"import Modeling_Tool, Modeling_Tool.WOE.WOE_Master, Modeling_Tool.Model.LRM_Tool, ExcelMaster.ExcelMaster, Report.Report_Tool; print('SMF wheel ok:', Modeling_Tool.__name__)\""
 
 [tool.cibuildwheel.linux]
 # Only build for 64-bit Intel/AMD Linux. The default cibuildwheel arch list
