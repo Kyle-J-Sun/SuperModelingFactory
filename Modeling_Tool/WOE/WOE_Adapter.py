@@ -4,7 +4,8 @@ The public toolkit has two WOE engines with different persistence formats:
 ``WOE_Master`` exposes a mapping table, while ``MonotoneWOEBinner`` exposes
 ``get_final_bins`` and ``apply_woe``.  This module gives feature screening and
 monitoring tools one small protocol to depend on instead of branching on each
-engine implementation.
+engine implementation.  The adapter is intentionally read-only with respect to
+fitting: callers fit the engine once, then reuse it downstream.
 """
 
 from __future__ import annotations
