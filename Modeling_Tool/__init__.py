@@ -21,6 +21,7 @@ from .Core import (
     pull_attributes_in_batch,
     save_model,
     load_model,
+    load_model_metadata,
     scoring,
 )
 
@@ -137,6 +138,7 @@ __all__ = [
     'pull_attributes_in_batch',
     'save_model',
     'load_model',
+    'load_model_metadata',
     'scoring',
 
     # Model (lazy — imported on first access via __getattr__)

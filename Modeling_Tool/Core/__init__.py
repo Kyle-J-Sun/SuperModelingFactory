@@ -46,8 +46,6 @@ from .utils import (
     parse_sql_file,
     calc_woe,
     calc_iv,
-    save_model,
-    load_model,
     scoring,
     get_missing_indicator,
     upload_score,
@@ -60,6 +58,12 @@ from .utils import (
     get_feature_names_xgb,
     get_feature_names_batch,
     pull_attributes_in_batch,
+)
+from .Model_Registry_Tool import (
+    make_model_artifact,
+    save_model,
+    load_model,
+    load_model_metadata,
 )
 
 from .XOR_Encryptor import TextEncryptor
@@ -85,7 +89,8 @@ __all__ = [
     'cut2pieces', 'proc_freq', 'read_attr_list', 'write_attr_list',
     'odds_score', 'parse_odps_schema', 'npnan2none', 'drop_tmp_cols',
     'mkdir_if_not_exist', 'parse_sql_file', 'calc_woe', 'calc_iv',
-    'save_model', 'load_model', 'scoring', 'get_missing_indicator', 'upload_score',
+    'save_model', 'load_model', 'load_model_metadata', 'make_model_artifact',
+    'scoring', 'get_missing_indicator', 'upload_score',
     'get_feature_names', 'get_feature_names_lgb', 'get_feature_names_xgb',
     'get_feature_names_batch', 'pull_attributes_in_batch',
 
