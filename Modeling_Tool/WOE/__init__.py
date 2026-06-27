@@ -44,6 +44,13 @@ from .WOE_Monotone_Binner import (
     MonotoneWOEBinner,
 )
 
+from .WOE_Adapter import (
+    WOEEngineAdapter,
+    WOEMasterAdapter,
+    MonotoneBinnerAdapter,
+    as_woe_engine,
+)
+
 from .plot_woe_tool import (
     extract_group_value,
     cre_psi_table,
@@ -70,8 +77,9 @@ __all__ = [
     # WOE_Report_Builder
     'get_woe_plot_report_new',
 
-    # WOE_Monotone_Binner
-    'MonotoneWOEBinner',
+    # WOE_Monotone_Binner / adapters
+    'MonotoneWOEBinner', 'WOEEngineAdapter', 'WOEMasterAdapter',
+    'MonotoneBinnerAdapter', 'as_woe_engine',
 
     # plot_woe_tool
     'extract_group_value', 'cre_psi_table',

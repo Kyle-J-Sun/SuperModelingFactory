@@ -22,6 +22,9 @@ from .PSI_Tool import (
     calculate_multivar_psi_two_sets,
 )
 
+# Optional WOE-engine-aware paths are attached after the original classes load.
+from . import WOE_Engine_Feature_Patch as _WOE_Engine_Feature_Patch
+
 __all__ = [
     # Distribution_Tool
     'proc_means', 'proc_means_by_grp', 'get_distribution_shift',

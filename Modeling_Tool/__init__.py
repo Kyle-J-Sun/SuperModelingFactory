@@ -56,6 +56,9 @@ from .Sample import (
 # WOE module
 from .WOE import (
     WOE_Master,
+    MonotoneWOEBinner,
+    WOEEngineAdapter,
+    as_woe_engine,
     is_monotonic,
     woe_transform,
     woe_transformation,
@@ -78,17 +81,6 @@ from .Feature import (
 # ---------------------------------------------------------------------------
 # Lazy attribute access for heavy optional modules (Model, ODPSRunner,
 # Explainability.ModelExplainer).
-#
-# Motivation: GBM_Tool.py (inside Model) imports lightgbm at the top level.
-# lightgbm/compat.py in turn attempts `from dask.array import ...`, and old
-# dask versions (<2022) reference `np.float` which was removed in NumPy 1.20+,
-# causing `AttributeError: module 'numpy' has no attribute 'float'` whenever
-# anyone does `from Modeling_Tool.Core import *` — even if they never use GBM.
-# ModelExplainer is deferred for the same reason: it pulls in the optional
-# `shap` dependency only when actually used.
-#
-# Solution: defer these imports to the first attribute access, matching the
-# pattern already used for ODPSRunner.
 # ---------------------------------------------------------------------------
 
 _MODEL_EXPORTS = frozenset({
@@ -180,6 +172,9 @@ __all__ = [
 
     # WOE
     'WOE_Master',
+    'MonotoneWOEBinner',
+    'WOEEngineAdapter',
+    'as_woe_engine',
     'is_monotonic',
     'woe_transform',
     'woe_transformation',
