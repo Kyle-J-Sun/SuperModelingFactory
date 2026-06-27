@@ -41,6 +41,10 @@ from .GBM_Tool import (
     GradientBoostingModel,
 )
 
+# Attach GradientBoostingModel.param_search without changing the legacy GBM_Tool
+# training wrapper surface.
+from . import GBM_Search_Tool as _GBM_Search_Tool  # noqa: F401
+
 from .Backward_Tool import (
     backward_lgbm,
     backward_xgbm,
