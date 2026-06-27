@@ -9,17 +9,20 @@ from .Distribution_Tool import (
 )
 
 from .Feature_Insights import (
-    VarExtractionInsights,
     var_corr_filter,
-    CorrelationFilter,
 )
 
 from .PSI_Tool import (
-    PSICalculator,
     calculate_psi,
     calculate_within_psi,
     calculate_psi_within_dataset,
     calculate_multivar_psi_two_sets,
+)
+
+from .WOE_Engine_Feature_Patch import (
+    PSICalculator,
+    VarExtractionInsights,
+    CorrelationFilter,
 )
 
 __all__ = [
