@@ -367,6 +367,7 @@ class LRMaster:
     - Variable importance analysis
     - Statistical summary generation
     - Stepwise variable selection
+    - Holdout-based hyperparameter grid search
     - AIC/BIC calculation
     - Optional feature standardization (off by default)
 
@@ -389,6 +390,10 @@ class LRMaster:
         Whether feature standardization is enabled
     standardizer : sklearn-like scaler or None
         Fitted scaler (None until fit() runs with standardize=True)
+    best_params_ : dict or None
+        Best hyperparameters from grid_search_params (None until it runs)
+    search_results_ : pandas.DataFrame or None
+        Full grid_search_params results table (None until it runs)
 
     Examples
     --------
@@ -442,6 +447,9 @@ class LRMaster:
         self._scaler_proto = scaler
         # Fitted scaler; stays None until fit()/stepwise runs with standardize=True.
         self.standardizer = None
+        # Populated by grid_search_params(): best param dict + full results table.
+        self.best_params_ = None
+        self.search_results_ = None
 
     def _make_scaler(self):
         """
@@ -919,6 +927,178 @@ class LRMaster:
 
         self.model = lr_model(final_x, data[tgt_name], None, None, self.params)
         return current_vars
+
+    def grid_search_params(self, data, varlist, tgt_name, eval_sets, param_grid,
+                           objective='oot_gap_penalized', primary_set=None,
+                           gap_ref_sets=None, metric='auc', refit=True, verbose=True):
+        """
+        Grid-search LogisticRegression hyperparameters over a holdout-based objective.
+
+        For every combination in ``param_grid`` (Cartesian product), a candidate model is
+        trained on ``data`` and scored by AUC on each dataset in ``eval_sets``. The best
+        combination is chosen by ``objective`` (default rewards a high primary-set AUC while
+        penalizing the train/holdout AUC gap, i.e. overfitting). This is a **holdout** search
+        (not k-fold CV), intended for the typical INS/OOS/OOT credit-scoring setup.
+
+        When ``standardize=True`` on this instance, every candidate inherits the same
+        standardization config (each candidate fits its own scaler on ``data``), so the
+        search runs in the same feature space the final (optionally refit) model uses.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Training dataset (e.g. the in-sample set used for fitting).
+        varlist : list
+            Feature column names.
+        tgt_name : str
+            Target column name.
+        eval_sets : dict of {str: pandas.DataFrame}
+            Ordered mapping of datasets to score by AUC, e.g.
+            ``{'ins': ins_df, 'oos': oos_df, 'oot': oot_df}``.
+        param_grid : dict of {str: iterable}
+            Hyperparameter search space, e.g. ``{'C': np.logspace(-3, 2, 31)}``.
+            Multiple keys are combined as a Cartesian product.
+        objective : str or callable, default 'oot_gap_penalized'
+            How to score each candidate from its per-set AUCs:
+
+            - ``'oot_gap_penalized'`` : ``AUC[primary] - |mean(AUC[gap_refs]) - AUC[primary]|``
+              (maximize the primary set while penalizing the overfitting gap).
+            - ``'max_primary'`` : ``AUC[primary]``.
+            - callable : ``f(auc_dict) -> float`` where ``auc_dict`` maps set name to AUC.
+        primary_set : str, optional
+            Key of ``eval_sets`` whose AUC to maximize. Defaults to the last key.
+        gap_ref_sets : list of str, optional
+            Set names whose mean AUC forms the gap reference. Defaults to all sets except
+            ``primary_set``. Only used by ``'oot_gap_penalized'``.
+        metric : str, default 'auc'
+            Evaluation metric. Currently only ``'auc'`` is supported.
+        refit : bool, default True
+            If True, refit ``self`` on ``data`` with the best parameters after searching.
+        verbose : bool, default True
+            Print progress / best result.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Search results sorted by ``score`` descending, with columns: the param name(s)
+            + ``AUC_<name>`` per eval set + ``gap`` (gap objective only) + ``score``.
+
+        Side Effects
+        ------------
+        Sets ``self.best_params_`` (dict) and ``self.search_results_`` (the returned table),
+        and merges the best combo into ``self.params``; if ``refit=True``, also retrains
+        ``self.model`` on ``data``.
+
+        Examples
+        --------
+        >>> tuner = LRMaster(params={'C': 1.0, 'solver': 'lbfgs'})
+        >>> res = tuner.grid_search_params(
+        ...     data=ins_fit, varlist=woe_cols, tgt_name='bad_flag',
+        ...     eval_sets={'ins': ins_woe, 'oos': oos_woe, 'oot': oot_woe},
+        ...     param_grid={'C': np.logspace(-3, 2, 31)},
+        ...     primary_set='oot', gap_ref_sets=['ins', 'oos'], refit=False,
+        ... )
+        >>> best_C = tuner.best_params_['C']
+        """
+        import itertools
+        from sklearn.metrics import roc_auc_score
+
+        if metric != 'auc':
+            raise ValueError("Only metric='auc' is currently supported.")
+        if not eval_sets:
+            raise ValueError("eval_sets must be a non-empty {name: DataFrame} mapping.")
+
+        set_names = list(eval_sets.keys())
+        if primary_set is None:
+            primary_set = set_names[-1]
+        if primary_set not in eval_sets:
+            raise ValueError("primary_set '{0}' not in eval_sets {1}".format(primary_set, set_names))
+        if gap_ref_sets is None:
+            gap_ref_sets = [n for n in set_names if n != primary_set]
+
+        # Validate columns up-front for a clear error instead of a deep KeyError.
+        missing = [c for c in (list(varlist) + [tgt_name]) if c not in data.columns]
+        if missing:
+            raise KeyError("training data missing columns: {0}".format(missing))
+        for _name, _df in eval_sets.items():
+            _miss = [c for c in (list(varlist) + [tgt_name]) if c not in _df.columns]
+            if _miss:
+                raise KeyError("eval set '{0}' missing columns: {1}".format(_name, _miss))
+
+        param_names = list(param_grid.keys())
+        combos = list(itertools.product(*[list(param_grid[k]) for k in param_names]))
+        use_gap = (not callable(objective)) and objective == 'oot_gap_penalized' and len(gap_ref_sets) > 0
+
+        if verbose:
+            print("grid_search_params: {0} 组合 (params={1}), 训练集 {2:,} 行, eval={3}".format(
+                len(combos), param_names, len(data), set_names))
+
+        def _score(auc_dict):
+            if callable(objective):
+                return objective(auc_dict)
+            if objective == 'max_primary':
+                return auc_dict[primary_set]
+            if objective == 'oot_gap_penalized':
+                primary = auc_dict[primary_set]
+                if gap_ref_sets:
+                    ref = float(np.mean([auc_dict[n] for n in gap_ref_sets]))
+                    return primary - abs(ref - primary)
+                return primary
+            raise ValueError("Unknown objective: {0}".format(objective))
+
+        rows = []
+        for combo in combos:
+            combo_dict = dict(zip(param_names, combo))
+            # Candidates inherit this instance's standardization config so the
+            # search happens in the same feature space the final model uses.
+            cand = LRMaster(
+                params={**self.params, **combo_dict},
+                standardize=self.standardize,
+                scaler=self._scaler_proto,
+            )
+            cand.fit(data, varlist, tgt_name)
+
+            auc_dict = {}
+            for name, df_eval in eval_sets.items():
+                proba = cand.predict_proba(df_eval, varlist)[:, 1]
+                auc_dict[name] = roc_auc_score(df_eval[tgt_name], proba)
+
+            row = dict(combo_dict)
+            for name in set_names:
+                row['AUC_{0}'.format(name)] = round(auc_dict[name], 5)
+            if use_gap:
+                ref = float(np.mean([auc_dict[n] for n in gap_ref_sets]))
+                row['gap'] = round(ref - auc_dict[primary_set], 5)
+            row['score'] = round(_score(auc_dict), 5)
+            rows.append(row)
+
+        search_df = pd.DataFrame(rows).sort_values('score', ascending=False).reset_index(drop=True)
+
+        # Best params from the (unrounded) top row; cast numpy scalars to native
+        # Python types for a clean repr / JSON-serializable params.
+        best_row = search_df.iloc[0]
+
+        def _native(v):
+            return v.item() if hasattr(v, 'item') else v
+
+        self.best_params_ = {k: _native(best_row[k]) for k in param_names}
+        self.search_results_ = search_df
+        self.params = {**self.params, **self.best_params_}
+
+        # Round float param columns for display only (does not affect best_params_).
+        for k in param_names:
+            if pd.api.types.is_float_dtype(search_df[k]):
+                search_df[k] = search_df[k].round(5)
+
+        if verbose:
+            print("★ best: {0} | score={1:.5f} | AUC_{2}={3:.5f}".format(
+                self.best_params_, best_row['score'], primary_set,
+                best_row['AUC_{0}'.format(primary_set)]))
+
+        if refit:
+            self.fit(data, varlist, tgt_name)
+
+        return search_df
 
     def clone(self):
         """
