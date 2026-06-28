@@ -1,14 +1,8 @@
-"""Holdout hyperparameter search extension for GradientBoostingModel.
-
-This module attaches ``param_search`` to ``GradientBoostingModel`` at import
- time.  The implementation lives outside ``GBM_Tool.py`` so the existing
-LightGBM/XGBoost training wrappers remain unchanged while the public GBM class
-gets the same holdout-search surface as ``LRMaster.grid_search_params``.
-"""
+"""Holdout hyperparameter search extension for GradientBoostingModel."""
 from __future__ import annotations
 
 import itertools
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -23,13 +17,14 @@ def _native(value):
 
 
 def _validate_columns(data, varlist, tgt_name, eval_sets, weight_col=None, eval_weight_col=None):
-    missing = [c for c in (list(varlist) + [tgt_name]) if c not in data.columns]
+    required = list(varlist) + [tgt_name]
+    missing = [c for c in required if c not in data.columns]
     if missing:
         raise KeyError("training data missing columns: {0}".format(missing))
     if weight_col is not None and weight_col not in data.columns:
         raise KeyError("training data missing weight column: {0}".format(weight_col))
     for name, df_eval in eval_sets.items():
-        miss = [c for c in (list(varlist) + [tgt_name]) if c not in df_eval.columns]
+        miss = [c for c in required if c not in df_eval.columns]
         if miss:
             raise KeyError("eval set '{0}' missing columns: {1}".format(name, miss))
         if eval_weight_col is not None and eval_weight_col not in df_eval.columns:
@@ -57,12 +52,9 @@ def _resolve_validation_set(eval_sets, primary_set, validation_set):
         if validation_set not in eval_sets:
             raise ValueError("validation_set '{0}' not in eval_sets".format(validation_set))
         return validation_set
-    if "oos" in eval_sets:
-        return "oos"
-    if "validation" in eval_sets:
-        return "validation"
-    if "valid" in eval_sets:
-        return "valid"
+    for name in ("oos", "validation", "valid"):
+        if name in eval_sets:
+            return name
     return primary_set
 
 
@@ -80,17 +72,19 @@ def _score_from_metrics(metric_dict, objective, primary_set, gap_ref_sets):
     raise ValueError("Unknown objective: {0}".format(objective))
 
 
+def _positive_class_score(pred):
+    arr = np.asarray(pred)
+    return arr[:, 1] if arr.ndim == 2 else arr
+
+
 def _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col=None):
     if metric != "auc":
         raise ValueError("Only metric='auc' is currently supported.")
     metric_dict = {}
     for name, df_eval in eval_sets.items():
-        proba = candidate.predict(df_eval[varlist])
-        sw = resolve_sample_weight(data=df_eval, weight_col=eval_weight_col)
-        if sw is not None:
-            metric_dict[name] = roc_auc_score(df_eval[tgt_name], proba, sample_weight=sw)
-        else:
-            metric_dict[name] = roc_auc_score(df_eval[tgt_name], proba)
+        proba = _positive_class_score(candidate.predict(df_eval[varlist]))
+        sw = resolve_sample_weight(data=df_eval, weight_col=eval_weight_col, expected_len=len(df_eval))
+        metric_dict[name] = roc_auc_score(df_eval[tgt_name], proba, sample_weight=sw)
     return metric_dict
 
 
@@ -99,8 +93,8 @@ def _fit_candidate(model_type, base_params, candidate_params, data, varlist, tgt
     params = {**base_params, **candidate_params}
     candidate = GradientBoostingModel(model_type, params)
     fk = dict(fit_kwargs)
-    train_sw = resolve_sample_weight(data=data, weight_col=weight_col)
-    eval_sw = resolve_sample_weight(data=validation_df, weight_col=eval_weight_col)
+    train_sw = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
+    eval_sw = resolve_sample_weight(data=validation_df, weight_col=eval_weight_col, expected_len=len(validation_df))
     if train_sw is not None:
         fk["sample_weight"] = train_sw
     if eval_sw is not None:
@@ -147,11 +141,11 @@ def _suggest_from_spec(trial, name, spec):
 def _format_search_row(params, set_names, metric_dict, score, use_gap, primary_set, gap_ref_sets):
     row = dict(params)
     for name in set_names:
-        row["AUC_{0}".format(name)] = round(metric_dict[name], 5)
+        row["AUC_{0}".format(name)] = round(float(metric_dict[name]), 5)
     if use_gap:
         ref = float(np.mean([metric_dict[name] for name in gap_ref_sets]))
         row["gap"] = round(ref - metric_dict[primary_set], 5)
-    row["score"] = round(score, 5)
+    row["score"] = round(float(score), 5)
     return row
 
 
@@ -170,13 +164,15 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
     validation_df = eval_sets[validation_name]
     use_gap = (not callable(objective)) and objective == "oot_gap_penalized" and len(gap_ref_sets) > 0
     rows = []
+
     if engine == "grid":
         param_names, combos = _grid_combinations(search_space)
         if verbose:
             print("param_search(grid): {0} combinations".format(len(combos)))
         for combo in combos:
             params = dict(zip(param_names, combo))
-            candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name, validation_df, fit_kwargs, weight_col, eval_weight_col)
+            candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name,
+                                       validation_df, fit_kwargs, weight_col, eval_weight_col)
             metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col)
             score = _score_from_metrics(metric_dict, objective, primary_set, gap_ref_sets)
             rows.append(_format_search_row(params, set_names, metric_dict, score, use_gap, primary_set, gap_ref_sets))
@@ -184,23 +180,39 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
         try:
             import optuna
         except ImportError as exc:
-            raise ImportError("engine='optuna' requires optuna") from exc
+            raise ImportError("engine='optuna' requires the optional optuna dependency. Install with: pip install supermodelingfactory[optuna]") from exc
         sampler = optuna.samplers.TPESampler(seed=random_state) if random_state is not None else None
         study = optuna.create_study(direction="maximize", sampler=sampler)
+
         def _objective(trial):
             params = {name: _suggest_from_spec(trial, name, spec) for name, spec in search_space.items()}
-            candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name, validation_df, fit_kwargs, weight_col, eval_weight_col)
+            candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name,
+                                       validation_df, fit_kwargs, weight_col, eval_weight_col)
             metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col)
             score = _score_from_metrics(metric_dict, objective, primary_set, gap_ref_sets)
+            for set_name, value in metric_dict.items():
+                trial.set_user_attr("AUC_{0}".format(set_name), float(value))
+            if use_gap:
+                ref = float(np.mean([metric_dict[name] for name in gap_ref_sets]))
+                trial.set_user_attr("gap", float(ref - metric_dict[primary_set]))
             return score
+
         study.optimize(_objective, n_trials=n_trials)
         for trial in study.trials:
             if trial.value is None:
                 continue
-            row = {"trial_number": trial.number, **trial.params, "score": round(float(trial.value), 5)}
+            row = {"trial_number": trial.number, **trial.params}
+            for name in set_names:
+                key = "AUC_{0}".format(name)
+                if key in trial.user_attrs:
+                    row[key] = round(float(trial.user_attrs[key]), 5)
+            if use_gap and "gap" in trial.user_attrs:
+                row["gap"] = round(float(trial.user_attrs["gap"]), 5)
+            row["score"] = round(float(trial.value), 5)
             rows.append(row)
     else:
         raise ValueError("engine must be 'grid' or 'optuna'")
+
     if not rows:
         raise RuntimeError("param_search produced no successful candidates.")
     search_df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -211,8 +223,8 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
     self.params = {**self.params, **self.best_params_}
     if refit:
         refit_kwargs = dict(fit_kwargs)
-        train_sw = resolve_sample_weight(data=data, weight_col=weight_col)
-        eval_sw = resolve_sample_weight(data=validation_df, weight_col=eval_weight_col)
+        train_sw = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
+        eval_sw = resolve_sample_weight(data=validation_df, weight_col=eval_weight_col, expected_len=len(validation_df))
         if train_sw is not None:
             refit_kwargs["sample_weight"] = train_sw
         if eval_sw is not None:
@@ -221,13 +233,19 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
     return search_df
 
 
-def attach_gbm_param_search():
-    GradientBoostingModel.param_search = _gbm_param_search
-    if not hasattr(GradientBoostingModel, "best_params_"):
-        GradientBoostingModel.best_params_ = None
-    if not hasattr(GradientBoostingModel, "search_results_"):
-        GradientBoostingModel.search_results_ = None
-    return GradientBoostingModel
+def attach_gbm_param_search(cls=GradientBoostingModel):
+    """Attach param_search when the class permits runtime mutation."""
+    try:
+        cls.param_search = _gbm_param_search
+        if not hasattr(cls, "best_params_"):
+            cls.best_params_ = None
+        if not hasattr(cls, "search_results_"):
+            cls.search_results_ = None
+    except (TypeError, AttributeError):
+        # Cython extension types can be immutable; Model.__init__ exports a
+        # subclass wrapper in that case.
+        pass
+    return cls
 
 
 attach_gbm_param_search()
