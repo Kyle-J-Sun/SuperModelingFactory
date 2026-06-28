@@ -1,13 +1,32 @@
+# =============================================================================
+# MANIFEST.in — controls what ends up inside the sdist (.tar.gz)
+# -----------------------------------------------------------------------------
+# Wheels are built by cibuildwheel from the source tree and *do* contain the
+# compiled .so / .pyd. The sdist, however, is a fallback meant only for users
+# who need to rebuild from source. To keep the algorithm closed even in the
+# sdist, we EXCLUDE every closed-source .py listed below — only stubs, the
+# generated .c files, and open-source modules remain.
+#
+# If you regret this and want full re-buildability from the sdist, comment out
+# the `exclude` block. Most users will install the prebuilt wheel anyway.
+# =============================================================================
+
 include README.md
 include LICENSE
 include pyproject.toml
 include setup.py
 include requirements.txt
 
+# Ship .pyi stubs (carry copyright headers + fingerprints).
 recursive-include Modeling_Tool *.pyi
+
+# Ship cythonize() output so the sdist can still build without re-running
+# Cython on the original .py source. Comment this out if you also want to
+# keep .c files private; the sdist will then require Cython + the .py files
+# to build, defeating the purpose of withholding them.
 recursive-include Modeling_Tool *.c
 
-exclude Modeling_Tool/weighted_integration.py
+# ---- EXCLUDE closed-source originals ----
 exclude Modeling_Tool/WOE/WOE_Master.py
 exclude Modeling_Tool/WOE/WOE_Monotone_Binner.py
 exclude Modeling_Tool/WOE/WOE_Plot_Tool.py
@@ -19,7 +38,6 @@ exclude Modeling_Tool/Feature/Feature_Insights.py
 exclude Modeling_Tool/Feature/PSI_Tool.py
 exclude Modeling_Tool/Model/Backward_Tool.py
 exclude Modeling_Tool/Model/GBM_Tool.py
-exclude Modeling_Tool/Model/GBM_Search_Tool.py
 exclude Modeling_Tool/Model/LRM_Tool.py
 exclude Modeling_Tool/Eval/Evaluation_Tool.py
 exclude Modeling_Tool/Eval/Model_Eval_Tool.py
@@ -32,6 +50,7 @@ exclude Modeling_Tool/Core/kDataFrame.py
 exclude Modeling_Tool/Core/XOR_Encryptor.py
 exclude Modeling_Tool/Core/Slope_Tool.py
 
+# ---- Always exclude development / backup / test scratch ----
 recursive-exclude Modeling_Tool/**/backup *
 recursive-exclude Modeling_Tool/backup *
 exclude Modeling_Tool/Core/test_remove_comments.py
