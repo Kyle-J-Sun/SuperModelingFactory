@@ -93,10 +93,10 @@ def mkdir_if_not_exist(folder_path, replace=False):
 
 
 def _remove_comments(sql):
-    pattern = r"(?ms)('[^']*(?:''[^']*)*')|(""[^""]*"")|(\/\*\+.*?\*\/)|(\/\*.*?\*\/)|(\-\-.*?)$"
+    pattern = r"(?ms)('[^']*(?:''[^']*)*')|(\/\*.*?\*\/)|(\-\-.*?)$"
     def repl(match):
-        if match.group(1) or match.group(2) or match.group(3):
-            return match.group(0)
+        if match.group(1):
+            return match.group(1)
         return ""
     return re.sub(pattern, repl, sql).strip()
 
