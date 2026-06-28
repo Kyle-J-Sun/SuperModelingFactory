@@ -1,23 +1,8 @@
 # =============================================================================
 # gen_stubs.py — Generate .pyi stubs for closed-source modules
 # -----------------------------------------------------------------------------
-# Run this whenever you add / rename a closed-source module:
-#
-#   python gen_stubs.py
-#
-# What it does:
-#   1. Parses each closed-source .py with `ast` to extract top-level classes
-#      and functions (with full signatures, no bodies, no docstrings).
-#   2. Injects a copyright header containing a SHA1-derived FINGERPRINT that is
-#      deterministic given the module's dotted path — re-runs reproduce the
-#      same fingerprint, so existing markers stay stable.
-#   3. Writes `<module>.pyi` next to each `<module>.py`.
-#
 # Keep MODULES below in lock-step with setup.py's CLOSED_SOURCE_MODULES list.
 # `scripts/verify_protection.py` enforces this in CI.
-#
-# Copyright (c) 2026 Kyle Sun <github.com/Kyle-J-Sun>. All rights reserved.
-# Licensed under the Business Source License 1.1 (see LICENSE).
 # =============================================================================
 from __future__ import annotations
 
@@ -30,8 +15,8 @@ YEAR = 2026
 AUTHOR = "Kyle Sun"
 GH = "github.com/Kyle-J-Sun"
 
-# (dotted_module, source_path) — must mirror setup.py CLOSED_SOURCE_MODULES
 MODULES: list[tuple[str, str]] = [
+    ("Modeling_Tool.weighted_integration", "Modeling_Tool/weighted_integration.py"),
     ("Modeling_Tool.WOE.WOE_Master",          "Modeling_Tool/WOE/WOE_Master.py"),
     ("Modeling_Tool.WOE.WOE_Monotone_Binner", "Modeling_Tool/WOE/WOE_Monotone_Binner.py"),
     ("Modeling_Tool.WOE.WOE_Plot_Tool",       "Modeling_Tool/WOE/WOE_Plot_Tool.py"),
@@ -41,9 +26,10 @@ MODULES: list[tuple[str, str]] = [
     ("Modeling_Tool.Feature.Distribution_Tool", "Modeling_Tool/Feature/Distribution_Tool.py"),
     ("Modeling_Tool.Feature.Feature_Insights",  "Modeling_Tool/Feature/Feature_Insights.py"),
     ("Modeling_Tool.Feature.PSI_Tool",          "Modeling_Tool/Feature/PSI_Tool.py"),
-    ("Modeling_Tool.Model.Backward_Tool", "Modeling_Tool/Model/Backward_Tool.py"),
-    ("Modeling_Tool.Model.GBM_Tool",      "Modeling_Tool/Model/GBM_Tool.py"),
-    ("Modeling_Tool.Model.LRM_Tool",      "Modeling_Tool/Model/LRM_Tool.py"),
+    ("Modeling_Tool.Model.Backward_Tool",    "Modeling_Tool/Model/Backward_Tool.py"),
+    ("Modeling_Tool.Model.GBM_Tool",         "Modeling_Tool/Model/GBM_Tool.py"),
+    ("Modeling_Tool.Model.GBM_Search_Tool",  "Modeling_Tool/Model/GBM_Search_Tool.py"),
+    ("Modeling_Tool.Model.LRM_Tool",         "Modeling_Tool/Model/LRM_Tool.py"),
     ("Modeling_Tool.Eval.Evaluation_Tool", "Modeling_Tool/Eval/Evaluation_Tool.py"),
     ("Modeling_Tool.Eval.Model_Eval_Tool", "Modeling_Tool/Eval/Model_Eval_Tool.py"),
     ("Modeling_Tool.Eval.evaluate_model",  "Modeling_Tool/Eval/evaluate_model.py"),
@@ -58,7 +44,6 @@ MODULES: list[tuple[str, str]] = [
 
 
 def fingerprint(dotted: str) -> str:
-    """8-char deterministic marker, e.g. SMF-WOE_MASTER-3f9a1c0e."""
     short = dotted.rsplit(".", 1)[-1].upper().replace("_", "")[:12]
     digest = hashlib.sha1(f"SMF::{dotted}::v1".encode()).hexdigest()[:8]
     return f"SMF-{short}-{digest}"
@@ -81,7 +66,6 @@ def unparse_arg(arg: ast.arg, default: ast.expr | None) -> str:
 
 def render_args(args: ast.arguments) -> str:
     parts: list[str] = []
-    # positional-only
     pos_defaults = list(args.defaults)
     n_pos = len(args.args)
     n_def = len(pos_defaults)
@@ -111,8 +95,7 @@ def render_return(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 def render_function(node: ast.FunctionDef | ast.AsyncFunctionDef, indent: int = 0) -> str:
     pad = "    " * indent
     prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
-    sig = f"{pad}{prefix}{node.name}({render_args(node.args)}){render_return(node)}: ..."
-    return sig
+    return f"{pad}{prefix}{node.name}({render_args(node.args)}){render_return(node)}: ..."
 
 
 def render_class(node: ast.ClassDef) -> list[str]:
@@ -123,21 +106,17 @@ def render_class(node: ast.ClassDef) -> list[str]:
             bases.append(ast.unparse(b))
         except Exception:
             pass
-    head = f"class {node.name}" + (f"({', '.join(bases)})" if bases else "") + ":"
-    lines.append(head)
+    lines.append(f"class {node.name}" + (f"({', '.join(bases)})" if bases else "") + ":")
     body_lines: list[str] = []
     for child in node.body:
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             body_lines.append(render_function(child, indent=1))
         elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
             try:
-                ann = ast.unparse(child.annotation)
-                body_lines.append(f"    {child.target.id}: {ann}")
+                body_lines.append(f"    {child.target.id}: {ast.unparse(child.annotation)}")
             except Exception:
                 pass
-    if not body_lines:
-        body_lines.append("    ...")
-    lines.extend(body_lines)
+    lines.extend(body_lines or ["    ..."])
     return lines
 
 
@@ -148,7 +127,6 @@ def build_stub(dotted: str, src_path: Path) -> str:
         tree = ast.parse(src)
     except SyntaxError:
         tree = ast.Module(body=[], type_ignores=[])
-
     body_lines: list[str] = []
     seen_typing = False
     for node in tree.body:
@@ -158,21 +136,17 @@ def build_stub(dotted: str, src_path: Path) -> str:
                 seen_typing = True
             except Exception:
                 pass
-        elif isinstance(node, ast.ClassDef):
-            if not node.name.startswith("_"):
-                body_lines.append("")
-                body_lines.extend(render_class(node))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if not node.name.startswith("_"):
-                body_lines.append(render_function(node))
+        elif isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            body_lines.append("")
+            body_lines.extend(render_class(node))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+            body_lines.append(render_function(node))
         elif isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id.isupper():
                     body_lines.append(f"{t.id}: object")
-
     if not seen_typing:
         body_lines.insert(0, "from typing import Any")
-
     header = f'''# =============================================================================
 # {dotted}
 # -----------------------------------------------------------------------------
@@ -181,11 +155,8 @@ def build_stub(dotted: str, src_path: Path) -> str:
 #
 # This stub describes the public API of a closed-source module compiled to a
 # native extension (.so / .pyd). The original source is not distributed.
-# Production / commercial use requires a separate commercial license.
 #
 # FINGERPRINT: {fp}
-#   (Unique trace marker. Do not remove or alter — used for plagiarism
-#    detection across the public internet.)
 # =============================================================================
 '''
     return header + "\n" + "\n".join(body_lines).rstrip() + "\n"
