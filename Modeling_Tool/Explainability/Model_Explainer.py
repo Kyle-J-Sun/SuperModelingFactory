@@ -2,40 +2,19 @@
 """
 Model explainability for the credit-modeling toolkit.
 
-SHAP-based global and local explanations for models trained with
-SuperModelingFactory:
+Global and local explanations for models trained with SuperModelingFactory:
 
-* ``GradientBoostingModel`` (LightGBM / XGBoost)  -> ``shap.TreeExplainer``
-* ``LRMaster`` (logistic regression)              -> ``shap.LinearExplainer``
-* any other fitted estimator with ``predict_proba`` (e.g. a calibrated
-  classifier)                                     -> model-agnostic ``shap.Explainer``
+* SHAP for attribution (global importance, summary / dependence plots, local contributions)
+* PDP (partial dependence) for average marginal effects
+* ICE (individual conditional expectation) for per-sample response curves
+* ALE (accumulated local effects) for correlation-aware marginal effects
+* LIME for local surrogate explanations and sampled global summaries
 
-``shap`` is an *optional* dependency. It is imported lazily, only when an
-explanation is actually computed, so ``import Modeling_Tool`` never pulls it in.
-Install it with::
+``shap`` and ``lime`` are optional dependencies. They are imported lazily, only
+when the corresponding explanation is actually computed, so ``import
+Modeling_Tool`` never pulls them in. Install the full explainability extra with::
 
     pip install supermodelingfactory[explain]
-
-Classes
--------
-ModelExplainer : Unified SHAP explainer (importance, summary / dependence plots,
-    per-instance contributions).
-
-Examples
---------
->>> from Modeling_Tool import GradientBoostingModel, ModelExplainer
->>> gbm = GradientBoostingModel('lgb', {'n_estimators': 200, 'learning_rate': 0.05})
->>> gbm.fit(train_X, train_y, val_X, val_y)
->>> exp = ModelExplainer(gbm)
->>> exp.explain(test_X)
->>> exp.feature_importance(test_X).head()
->>> exp.summary_plot(test_X, show=False, save_path='shap_summary.png')
-
->>> from Modeling_Tool import LRMaster, ModelExplainer
->>> lr = LRMaster(params={'C': 1.0})
->>> lr.fit(train_df, woe_features, 'bad_flag')
->>> exp = ModelExplainer(lr, background_data=train_df[woe_features])
->>> exp.feature_importance().head()
 """
 from __future__ import annotations
 
@@ -45,9 +24,7 @@ import pandas as pd
 __all__ = ["ModelExplainer"]
 
 
-# Model-type tokens that should be explained with shap.TreeExplainer.
 _TREE_MODEL_TYPES = frozenset({"lgb", "lightgbm", "xgb", "xgboost"})
-# Model-type tokens that should be explained with shap.LinearExplainer.
 _LINEAR_MODEL_TYPES = frozenset({"lr", "linear", "logisticregression"})
 
 
@@ -58,52 +35,48 @@ def _lazy_shap():
         return shap
     except ImportError as exc:  # pragma: no cover - exercised via install matrix
         raise ImportError(
-            "ModelExplainer requires the optional `shap` dependency, which is "
+            "ModelExplainer requires the optional `shap` dependency for SHAP "
+            "methods, which is not installed.\n"
+            "Install it with:  pip install supermodelingfactory[explain]"
+        ) from exc
+
+
+def _lazy_lime():
+    """Import LIME on demand, raising a helpful error if it is missing."""
+    try:
+        from lime.lime_tabular import LimeTabularExplainer  # noqa: WPS433
+        return LimeTabularExplainer
+    except ImportError as exc:  # pragma: no cover - optional dependency path
+        raise ImportError(
+            "LIME explanations require the optional `lime` dependency, which is "
             "not installed.\n"
             "Install it with:  pip install supermodelingfactory[explain]"
         ) from exc
 
 
 class ModelExplainer:
-    """SHAP-based explainer for SuperModelingFactory models.
+    """Unified explainer for SuperModelingFactory models.
 
     The explainer accepts either a SuperModelingFactory model wrapper
     (``GradientBoostingModel`` or ``LRMaster``) or a raw fitted estimator. It
-    auto-detects the appropriate SHAP algorithm, computes SHAP values, and
-    exposes global feature importance, summary / dependence plots, and
-    per-instance contribution breakdowns.
+    exposes SHAP attribution plus model-agnostic effect methods (PDP, ICE, ALE,
+    and LIME).
 
     Parameters
     ----------
     model : object
         A fitted ``GradientBoostingModel`` / ``LRMaster`` wrapper, or a raw
-        fitted estimator (LightGBM / XGBoost booster, sklearn
-        ``LogisticRegression``, ``CalibratedClassifierCV``, ...).
+        fitted estimator.
     feature_names : list of str, optional
         Explicit feature ordering. If omitted, it is inferred from the wrapper's
         ``varlist`` / the booster's feature names / the columns of the data
-        passed to :meth:`explain`.
+        passed to explanation methods.
     model_type : str, optional
-        Force the explainer family. One of ``'lgb'``, ``'xgb'``, ``'lr'``. If
-        omitted, it is inferred from the model.
+        Force the explainer family for SHAP. One of ``'lgb'``, ``'xgb'``,
+        ``'lr'``. If omitted, it is inferred from the model.
     background_data : pandas.DataFrame or numpy.ndarray, optional
-        Representative sample of the training features. Required for linear and
-        model-agnostic explainers (used as the SHAP masker / reference
-        distribution); ignored for tree explainers.
-
-    Attributes
-    ----------
-    estimator : object
-        The unwrapped underlying fitted estimator.
-    model_type : str
-        The resolved model-type token.
-    feature_names : list of str or None
-        Resolved feature ordering.
-    shap_values_ : numpy.ndarray or None
-        SHAP values from the most recent :meth:`explain` call, shape
-        ``(n_samples, n_features)`` (positive class for binary classification).
-    expected_value_ : numpy.ndarray or None
-        SHAP base value(s) from the most recent :meth:`explain` call.
+        Representative training features. Required for SHAP linear/generic
+        explainers and useful as the default training data for LIME.
     """
 
     def __init__(self, model, feature_names=None, model_type=None, background_data=None):
@@ -114,7 +87,7 @@ class ModelExplainer:
         self.feature_names = self._resolve_feature_names(feature_names)
 
         self._explainer = None
-        self._explainer_kind = None  # 'tree' | 'linear' | 'generic'
+        self._explainer_kind = None
         self.shap_values_ = None
         self.expected_value_ = None
         self.explanation_ = None
@@ -126,18 +99,13 @@ class ModelExplainer:
     @staticmethod
     def _resolve_estimator(model):
         """Unwrap the underlying fitted estimator from an SMF wrapper."""
-        # GradientBoostingModel keeps the inner LightGBMModel / XGBoostModel at
-        # ._model (older builds expose it as .model_instance); that inner
-        # wrapper's .model is the raw LGBMClassifier / XGBClassifier.
         for wrapper_attr in ("_model", "model_instance"):
             wrapper = getattr(model, wrapper_attr, None)
             if wrapper is not None and getattr(wrapper, "model", None) is not None:
                 return wrapper.model
-        # LRMaster keeps the sklearn LogisticRegression at .model.
         inner = getattr(model, "model", None)
         if inner is not None and (hasattr(inner, "predict") or hasattr(inner, "coef_")):
             return inner
-        # Raw estimator passed directly.
         return model
 
     @staticmethod
@@ -181,7 +149,6 @@ class ModelExplainer:
                     return list(value)
                 except TypeError:
                     pass
-        # lightgbm Booster exposes feature_name() as a method.
         booster_names = getattr(estimator, "feature_name", None)
         if callable(booster_names):
             try:
@@ -211,13 +178,44 @@ class ModelExplainer:
     def _predict_proba_pos(self, X):
         """Positive-class probability callable for model-agnostic explanations."""
         estimator = self.estimator
+        frame = self._as_frame(X)
         if hasattr(estimator, "predict_proba"):
-            proba = np.asarray(estimator.predict_proba(X))
+            proba = np.asarray(estimator.predict_proba(frame))
             return proba[:, -1] if proba.ndim == 2 else proba
-        return np.asarray(estimator.predict(X)).ravel()
+        return np.asarray(estimator.predict(frame)).ravel()
+
+    def _predict_proba_2d(self, X):
+        """Two-column probability callable for LIME classification mode."""
+        pos = np.asarray(self._predict_proba_pos(X)).ravel()
+        return np.column_stack([1.0 - pos, pos])
+
+    def _sample_frame(self, X, sample_size=None, random_state=None):
+        frame = self._as_frame(X).copy()
+        if sample_size is not None and len(frame) > sample_size:
+            frame = frame.sample(n=sample_size, random_state=random_state)
+        return frame
+
+    def _feature_name(self, X, feature):
+        frame = self._as_frame(X)
+        if isinstance(feature, int):
+            return frame.columns[feature]
+        if feature not in frame.columns:
+            raise KeyError(f"Feature {feature!r} not found in X")
+        return feature
+
+    @staticmethod
+    def _numeric_grid(series: pd.Series, grid_resolution=50, percentiles=(0.05, 0.95)):
+        clean = pd.to_numeric(series, errors="coerce").dropna()
+        if clean.empty:
+            raise ValueError("Effect methods require a numeric feature with at least one non-missing value")
+        lo, hi = clean.quantile(list(percentiles)).to_numpy(dtype=float)
+        if np.isclose(lo, hi):
+            vals = np.array(sorted(clean.unique()), dtype=float)
+            return vals[:grid_resolution]
+        return np.linspace(lo, hi, int(grid_resolution))
 
     # ------------------------------------------------------------------ #
-    # Explainer construction & SHAP computation
+    # SHAP computation
     # ------------------------------------------------------------------ #
     def _build_explainer(self):
         shap = _lazy_shap()
@@ -231,19 +229,15 @@ class ModelExplainer:
             if self.background_data is None:
                 raise ValueError(
                     "Linear models require `background_data` (a representative "
-                    "sample of the training features) to build a SHAP "
-                    "LinearExplainer. Pass background_data=... to ModelExplainer()."
+                    "sample of the training features) to build a SHAP LinearExplainer."
                 )
-            self._explainer = shap.LinearExplainer(
-                self.estimator, self._as_frame(self.background_data)
-            )
+            self._explainer = shap.LinearExplainer(self.estimator, self._as_frame(self.background_data))
             self._explainer_kind = "linear"
         else:
             if self.background_data is None:
                 raise ValueError(
-                    f"Model type {self.model_type!r} needs a model-agnostic "
-                    "explainer, which requires `background_data`. Pass "
-                    "background_data=... to ModelExplainer()."
+                    f"Model type {self.model_type!r} needs a model-agnostic explainer, "
+                    "which requires `background_data`."
                 )
             masker = self._as_frame(self.background_data)
             self._explainer = shap.Explainer(self._predict_proba_pos, masker)
@@ -257,31 +251,14 @@ class ModelExplainer:
         explanation = self._explainer(X)
         values = np.asarray(explanation.values)
         base = np.asarray(explanation.base_values)
-        # Binary/multiclass classifiers may carry a trailing class axis;
-        # collapse to the positive (last) class for a 2-D importance view.
         if values.ndim == 3:
             values = values[..., -1]
             if base.ndim == 2:
                 base = base[..., -1]
         return values, base, explanation
 
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
     def explain(self, X):
-        """Compute and cache SHAP values for a dataset.
-
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray
-            Samples to explain.
-
-        Returns
-        -------
-        shap.Explanation
-            The SHAP explanation object. Values are also cached on
-            :attr:`shap_values_` / :attr:`expected_value_`.
-        """
+        """Compute and cache SHAP values for a dataset."""
         frame = self._as_frame(X)
         values, base, explanation = self._shap_values_for(frame)
         self.shap_values_ = values
@@ -291,13 +268,10 @@ class ModelExplainer:
         return explanation
 
     def _ensure_values(self, X):
-        """Return ``(shap_values, X)``, computing them if *X* is given."""
         if X is not None:
             self.explain(X)
         if self.shap_values_ is None or self._last_X is None:
-            raise RuntimeError(
-                "No SHAP values available. Call explain(X) first or pass X=..."
-            )
+            raise RuntimeError("No SHAP values available. Call explain(X) first or pass X=...")
         return self.shap_values_, self._last_X
 
     def _resolved_names(self, X, n_features):
@@ -308,21 +282,7 @@ class ModelExplainer:
         return [f"f{i}" for i in range(n_features)]
 
     def feature_importance(self, X=None, normalize=False):
-        """Global feature importance as mean absolute SHAP value.
-
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, optional
-            Samples to explain. If omitted, the cached explanation is reused.
-        normalize : bool, default False
-            If True, add an ``importance_pct`` column summing to 1.
-
-        Returns
-        -------
-        pandas.DataFrame
-            Columns ``feature`` and ``mean_abs_shap`` (plus ``importance_pct``
-            when *normalize* is True), sorted descending.
-        """
+        """Global feature importance as mean absolute SHAP value."""
         values, X_used = self._ensure_values(X)
         mean_abs = np.abs(values).mean(axis=0)
         names = self._resolved_names(X_used, values.shape[1])
@@ -334,25 +294,7 @@ class ModelExplainer:
         return table
 
     def summary_plot(self, X=None, max_display=20, plot_type="dot", show=True, save_path=None):
-        """SHAP summary (beeswarm / bar) plot.
-
-        Parameters
-        ----------
-        X : pandas.DataFrame or numpy.ndarray, optional
-            Samples to explain; reuses the cached explanation when omitted.
-        max_display : int, default 20
-            Maximum number of features to show.
-        plot_type : str, default 'dot'
-            Passed through to ``shap.summary_plot`` (e.g. ``'dot'``, ``'bar'``).
-        show : bool, default True
-            Display the figure interactively.
-        save_path : str, optional
-            If given, the figure is written to this path.
-
-        Returns
-        -------
-        matplotlib.figure.Figure
-        """
+        """SHAP summary (beeswarm / bar) plot."""
         shap = _lazy_shap()
         import matplotlib.pyplot as plt
 
@@ -364,25 +306,7 @@ class ModelExplainer:
         return self._finalize_plot(plt, show, save_path)
 
     def dependence_plot(self, feature, X=None, interaction_index="auto", show=True, save_path=None):
-        """SHAP dependence plot for a single feature.
-
-        Parameters
-        ----------
-        feature : str or int
-            Feature name (DataFrame input) or column index.
-        X : pandas.DataFrame or numpy.ndarray, optional
-            Samples to explain; reuses the cached explanation when omitted.
-        interaction_index : str or int, default 'auto'
-            Passed through to ``shap.dependence_plot``.
-        show : bool, default True
-            Display the figure interactively.
-        save_path : str, optional
-            If given, the figure is written to this path.
-
-        Returns
-        -------
-        matplotlib.figure.Figure
-        """
+        """SHAP dependence plot for a single feature."""
         shap = _lazy_shap()
         import matplotlib.pyplot as plt
 
@@ -394,19 +318,7 @@ class ModelExplainer:
         return self._finalize_plot(plt, show, save_path)
 
     def explain_instance(self, x_row):
-        """Per-feature SHAP contributions for a single sample.
-
-        Parameters
-        ----------
-        x_row : pandas.DataFrame, pandas.Series, numpy.ndarray, or mapping
-            A single observation.
-
-        Returns
-        -------
-        pandas.DataFrame
-            Columns ``feature``, ``value``, ``shap_value`` sorted by absolute
-            contribution. The SHAP base value is stored on ``df.attrs['base_value']``.
-        """
+        """Per-feature SHAP contributions for a single sample."""
         if isinstance(x_row, pd.Series):
             x_row = x_row.to_frame().T
         elif isinstance(x_row, dict):
@@ -430,6 +342,291 @@ class ModelExplainer:
         return table
 
     # ------------------------------------------------------------------ #
+    # PDP / ICE
+    # ------------------------------------------------------------------ #
+    def partial_dependence(
+        self,
+        X,
+        feature,
+        grid_resolution=50,
+        percentiles=(0.05, 0.95),
+        sample_size=None,
+        random_state=None,
+    ):
+        """Compute one-way partial dependence for a numeric feature.
+
+        Returns a DataFrame with ``feature``, ``grid_value`` and
+        ``average_prediction`` columns.
+        """
+        frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
+        feature = self._feature_name(frame, feature)
+        grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
+        averages = []
+        for value in grid:
+            tmp = frame.copy()
+            tmp[feature] = value
+            averages.append(float(np.mean(self._predict_proba_pos(tmp))))
+        return pd.DataFrame(
+            {"feature": feature, "grid_value": grid, "average_prediction": averages}
+        )
+
+    def pdp_plot(
+        self,
+        X,
+        feature,
+        grid_resolution=50,
+        percentiles=(0.05, 0.95),
+        sample_size=None,
+        random_state=None,
+        show=True,
+        save_path=None,
+    ):
+        """Plot one-way partial dependence for a numeric feature."""
+        import matplotlib.pyplot as plt
+
+        df = self.partial_dependence(X, feature, grid_resolution, percentiles, sample_size, random_state)
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
+        ax.plot(df["grid_value"], df["average_prediction"], color="#336699", linewidth=2)
+        ax.set_xlabel(str(df["feature"].iloc[0]))
+        ax.set_ylabel("Average prediction")
+        ax.set_title(f"PDP: {df['feature'].iloc[0]}")
+        ax.grid(alpha=0.25)
+        return self._finalize_plot(plt, show, save_path)
+
+    def ice(
+        self,
+        X,
+        feature,
+        grid_resolution=50,
+        percentiles=(0.05, 0.95),
+        sample_size=200,
+        random_state=None,
+        centered=False,
+    ):
+        """Compute individual conditional expectation curves.
+
+        Returns a long DataFrame with ``sample_index``, ``grid_value`` and
+        ``prediction`` columns. Set ``centered=True`` for centered ICE.
+        """
+        frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
+        feature = self._feature_name(frame, feature)
+        grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
+        records = []
+        for value in grid:
+            tmp = frame.copy()
+            tmp[feature] = value
+            preds = np.asarray(self._predict_proba_pos(tmp)).ravel()
+            records.append(pd.DataFrame({"sample_index": frame.index, "grid_value": value, "prediction": preds}))
+        out = pd.concat(records, ignore_index=True)
+        out.insert(0, "feature", feature)
+        if centered:
+            base = out.groupby("sample_index")["prediction"].transform("first")
+            out["prediction"] = out["prediction"] - base
+        return out
+
+    def ice_plot(
+        self,
+        X,
+        feature,
+        grid_resolution=50,
+        percentiles=(0.05, 0.95),
+        sample_size=100,
+        random_state=None,
+        centered=False,
+        show=True,
+        save_path=None,
+    ):
+        """Plot ICE curves for a numeric feature."""
+        import matplotlib.pyplot as plt
+
+        df = self.ice(X, feature, grid_resolution, percentiles, sample_size, random_state, centered)
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
+        for _, group in df.groupby("sample_index"):
+            ax.plot(group["grid_value"], group["prediction"], color="#336699", alpha=0.18, linewidth=0.8)
+        avg = df.groupby("grid_value", as_index=False)["prediction"].mean()
+        ax.plot(avg["grid_value"], avg["prediction"], color="#CC0033", linewidth=2.2, label="average")
+        ax.set_xlabel(str(df["feature"].iloc[0]))
+        ax.set_ylabel("Centered prediction" if centered else "Prediction")
+        ax.set_title(f"ICE: {df['feature'].iloc[0]}")
+        ax.legend()
+        ax.grid(alpha=0.25)
+        return self._finalize_plot(plt, show, save_path)
+
+    # ------------------------------------------------------------------ #
+    # ALE
+    # ------------------------------------------------------------------ #
+    def ale(self, X, feature, bins=20, sample_size=None, random_state=None):
+        """Compute first-order accumulated local effects for a numeric feature.
+
+        The implementation uses quantile bins, computes local prediction
+        differences at each bin boundary, accumulates them, and centers the ALE
+        curve by the sample-weighted mean.
+        """
+        frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
+        feature = self._feature_name(frame, feature)
+        values = pd.to_numeric(frame[feature], errors="coerce")
+        valid = values.notna()
+        work = frame.loc[valid].copy()
+        values = values.loc[valid]
+        if work.empty:
+            raise ValueError(f"Feature {feature!r} has no non-missing numeric values")
+
+        quantiles = np.linspace(0, 1, int(bins) + 1)
+        edges = np.unique(values.quantile(quantiles).to_numpy(dtype=float))
+        if len(edges) < 2:
+            raise ValueError(f"Feature {feature!r} does not have enough unique values for ALE")
+        edges[0] = values.min()
+        edges[-1] = values.max()
+
+        bin_ids = np.searchsorted(edges, values.to_numpy(), side="right") - 1
+        bin_ids = np.clip(bin_ids, 0, len(edges) - 2)
+
+        effects = []
+        counts = []
+        centers = []
+        for idx in range(len(edges) - 1):
+            mask = bin_ids == idx
+            subset = work.loc[mask].copy()
+            counts.append(int(mask.sum()))
+            left, right = float(edges[idx]), float(edges[idx + 1])
+            centers.append((left + right) / 2.0)
+            if subset.empty:
+                effects.append(0.0)
+                continue
+            low = subset.copy()
+            high = subset.copy()
+            low[feature] = left
+            high[feature] = right
+            effects.append(float(np.mean(self._predict_proba_pos(high) - self._predict_proba_pos(low))))
+
+        ale_values = np.cumsum(effects)
+        counts_arr = np.asarray(counts, dtype=float)
+        if counts_arr.sum() > 0:
+            ale_values = ale_values - np.average(ale_values, weights=counts_arr)
+        else:
+            ale_values = ale_values - ale_values.mean()
+
+        return pd.DataFrame(
+            {
+                "feature": feature,
+                "bin_left": edges[:-1],
+                "bin_right": edges[1:],
+                "bin_center": centers,
+                "ale_value": ale_values,
+                "n": counts,
+            }
+        )
+
+    def ale_plot(self, X, feature, bins=20, sample_size=None, random_state=None, show=True, save_path=None):
+        """Plot first-order ALE for a numeric feature."""
+        import matplotlib.pyplot as plt
+
+        df = self.ale(X, feature, bins=bins, sample_size=sample_size, random_state=random_state)
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
+        ax.plot(df["bin_center"], df["ale_value"], color="#336699", marker="o", linewidth=2)
+        ax.axhline(0, color="#999999", linewidth=1, linestyle="--")
+        ax.set_xlabel(str(df["feature"].iloc[0]))
+        ax.set_ylabel("Accumulated local effect")
+        ax.set_title(f"ALE: {df['feature'].iloc[0]}")
+        ax.grid(alpha=0.25)
+        return self._finalize_plot(plt, show, save_path)
+
+    # ------------------------------------------------------------------ #
+    # LIME
+    # ------------------------------------------------------------------ #
+    def _build_lime_explainer(self, X_train, num_features=None, random_state=None, **lime_kwargs):
+        LimeTabularExplainer = _lazy_lime()
+        train = self._as_frame(X_train if X_train is not None else self.background_data)
+        if train is None:
+            raise ValueError("LIME requires X_train or background_data")
+        mode = lime_kwargs.pop("mode", "classification")
+        class_names = lime_kwargs.pop("class_names", ["class_0", "class_1"])
+        return LimeTabularExplainer(
+            training_data=np.asarray(train),
+            feature_names=list(train.columns),
+            class_names=class_names,
+            mode=mode,
+            random_state=random_state,
+            **lime_kwargs,
+        )
+
+    def lime_explain_instance(
+        self,
+        x_row,
+        X_train=None,
+        num_features=10,
+        num_samples=5000,
+        random_state=None,
+        **lime_kwargs,
+    ):
+        """Explain one sample with LIME.
+
+        Returns a DataFrame with ``feature``, ``feature_rule``, ``weight`` and
+        ``abs_weight`` columns sorted by absolute local surrogate weight.
+        """
+        if isinstance(x_row, pd.Series):
+            x_row = x_row.to_frame().T
+        elif isinstance(x_row, dict):
+            x_row = pd.DataFrame([x_row])
+        frame = self._as_frame(x_row)
+        if frame.shape[0] != 1:
+            frame = frame.iloc[[0]]
+
+        train = X_train if X_train is not None else self.background_data
+        explainer = self._build_lime_explainer(train, num_features, random_state, **lime_kwargs)
+        explanation = explainer.explain_instance(
+            data_row=np.asarray(frame.iloc[0]),
+            predict_fn=self._predict_proba_2d,
+            num_features=num_features,
+            num_samples=num_samples,
+        )
+        rows = []
+        names = list(frame.columns)
+        for rule, weight in explanation.as_list():
+            matched = next((name for name in names if str(rule).startswith(name) or name in str(rule)), rule)
+            rows.append({"feature": matched, "feature_rule": rule, "weight": float(weight)})
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return pd.DataFrame(columns=["feature", "feature_rule", "weight", "abs_weight"])
+        out["abs_weight"] = out["weight"].abs()
+        out = out.sort_values("abs_weight", ascending=False).reset_index(drop=True)
+        out.attrs["intercept"] = explanation.intercept
+        out.attrs["score"] = explanation.score
+        return out
+
+    def lime_global_importance(
+        self,
+        X,
+        X_train=None,
+        num_features=10,
+        num_samples=2000,
+        sample_size=100,
+        random_state=None,
+        **lime_kwargs,
+    ):
+        """Aggregate LIME local weights across a sample as global importance."""
+        frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
+        rows = []
+        for _, row in frame.iterrows():
+            local = self.lime_explain_instance(
+                row,
+                X_train=X_train,
+                num_features=num_features,
+                num_samples=num_samples,
+                random_state=random_state,
+                **lime_kwargs,
+            )
+            rows.append(local)
+        if not rows:
+            return pd.DataFrame(columns=["feature", "mean_abs_lime_weight", "frequency"])
+        all_rows = pd.concat(rows, ignore_index=True)
+        summary = all_rows.groupby("feature", as_index=False).agg(
+            mean_abs_lime_weight=("abs_weight", "mean"),
+            frequency=("feature", "size"),
+        )
+        return summary.sort_values("mean_abs_lime_weight", ascending=False).reset_index(drop=True)
+
+    # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -445,7 +642,4 @@ class ModelExplainer:
 
     def __repr__(self):
         n_feat = len(self.feature_names) if self.feature_names else "?"
-        return (
-            f"ModelExplainer(model_type={self.model_type!r}, "
-            f"n_features={n_feat}, kind={self._explainer_kind!r})"
-        )
+        return f"ModelExplainer(model_type={self.model_type!r}, n_features={n_feat}, kind={self._explainer_kind!r})"
