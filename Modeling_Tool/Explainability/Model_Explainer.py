@@ -5,6 +5,7 @@ Model explainability for the credit-modeling toolkit.
 Global and local explanations for models trained with SuperModelingFactory:
 
 * SHAP for attribution (global importance, summary / dependence plots, local contributions)
+* Owen Value grouped attribution via SHAP PartitionExplainer
 * PDP (partial dependence) for average marginal effects
 * ICE (individual conditional expectation) for per-sample response curves
 * ALE (accumulated local effects) for correlation-aware marginal effects
@@ -21,8 +22,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-__all__ = ["ModelExplainer"]
+from .Coalition_Structure import build_coalition_structure as _build_coalition_structure
 
+__all__ = ["ModelExplainer"]
 
 _TREE_MODEL_TYPES = frozenset({"lgb", "lightgbm", "xgb", "xgboost"})
 _LINEAR_MODEL_TYPES = frozenset({"lr", "linear", "logisticregression"})
@@ -35,7 +37,7 @@ def _lazy_shap():
         return shap
     except ImportError as exc:  # pragma: no cover - exercised via install matrix
         raise ImportError(
-            "ModelExplainer requires the optional `shap` dependency for SHAP "
+            "ModelExplainer requires the optional `shap` dependency for SHAP/Owen "
             "methods, which is not installed.\n"
             "Install it with:  pip install supermodelingfactory[explain]"
         ) from exc
@@ -59,24 +61,8 @@ class ModelExplainer:
 
     The explainer accepts either a SuperModelingFactory model wrapper
     (``GradientBoostingModel`` or ``LRMaster``) or a raw fitted estimator. It
-    exposes SHAP attribution plus model-agnostic effect methods (PDP, ICE, ALE,
-    and LIME).
-
-    Parameters
-    ----------
-    model : object
-        A fitted ``GradientBoostingModel`` / ``LRMaster`` wrapper, or a raw
-        fitted estimator.
-    feature_names : list of str, optional
-        Explicit feature ordering. If omitted, it is inferred from the wrapper's
-        ``varlist`` / the booster's feature names / the columns of the data
-        passed to explanation methods.
-    model_type : str, optional
-        Force the explainer family for SHAP. One of ``'lgb'``, ``'xgb'``,
-        ``'lr'``. If omitted, it is inferred from the model.
-    background_data : pandas.DataFrame or numpy.ndarray, optional
-        Representative training features. Required for SHAP linear/generic
-        explainers and useful as the default training data for LIME.
+    exposes SHAP attribution, Owen Value grouped attribution, plus model-agnostic
+    effect methods (PDP, ICE, ALE, and LIME).
     """
 
     def __init__(self, model, feature_names=None, model_type=None, background_data=None):
@@ -92,6 +78,14 @@ class ModelExplainer:
         self.expected_value_ = None
         self.explanation_ = None
         self._last_X = None
+
+        self.coalition_structure_ = None
+        self._owen_explainer = None
+        self._owen_model_output = None
+        self.owen_values_ = None
+        self.owen_expected_value_ = None
+        self.owen_explanation_ = None
+        self._owen_last_X = None
 
     # ------------------------------------------------------------------ #
     # Resolution helpers
@@ -162,6 +156,8 @@ class ModelExplainer:
     # ------------------------------------------------------------------ #
     def _as_frame(self, X):
         """Coerce input to a DataFrame aligned to ``feature_names`` when known."""
+        if X is None:
+            return None
         if isinstance(X, pd.DataFrame):
             cols = self.feature_names
             if cols is not None and all(c in X.columns for c in cols):
@@ -183,6 +179,12 @@ class ModelExplainer:
             proba = np.asarray(estimator.predict_proba(frame))
             return proba[:, -1] if proba.ndim == 2 else proba
         return np.asarray(estimator.predict(frame)).ravel()
+
+    def _predict_log_odds(self, X, eps=1e-6):
+        """Log-odds prediction callable for reason-code style explanations."""
+        p = np.asarray(self._predict_proba_pos(X)).ravel()
+        p = np.clip(p, eps, 1.0 - eps)
+        return np.log(p / (1.0 - p))
 
     def _predict_proba_2d(self, X):
         """Two-column probability callable for LIME classification mode."""
@@ -213,6 +215,23 @@ class ModelExplainer:
             vals = np.array(sorted(clean.unique()), dtype=float)
             return vals[:grid_resolution]
         return np.linspace(lo, hi, int(grid_resolution))
+
+    @staticmethod
+    def _normalize_values(values, base_values=None):
+        values = np.asarray(values)
+        base = np.asarray(base_values) if base_values is not None else None
+        if values.ndim == 3:
+            values = values[..., -1]
+            if base is not None and base.ndim == 2:
+                base = base[..., -1]
+        return values, base
+
+    def _prediction_fn(self, model_output):
+        if model_output == "probability":
+            return self._predict_proba_pos
+        if model_output in {"log_odds", "logit"}:
+            return self._predict_log_odds
+        raise ValueError("model_output must be 'probability' or 'log_odds'")
 
     # ------------------------------------------------------------------ #
     # SHAP computation
@@ -249,12 +268,7 @@ class ModelExplainer:
         if self._explainer is None:
             self._build_explainer()
         explanation = self._explainer(X)
-        values = np.asarray(explanation.values)
-        base = np.asarray(explanation.base_values)
-        if values.ndim == 3:
-            values = values[..., -1]
-            if base.ndim == 2:
-                base = base[..., -1]
+        values, base = self._normalize_values(explanation.values, explanation.base_values)
         return values, base, explanation
 
     def explain(self, X):
@@ -330,34 +344,189 @@ class ModelExplainer:
         values, base, _ = self._shap_values_for(frame)
         names = self._resolved_names(frame, values.shape[1])
         table = pd.DataFrame(
-            {
-                "feature": names,
-                "value": np.ravel(np.asarray(frame.values)),
-                "shap_value": np.ravel(values[0]),
-            }
+            {"feature": names, "value": np.ravel(np.asarray(frame.values)), "shap_value": np.ravel(values[0])}
         )
         order = table["shap_value"].abs().sort_values(ascending=False).index
         table = table.loc[order].reset_index(drop=True)
-        table.attrs["base_value"] = float(np.ravel(base)[0]) if base.size else float("nan")
+        table.attrs["base_value"] = float(np.ravel(base)[0]) if base is not None and base.size else float("nan")
+        return table
+
+    # ------------------------------------------------------------------ #
+    # Owen Value / Coalition SHAP
+    # ------------------------------------------------------------------ #
+    def build_coalition_structure(
+        self,
+        X=None,
+        prior_groups=None,
+        threshold=0.35,
+        method="complete",
+        corr_method="spearman",
+        min_group_size=1,
+        intra_dist=0.01,
+        inter_dist=0.99,
+    ):
+        """Build and cache a coalition structure for Owen Value explanations."""
+        data = X if X is not None else self.background_data
+        if data is None:
+            raise ValueError("build_coalition_structure requires X or background_data")
+        frame = self._as_frame(data)
+        cs = _build_coalition_structure(
+            frame,
+            prior_groups=prior_groups,
+            threshold=threshold,
+            method=method,
+            corr_method=corr_method,
+            min_group_size=min_group_size,
+            intra_dist=intra_dist,
+            inter_dist=inter_dist,
+        )
+        self.coalition_structure_ = cs
+        return cs
+
+    def _build_owen_explainer(self, coalition_structure, background_data=None, model_output="probability"):
+        shap = _lazy_shap()
+        background = background_data if background_data is not None else self.background_data
+        if background is None:
+            raise ValueError("Owen Value explanations require background_data")
+        background = self._as_frame(background)
+        features = coalition_structure.get("features")
+        if features is not None:
+            background = background.loc[:, list(features)]
+        masker = shap.maskers.Partition(background, clustering=coalition_structure["shap_lnk"])
+        self._owen_explainer = shap.PartitionExplainer(self._prediction_fn(model_output), masker)
+        self._owen_model_output = model_output
+        return self._owen_explainer
+
+    def explain_owen(
+        self,
+        X,
+        coalition_structure=None,
+        prior_groups=None,
+        threshold=0.35,
+        method="complete",
+        corr_method="spearman",
+        background_data=None,
+        model_output="probability",
+        rebuild=False,
+        **explain_kwargs,
+    ):
+        """Compute Owen Value attribution with SHAP PartitionExplainer.
+
+        ``model_output='probability'`` explains positive-class probability.
+        ``model_output='log_odds'`` is useful for credit reason-code reporting.
+        """
+        frame = self._as_frame(X)
+        if coalition_structure is None:
+            coalition_structure = self.coalition_structure_
+        if coalition_structure is None or prior_groups is not None:
+            base = background_data if background_data is not None else self.background_data
+            if base is None:
+                base = frame
+            coalition_structure = self.build_coalition_structure(
+                base,
+                prior_groups=prior_groups,
+                threshold=threshold,
+                method=method,
+                corr_method=corr_method,
+            )
+        features = coalition_structure.get("features")
+        if features is not None:
+            frame = frame.loc[:, list(features)]
+
+        if rebuild or self._owen_explainer is None or self._owen_model_output != model_output:
+            self._build_owen_explainer(coalition_structure, background_data=background_data, model_output=model_output)
+
+        explanation = self._owen_explainer(frame, **explain_kwargs)
+        values, base = self._normalize_values(explanation.values, explanation.base_values)
+        self.coalition_structure_ = coalition_structure
+        self.owen_values_ = values
+        self.owen_expected_value_ = base
+        self.owen_explanation_ = explanation
+        self._owen_last_X = frame
+        return explanation
+
+    def _ensure_owen_values(self, X=None):
+        if X is not None:
+            self.explain_owen(X)
+        if self.owen_values_ is None or self._owen_last_X is None or self.coalition_structure_ is None:
+            raise RuntimeError("No Owen values available. Call explain_owen(X) first or pass X=...")
+        return self.owen_values_, self._owen_last_X, self.coalition_structure_
+
+    def owen_feature_importance(self, X=None, normalize=False):
+        """Global feature importance as mean absolute Owen value."""
+        values, X_used, _ = self._ensure_owen_values(X)
+        names = self._resolved_names(X_used, values.shape[1])
+        table = pd.DataFrame({"feature": names, "mean_abs_owen": np.abs(values).mean(axis=0)})
+        table = table.sort_values("mean_abs_owen", ascending=False).reset_index(drop=True)
+        if normalize:
+            total = table["mean_abs_owen"].sum()
+            table["importance_pct"] = table["mean_abs_owen"] / total if total else 0.0
+        return table
+
+    def owen_group_importance(self, X=None, normalize=False):
+        """Aggregate Owen values to coalition groups."""
+        values, X_used, cs = self._ensure_owen_values(X)
+        names = list(X_used.columns)
+        rows = []
+        for group, feats in cs["groups"].items():
+            idxs = [names.index(feat) for feat in feats if feat in names]
+            if not idxs:
+                continue
+            contrib = values[:, idxs].sum(axis=1)
+            rows.append(
+                {
+                    "group": group,
+                    "n_features": len(idxs),
+                    "features": [names[i] for i in idxs],
+                    "mean_owen": float(np.mean(contrib)),
+                    "mean_abs_owen": float(np.mean(np.abs(contrib))),
+                }
+            )
+        table = pd.DataFrame(rows).sort_values("mean_abs_owen", ascending=False).reset_index(drop=True)
+        if normalize and not table.empty:
+            total = table["mean_abs_owen"].sum()
+            table["importance_pct"] = table["mean_abs_owen"] / total if total else 0.0
+        return table
+
+    def owen_explain_instance(self, x_row=None, aggregate_groups=True):
+        """Return local Owen reason codes for one sample."""
+        if x_row is not None:
+            self.explain_owen(self._as_frame(x_row).iloc[[0]])
+        values, X_used, cs = self._ensure_owen_values(None)
+        row_values = values[0]
+        row_x = X_used.iloc[0]
+        if not aggregate_groups:
+            table = pd.DataFrame({"feature": list(X_used.columns), "value": row_x.values, "owen_value": row_values})
+            table["abs_owen_value"] = table["owen_value"].abs()
+            return table.sort_values("abs_owen_value", ascending=False).reset_index(drop=True)
+
+        rows = []
+        names = list(X_used.columns)
+        for group, feats in cs["groups"].items():
+            idxs = [names.index(feat) for feat in feats if feat in names]
+            if not idxs:
+                continue
+            contrib = float(row_values[idxs].sum())
+            rows.append(
+                {
+                    "group": group,
+                    "n_features": len(idxs),
+                    "features": [names[i] for i in idxs],
+                    "owen_value": contrib,
+                    "abs_owen_value": abs(contrib),
+                }
+            )
+        table = pd.DataFrame(rows).sort_values("abs_owen_value", ascending=False).reset_index(drop=True)
+        base = self.owen_expected_value_
+        table.attrs["base_value"] = float(np.ravel(base)[0]) if base is not None and np.asarray(base).size else float("nan")
+        table.attrs["model_output"] = self._owen_model_output
         return table
 
     # ------------------------------------------------------------------ #
     # PDP / ICE
     # ------------------------------------------------------------------ #
-    def partial_dependence(
-        self,
-        X,
-        feature,
-        grid_resolution=50,
-        percentiles=(0.05, 0.95),
-        sample_size=None,
-        random_state=None,
-    ):
-        """Compute one-way partial dependence for a numeric feature.
-
-        Returns a DataFrame with ``feature``, ``grid_value`` and
-        ``average_prediction`` columns.
-        """
+    def partial_dependence(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None):
+        """Compute one-way partial dependence for a numeric feature."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
@@ -366,21 +535,9 @@ class ModelExplainer:
             tmp = frame.copy()
             tmp[feature] = value
             averages.append(float(np.mean(self._predict_proba_pos(tmp))))
-        return pd.DataFrame(
-            {"feature": feature, "grid_value": grid, "average_prediction": averages}
-        )
+        return pd.DataFrame({"feature": feature, "grid_value": grid, "average_prediction": averages})
 
-    def pdp_plot(
-        self,
-        X,
-        feature,
-        grid_resolution=50,
-        percentiles=(0.05, 0.95),
-        sample_size=None,
-        random_state=None,
-        show=True,
-        save_path=None,
-    ):
+    def pdp_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, show=True, save_path=None):
         """Plot one-way partial dependence for a numeric feature."""
         import matplotlib.pyplot as plt
 
@@ -393,21 +550,8 @@ class ModelExplainer:
         ax.grid(alpha=0.25)
         return self._finalize_plot(plt, show, save_path)
 
-    def ice(
-        self,
-        X,
-        feature,
-        grid_resolution=50,
-        percentiles=(0.05, 0.95),
-        sample_size=200,
-        random_state=None,
-        centered=False,
-    ):
-        """Compute individual conditional expectation curves.
-
-        Returns a long DataFrame with ``sample_index``, ``grid_value`` and
-        ``prediction`` columns. Set ``centered=True`` for centered ICE.
-        """
+    def ice(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=200, random_state=None, centered=False):
+        """Compute individual conditional expectation curves."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
@@ -424,18 +568,7 @@ class ModelExplainer:
             out["prediction"] = out["prediction"] - base
         return out
 
-    def ice_plot(
-        self,
-        X,
-        feature,
-        grid_resolution=50,
-        percentiles=(0.05, 0.95),
-        sample_size=100,
-        random_state=None,
-        centered=False,
-        show=True,
-        save_path=None,
-    ):
+    def ice_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=100, random_state=None, centered=False, show=True, save_path=None):
         """Plot ICE curves for a numeric feature."""
         import matplotlib.pyplot as plt
 
@@ -456,12 +589,7 @@ class ModelExplainer:
     # ALE
     # ------------------------------------------------------------------ #
     def ale(self, X, feature, bins=20, sample_size=None, random_state=None):
-        """Compute first-order accumulated local effects for a numeric feature.
-
-        The implementation uses quantile bins, computes local prediction
-        differences at each bin boundary, accumulates them, and centers the ALE
-        curve by the sample-weighted mean.
-        """
+        """Compute first-order accumulated local effects for a numeric feature."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         values = pd.to_numeric(frame[feature], errors="coerce")
@@ -506,16 +634,7 @@ class ModelExplainer:
         else:
             ale_values = ale_values - ale_values.mean()
 
-        return pd.DataFrame(
-            {
-                "feature": feature,
-                "bin_left": edges[:-1],
-                "bin_right": edges[1:],
-                "bin_center": centers,
-                "ale_value": ale_values,
-                "n": counts,
-            }
-        )
+        return pd.DataFrame({"feature": feature, "bin_left": edges[:-1], "bin_right": edges[1:], "bin_center": centers, "ale_value": ale_values, "n": counts})
 
     def ale_plot(self, X, feature, bins=20, sample_size=None, random_state=None, show=True, save_path=None):
         """Plot first-order ALE for a numeric feature."""
@@ -550,20 +669,8 @@ class ModelExplainer:
             **lime_kwargs,
         )
 
-    def lime_explain_instance(
-        self,
-        x_row,
-        X_train=None,
-        num_features=10,
-        num_samples=5000,
-        random_state=None,
-        **lime_kwargs,
-    ):
-        """Explain one sample with LIME.
-
-        Returns a DataFrame with ``feature``, ``feature_rule``, ``weight`` and
-        ``abs_weight`` columns sorted by absolute local surrogate weight.
-        """
+    def lime_explain_instance(self, x_row, X_train=None, num_features=10, num_samples=5000, random_state=None, **lime_kwargs):
+        """Explain one sample with LIME."""
         if isinstance(x_row, pd.Series):
             x_row = x_row.to_frame().T
         elif isinstance(x_row, dict):
@@ -594,16 +701,7 @@ class ModelExplainer:
         out.attrs["score"] = explanation.score
         return out
 
-    def lime_global_importance(
-        self,
-        X,
-        X_train=None,
-        num_features=10,
-        num_samples=2000,
-        sample_size=100,
-        random_state=None,
-        **lime_kwargs,
-    ):
+    def lime_global_importance(self, X, X_train=None, num_features=10, num_samples=2000, sample_size=100, random_state=None, **lime_kwargs):
         """Aggregate LIME local weights across a sample as global importance."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         rows = []
