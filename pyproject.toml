@@ -77,10 +77,10 @@ dependencies = [
 optuna  = ["optuna>=4.0.0"]
 stats   = ["statsmodels>=0.13.0"]
 imblearn = ["imbalanced-learn>=0.10.0"]
-# SHAP-based model explainability (Modeling_Tool.Explainability.ModelExplainer).
+# Model explainability (Modeling_Tool.Explainability.ModelExplainer).
 # Optional + lazily imported so the base install stays light and
-# `import Modeling_Tool` never pulls shap.
-explain = ["shap>=0.44.0"]
+# `import Modeling_Tool` never pulls shap/lime.
+explain = ["shap>=0.44.0", "lime>=0.2.0.1"]
 # pyodps drags libcst which needs Rust in manylinux2014. Kept optional so the
 # Linux wheel build container doesn't need a Rust toolchain. Users who need
 # ODPSRunner install with `pip install supermodelingfactory[odps]`.
