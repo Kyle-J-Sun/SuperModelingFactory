@@ -5,7 +5,7 @@ Model explainability sub-package.
 Provides :class:`ModelExplainer`, a unified wrapper for models trained by
 SuperModelingFactory (``GradientBoostingModel`` and ``LRMaster``) as well as raw
 fitted estimators. It supports SHAP attribution plus PDP, ICE, ALE, and LIME
-explanations.
+explanations from one entry point.
 
 ``shap`` and ``lime`` are optional dependencies imported lazily on first use;
 install them via ``pip install supermodelingfactory[explain]``.
