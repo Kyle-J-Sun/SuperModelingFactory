@@ -82,24 +82,14 @@ from .Feature import (
 )
 
 _MODEL_EXPORTS = frozenset({
-    'GradientBoostingModel',
-    'LightGBMModel',
-    'XGBoostModel',
-    'CatBoostModel',
-    'lgbm_quick_train',
-    'xgbm_quick_train',
-    'catboost_quick_train',
-    'LRMaster',
-    'FeatureSelectionAnalyzer',
-    'BackwardVariableEliminator',
-    'backward_lgbm',
-    'backward_xgbm',
+    'GradientBoostingModel', 'LightGBMModel', 'XGBoostModel', 'CatBoostModel',
+    'lgbm_quick_train', 'xgbm_quick_train', 'catboost_quick_train',
+    'LRMaster', 'FeatureSelectionAnalyzer', 'BackwardVariableEliminator',
+    'backward_lgbm', 'backward_xgbm',
 })
 
 _EXPLAIN_EXPORTS = frozenset({
-    'ModelExplainer',
-    'build_coalition_structure',
-    'CREDIT_PRIOR_GROUPS',
+    'ModelExplainer', 'build_coalition_structure', 'CREDIT_PRIOR_GROUPS',
 })
 
 def __getattr__(name):
@@ -130,9 +120,7 @@ __all__ = [
     'cross_risk', 'get_gains_table', 'get_perf_summary',
     'GainsTableCalculator', 'PerformanceEvaluator', 'Model_Evaluation_Tool',
     'EvaluationPipeline', 'get_gains_table_by_cust_metrics',
-    'calc_pr', 'calc_roc', 'calc_lift_apt', 'calc_equid_dist',
-    'calc_equid_pct', 'calc_fixed_pct', 'evaluate_performance',
-    'comparison_performance',
+    'calc_roc', 'calc_lift_apt', 'evaluate_performance', 'comparison_performance',
     'DistributionAdaptation', 'RejectInferrer', 'RejectInferenceFactory',
     'ParcelingInferrer', 'HardCutoffInferrer', 'FuzzyAugmentInferrer',
     'SimpleAugmentInferrer', 'SampleSplitter', 'StratifiedSampler',
