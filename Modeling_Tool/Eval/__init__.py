@@ -42,6 +42,9 @@ from .evaluate_model import (
     resturct_gains,
 )
 
+from Modeling_Tool.weighted_integration import apply_eval_patches
+apply_eval_patches(globals())
+
 __all__ = [
     # Model_Eval_Tool
     'get_gains_table', 'get_perf_summary', 'cross_risk', 'tie_score_rate',

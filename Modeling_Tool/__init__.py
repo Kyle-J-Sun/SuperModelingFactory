@@ -4,10 +4,6 @@ __author__ = "Jingkai Sun"
 __version__ = "0.1.3"
 
 # Core module - base data structures
-# ODPSRunner is intentionally omitted from this eager import so that
-# `import Modeling_Tool` does not require pyodps. Access it via
-# `from Modeling_Tool.Core import ODPSRunner` after installing the
-# `[odps]` extra (`pip install supermodelingfactory[odps]`).
 from .Core import (
     Binning,
     super_binning,
@@ -25,15 +21,22 @@ from .Core import (
     scoring,
 )
 
-# Evaluation module (no heavy optional deps, eager load is fine)
+# Evaluation module
 from .Eval import (
     cross_risk,
+    get_gains_table,
+    get_perf_summary,
     GainsTableCalculator,
     PerformanceEvaluator,
     Model_Evaluation_Tool,
     EvaluationPipeline,
     get_gains_table_by_cust_metrics,
+    calc_pr,
+    calc_roc,
     calc_lift_apt,
+    calc_equid_dist,
+    calc_equid_pct,
+    calc_fixed_pct,
     evaluate_performance,
     comparison_performance,
 )
@@ -78,11 +81,6 @@ from .Feature import (
     calculate_psi_within_dataset,
 )
 
-# ---------------------------------------------------------------------------
-# Lazy attribute access for heavy optional modules (Model, ODPSRunner,
-# Explainability.ModelExplainer).
-# ---------------------------------------------------------------------------
-
 _MODEL_EXPORTS = frozenset({
     'GradientBoostingModel',
     'LightGBMModel',
@@ -94,6 +92,8 @@ _MODEL_EXPORTS = frozenset({
     'LRMaster',
     'FeatureSelectionAnalyzer',
     'BackwardVariableEliminator',
+    'backward_lgbm',
+    'backward_xgbm',
 })
 
 _EXPLAIN_EXPORTS = frozenset({
@@ -116,86 +116,30 @@ def __getattr__(name):
 
 
 __all__ = [
-    # Version info
-    '__author__',
-    '__version__',
-
-    # Core
-    'Binning',
-    'super_binning',
-    'ODPSRunner',  # lazy: requires `pip install supermodelingfactory[odps]`
-    'SlopeCalculator',
-    'DataFrameProcessor',
-    'FilePathManager',
-    'DateTimeUtils',
-    'WOEIVCalculator',
-    'TextEncryptor',
-    'get_feature_names',
-    'pull_attributes_in_batch',
-    'save_model',
-    'load_model',
-    'load_model_metadata',
+    '__author__', '__version__',
+    'Binning', 'super_binning', 'ODPSRunner',
+    'SlopeCalculator', 'DataFrameProcessor', 'FilePathManager', 'DateTimeUtils',
+    'WOEIVCalculator', 'TextEncryptor', 'get_feature_names',
+    'pull_attributes_in_batch', 'save_model', 'load_model', 'load_model_metadata',
     'scoring',
-
-    # Model (lazy — imported on first access via __getattr__)
-    'GradientBoostingModel',
-    'LightGBMModel',
-    'XGBoostModel',
-    'CatBoostModel',
-    'lgbm_quick_train',
-    'xgbm_quick_train',
-    'catboost_quick_train',
-    'LRMaster',
-    'FeatureSelectionAnalyzer',
-    'BackwardVariableEliminator',
-
-    # Explainability (lazy — requires `pip install supermodelingfactory[explain]`)
-    'ModelExplainer',
-    'build_coalition_structure',
-    'CREDIT_PRIOR_GROUPS',
-
-    # Eval
-    'cross_risk',
-    'GainsTableCalculator',
-    'PerformanceEvaluator',
-    'Model_Evaluation_Tool',
-    'EvaluationPipeline',
-    'get_gains_table_by_cust_metrics',
-    'calc_lift_apt',
-    'evaluate_performance',
+    'GradientBoostingModel', 'LightGBMModel', 'XGBoostModel', 'CatBoostModel',
+    'lgbm_quick_train', 'xgbm_quick_train', 'catboost_quick_train',
+    'LRMaster', 'FeatureSelectionAnalyzer', 'BackwardVariableEliminator',
+    'backward_lgbm', 'backward_xgbm',
+    'ModelExplainer', 'build_coalition_structure', 'CREDIT_PRIOR_GROUPS',
+    'cross_risk', 'get_gains_table', 'get_perf_summary',
+    'GainsTableCalculator', 'PerformanceEvaluator', 'Model_Evaluation_Tool',
+    'EvaluationPipeline', 'get_gains_table_by_cust_metrics',
+    'calc_pr', 'calc_roc', 'calc_lift_apt', 'calc_equid_dist',
+    'calc_equid_pct', 'calc_fixed_pct', 'evaluate_performance',
     'comparison_performance',
-
-    # Sample
-    'DistributionAdaptation',
-    'RejectInferrer',
-    'RejectInferenceFactory',
-    'ParcelingInferrer',
-    'HardCutoffInferrer',
-    'FuzzyAugmentInferrer',
-    'SimpleAugmentInferrer',
-    'SampleSplitter',
-    'StratifiedSampler',
-    'SampleBalancer',
-    'select_sample_seed',
-
-    # WOE
-    'WOE_Master',
-    'MonotoneWOEBinner',
-    'WOEEngineAdapter',
-    'as_woe_engine',
-    'is_monotonic',
-    'woe_transform',
-    'woe_transformation',
-    'plot_woe',
-    'save_mapping_table',
-    'load_mapping_table',
-    'get_overall_woe_table',
-
-    # Feature
-    'DistributionShiftAnalyzer',
-    'DistributionPlotter',
-    'VarExtractionInsights',
-    'CorrelationFilter',
-    'PSICalculator',
-    'calculate_psi_within_dataset',
+    'DistributionAdaptation', 'RejectInferrer', 'RejectInferenceFactory',
+    'ParcelingInferrer', 'HardCutoffInferrer', 'FuzzyAugmentInferrer',
+    'SimpleAugmentInferrer', 'SampleSplitter', 'StratifiedSampler',
+    'SampleBalancer', 'select_sample_seed',
+    'WOE_Master', 'MonotoneWOEBinner', 'WOEEngineAdapter', 'as_woe_engine',
+    'is_monotonic', 'woe_transform', 'woe_transformation', 'plot_woe',
+    'save_mapping_table', 'load_mapping_table', 'get_overall_woe_table',
+    'DistributionShiftAnalyzer', 'DistributionPlotter', 'VarExtractionInsights',
+    'CorrelationFilter', 'PSICalculator', 'calculate_psi_within_dataset',
 ]

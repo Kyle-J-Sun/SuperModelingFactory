@@ -3,19 +3,6 @@ Modeling module for credit modeling toolkit.
 
 This module provides classes for building and training credit models
 using various algorithms including LightGBM, XGBoost, and CatBoost.
-
-Classes
--------
-LRMaster : Logistic Regression master wrapper.
-GradientBoostingModel : LightGBM / XGBoost / CatBoost model wrapper.
-BackwardEliminationAnalyzer : Backward variable elimination.
-
-Examples
---------
->>> from Modeling_Tool.Model import LRMaster
->>> model = LRMaster(params={'C': 1.0})
->>> model.fit(train_df, varlist, 'target')
->>> predictions = model.predict(test_df)
 """
 
 from .LRM_Tool import (
@@ -45,8 +32,6 @@ from .GBM_Tool import (
     GradientBoostingModel,
 )
 
-# Attach GradientBoostingModel.param_search without changing the legacy GBM_Tool
-# training wrapper surface.
 from . import GBM_Search_Tool as _GBM_Search_Tool  # noqa: F401
 
 from .Backward_Tool import (
@@ -56,23 +41,17 @@ from .Backward_Tool import (
     BackwardEliminationAnalyzer,
 )
 
+from Modeling_Tool.weighted_integration import apply_model_patches
+apply_model_patches(globals())
+
 __all__ = [
-    # LRM_Tool - Functions
     'lr_model', 'lr_varimp', 'get_lr_statsmodel_summary',
     'compute_aic', 'compute_bic',
-
-    # LRM_Tool - Classes
     'LRMaster', 'FeatureSelectionAnalyzer',
-
-    # GBM_Tool - Functions
     'set_num_leaves', 'lgb_model', 'lgb_varimp', 'lgbm_quick_train',
     'xgb_model', 'xgbm_quick_train', 'xgb_varimp',
     'catboost_model', 'catboost_varimp', 'catboost_quick_train',
-
-    # GBM_Tool - Classes
     'LightGBMModel', 'XGBoostModel', 'CatBoostModel', 'GradientBoostingModel',
-
-    # Backward_Tool
     'backward_lgbm', 'backward_xgbm',
     'BackwardVariableEliminator', 'BackwardEliminationAnalyzer',
 ]
