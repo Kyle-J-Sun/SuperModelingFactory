@@ -26,10 +26,20 @@ from .GBM_Tool import (
     LightGBMModel,
     XGBoostModel,
     CatBoostModel,
-    GradientBoostingModel,
+    GradientBoostingModel as _GradientBoostingModelBase,
 )
 
-from . import GBM_Search_Tool as _GBM_Search_Tool  # noqa: F401
+GradientBoostingModel = _GradientBoostingModelBase
+try:
+    from .GBM_Search_Tool import _gbm_param_search, attach_gbm_param_search
+    attach_gbm_param_search(_GradientBoostingModelBase)
+    if not hasattr(_GradientBoostingModelBase, "param_search"):
+        class GradientBoostingModel(_GradientBoostingModelBase):
+            param_search = _gbm_param_search
+            best_params_ = None
+            search_results_ = None
+except Exception:
+    GradientBoostingModel = _GradientBoostingModelBase
 
 from .Backward_Tool import (
     backward_lgbm,
