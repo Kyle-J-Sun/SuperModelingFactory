@@ -8,7 +8,8 @@ fitted estimators. It supports SHAP attribution, Owen Value grouped attribution,
 plus PDP, ICE, ALE, and LIME explanations from one entry point.
 
 ``shap`` and ``lime`` are optional dependencies imported lazily on first use;
-install them via ``pip install supermodelingfactory[explain]``.
+install them via ``pip install supermodelingfactory[explain]``. Owen Value uses
+SHAP's PartitionExplainer under the same explainability extra.
 
 Examples
 --------
