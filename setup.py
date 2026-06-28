@@ -32,11 +32,8 @@ except ImportError as exc:  # pragma: no cover
 ROOT = Path(__file__).parent
 
 
-# -----------------------------------------------------------------------------
-# Proprietary modules to be compiled into .so / .pyd (source NOT shipped).
-# Keep this list in sync with the closed-source decision matrix in README.
-# -----------------------------------------------------------------------------
 CLOSED_SOURCE_MODULES: list[tuple[str, str]] = [
+    ("Modeling_Tool.weighted_integration", "Modeling_Tool/weighted_integration.py"),
     # ---- WOE ----
     ("Modeling_Tool.WOE.WOE_Master",          "Modeling_Tool/WOE/WOE_Master.py"),
     ("Modeling_Tool.WOE.WOE_Monotone_Binner", "Modeling_Tool/WOE/WOE_Monotone_Binner.py"),
@@ -49,9 +46,10 @@ CLOSED_SOURCE_MODULES: list[tuple[str, str]] = [
     ("Modeling_Tool.Feature.Feature_Insights",  "Modeling_Tool/Feature/Feature_Insights.py"),
     ("Modeling_Tool.Feature.PSI_Tool",          "Modeling_Tool/Feature/PSI_Tool.py"),
     # ---- Model ----
-    ("Modeling_Tool.Model.Backward_Tool", "Modeling_Tool/Model/Backward_Tool.py"),
-    ("Modeling_Tool.Model.GBM_Tool",      "Modeling_Tool/Model/GBM_Tool.py"),
-    ("Modeling_Tool.Model.LRM_Tool",      "Modeling_Tool/Model/LRM_Tool.py"),
+    ("Modeling_Tool.Model.Backward_Tool",    "Modeling_Tool/Model/Backward_Tool.py"),
+    ("Modeling_Tool.Model.GBM_Tool",         "Modeling_Tool/Model/GBM_Tool.py"),
+    ("Modeling_Tool.Model.GBM_Search_Tool",  "Modeling_Tool/Model/GBM_Search_Tool.py"),
+    ("Modeling_Tool.Model.LRM_Tool",         "Modeling_Tool/Model/LRM_Tool.py"),
     # ---- Eval ----
     ("Modeling_Tool.Eval.Evaluation_Tool", "Modeling_Tool/Eval/Evaluation_Tool.py"),
     ("Modeling_Tool.Eval.Model_Eval_Tool", "Modeling_Tool/Eval/Model_Eval_Tool.py"),
@@ -69,31 +67,15 @@ CLOSED_SOURCE_MODULES: list[tuple[str, str]] = [
 
 
 extensions = [
-    Extension(
-        name=mod,
-        sources=[src],
-        # Compile-time defines kept minimal; numpy headers are optional and only
-        # needed if individual modules use the legacy C-API.
-    )
+    Extension(name=mod, sources=[src])
     for mod, src in CLOSED_SOURCE_MODULES
 ]
 
-# Fully-qualified module names of every closed-source target (dotted form).
-# Used by the custom build_py command below to strip the original .py source
-# from the wheel — only the compiled .so / .pyd extension ships.
 CLOSED_SOURCE_DOTTED = {mod for mod, _ in CLOSED_SOURCE_MODULES}
 
 
 class build_py_strip_closed_source(_build_py):
-    """Custom build_py that excludes closed-source .py files from the wheel.
-
-    setuptools' default find_packages() + build_py would happily ship the
-    original Python source alongside the compiled extension, defeating the
-    purpose of the protection layer. We filter the (package, module, file)
-    tuples returned by `find_package_modules` so the .py source is never
-    copied into the build tree — only the Cython-generated .so / .pyd is
-    packaged.
-    """
+    """Custom build_py that excludes closed-source .py files from the wheel."""
 
     def find_package_modules(self, package, package_dir):
         modules = super().find_package_modules(package, package_dir)
@@ -101,25 +83,13 @@ class build_py_strip_closed_source(_build_py):
         for pkg, mod, filepath in modules:
             dotted = f"{pkg}.{mod}"
             if dotted in CLOSED_SOURCE_DOTTED:
-                # Skip — only the compiled extension and the .pyi stub ship.
                 continue
             if mod.startswith("test_") or mod == "conftest":
-                # Tests stay in the repo for `make test`, but never ship.
                 continue
             filtered.append((pkg, mod, filepath))
         return filtered
 
 
-# -----------------------------------------------------------------------------
-# Cython directives
-#   language_level   : Python 3 syntax
-#   embedsignature   : OFF — do not embed Python signatures in the .so binary
-#                      (lowers reverse-engineering surface; users still get
-#                      signatures via the shipped .pyi stubs)
-#   binding          : True — produce CPython-compatible function objects
-#   boundscheck/wraparound  : keep ON (safe defaults). Flip OFF per-module
-#                              via in-file `# cython: ...` if a hot loop needs it.
-# -----------------------------------------------------------------------------
 CYTHON_DIRECTIVES = {
     "language_level": "3",
     "embedsignature": False,
@@ -145,16 +115,7 @@ setup(
     url="https://github.com/Kyle-J-Sun/SuperModelingFactory",
     license="BUSL-1.1",
     python_requires=">=3.10",
-    # find_packages picks up every namespace that contains an __init__.py
-    # — Modeling_Tool, Modeling_Tool.Core, Modeling_Tool.WOE, ExcelMaster, Report, etc.
-    packages=find_packages(
-        exclude=[
-            "*.backup", "*.backup.*", "backup.*", "backup",
-            "tests", "tests.*",
-        ],
-    ),
-    # Ship the .pyi stubs alongside the compiled extensions so IDEs keep type
-    # hints and the FINGERPRINT/copyright markers remain on disk.
+    packages=find_packages(exclude=["*.backup", "*.backup.*", "backup.*", "backup", "tests", "tests.*"]),
     package_data={
         "Modeling_Tool.WOE":     ["*.pyi"],
         "Modeling_Tool.Feature": ["*.pyi"],
@@ -166,16 +127,11 @@ setup(
     ext_modules=cythonize(
         extensions,
         compiler_directives=CYTHON_DIRECTIVES,
-        # We want a deterministic build; do not regenerate .c on every run.
         force=True,
-        # Quiet mode keeps CI logs readable; flip to False for debugging.
         quiet=False,
     ),
     cmdclass={"build_py": build_py_strip_closed_source},
     zip_safe=False,
-    # include_package_data=False (default) prevents Cython-generated .c
-    # intermediates from leaking into the wheel; only .pyi stubs declared in
-    # package_data above are shipped alongside the compiled extensions.
     include_package_data=False,
     classifiers=[
         "Development Status :: 4 - Beta",
