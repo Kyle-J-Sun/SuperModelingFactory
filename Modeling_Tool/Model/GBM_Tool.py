@@ -141,7 +141,9 @@ def _normalize_catboost_params(params_dict):
     """Normalize unified GBM params to CatBoost classifier kwargs.
 
     Maps sklearn-style names (n_estimators, max_depth, random_state) to CatBoost
-    equivalents and extracts fit-only arguments.
+    equivalents and extracts fit-only arguments. ``eval_metric`` is a CatBoost
+    constructor argument (it is not accepted by ``fit()``), so it is folded into
+    the returned classifier params.
 
     Returns
     -------
@@ -162,6 +164,10 @@ def _normalize_catboost_params(params_dict):
 
     params.setdefault('loss_function', 'Logloss')
     params.setdefault('verbose', False)
+
+    # eval_metric must be passed to the CatBoostClassifier constructor, not fit().
+    if eval_metric is not None:
+        params['eval_metric'] = eval_metric
 
     return params, early_stopping_rounds, eval_metric, cat_features
 
@@ -510,6 +516,8 @@ def catboost_model(x, y, valx, valy, params_dict, sample_weight=None):
     cb_params, early_stopping_rounds, eval_metric, cat_features = (
         _normalize_catboost_params(params_dict)
     )
+    # eval_metric is folded into cb_params by _normalize_catboost_params because
+    # CatBoost only accepts it as a constructor argument, not in fit().
     model = CatBoostClassifier(**cb_params)
     fit_kwargs = {
         'eval_set': (valx, valy),
@@ -517,8 +525,6 @@ def catboost_model(x, y, valx, valy, params_dict, sample_weight=None):
     }
     if early_stopping_rounds is not None:
         fit_kwargs['early_stopping_rounds'] = early_stopping_rounds
-    if eval_metric is not None:
-        fit_kwargs['eval_metric'] = eval_metric
     if cat_features is not None:
         fit_kwargs['cat_features'] = cat_features
     if sample_weight is not None:
