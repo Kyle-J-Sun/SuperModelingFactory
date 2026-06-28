@@ -137,6 +137,11 @@ def _ensure_feature_names_in(estimator, feature_names):
         pass
 
 
+# CatBoost metric names are case-sensitive; map common lower-case aliases to the
+# spellings CatBoost expects. Unlisted strings are passed through unchanged.
+_CATBOOST_METRIC_ALIASES = {'auc': 'AUC', 'logloss': 'Logloss'}
+
+
 def _normalize_catboost_params(params_dict):
     """Normalize unified GBM params to CatBoost classifier kwargs.
 
@@ -144,6 +149,11 @@ def _normalize_catboost_params(params_dict):
     equivalents and extracts fit-only arguments. ``eval_metric`` is a CatBoost
     constructor argument (it is not accepted by ``fit()``), so it is folded into
     the returned classifier params.
+
+    ``eval_metric`` defaults to ``'AUC'`` when neither ``eval_metric`` nor
+    ``metric`` is supplied. Common lower-case aliases (e.g. ``'auc'``,
+    ``'logloss'``) are normalized to the case-sensitive names CatBoost expects;
+    any other string is left untouched.
 
     Returns
     -------
@@ -166,8 +176,11 @@ def _normalize_catboost_params(params_dict):
     params.setdefault('verbose', False)
 
     # eval_metric must be passed to the CatBoostClassifier constructor, not fit().
-    if eval_metric is not None:
-        params['eval_metric'] = eval_metric
+    if eval_metric is None:
+        eval_metric = 'AUC'
+    elif isinstance(eval_metric, str):
+        eval_metric = _CATBOOST_METRIC_ALIASES.get(eval_metric.lower(), eval_metric)
+    params['eval_metric'] = eval_metric
 
     return params, early_stopping_rounds, eval_metric, cat_features
 
@@ -978,8 +991,6 @@ class XGBoostModel:
             特征
         y : array-like
             标签
-        n_bins : int, default 10
-            分箱数
 
         Returns
         -------
