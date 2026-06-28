@@ -2,12 +2,12 @@
 Modeling module for credit modeling toolkit.
 
 This module provides classes for building and training credit models
-using various algorithms including LightGBM and XGBoost.
+using various algorithms including LightGBM, XGBoost, and CatBoost.
 
 Classes
 -------
 LRMaster : Logistic Regression master wrapper.
-GradientBoostingModel : LightGBM / XGBoost model wrapper.
+GradientBoostingModel : LightGBM / XGBoost / CatBoost model wrapper.
 BackwardEliminationAnalyzer : Backward variable elimination.
 
 Examples
@@ -36,8 +36,12 @@ from .GBM_Tool import (
     xgb_model,
     xgbm_quick_train,
     xgb_varimp,
+    catboost_model,
+    catboost_varimp,
+    catboost_quick_train,
     LightGBMModel,
     XGBoostModel,
+    CatBoostModel,
     GradientBoostingModel,
 )
 
@@ -63,9 +67,10 @@ __all__ = [
     # GBM_Tool - Functions
     'set_num_leaves', 'lgb_model', 'lgb_varimp', 'lgbm_quick_train',
     'xgb_model', 'xgbm_quick_train', 'xgb_varimp',
+    'catboost_model', 'catboost_varimp', 'catboost_quick_train',
 
     # GBM_Tool - Classes
-    'LightGBMModel', 'XGBoostModel', 'GradientBoostingModel',
+    'LightGBMModel', 'XGBoostModel', 'CatBoostModel', 'GradientBoostingModel',
 
     # Backward_Tool
     'backward_lgbm', 'backward_xgbm',
