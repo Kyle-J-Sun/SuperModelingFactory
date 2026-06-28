@@ -1,8 +1,5 @@
 """
 Modeling module for credit modeling toolkit.
-
-This module provides classes for building and training credit models
-using various algorithms including LightGBM, XGBoost, and CatBoost.
 """
 
 from .LRM_Tool import (
@@ -40,9 +37,6 @@ from .Backward_Tool import (
     BackwardVariableEliminator,
     BackwardEliminationAnalyzer,
 )
-
-from Modeling_Tool.weighted_integration import apply_model_patches
-apply_model_patches(globals())
 
 __all__ = [
     'lr_model', 'lr_varimp', 'get_lr_statsmodel_summary',
