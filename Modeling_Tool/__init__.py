@@ -96,6 +96,8 @@ _MODEL_EXPORTS = frozenset({
 
 _EXPLAIN_EXPORTS = frozenset({
     'ModelExplainer',
+    'build_coalition_structure',
+    'CREDIT_PRIOR_GROUPS',
 })
 
 def __getattr__(name):
@@ -145,6 +147,8 @@ __all__ = [
 
     # Explainability (lazy — requires `pip install supermodelingfactory[explain]`)
     'ModelExplainer',
+    'build_coalition_structure',
+    'CREDIT_PRIOR_GROUPS',
 
     # Eval
     'cross_risk',
