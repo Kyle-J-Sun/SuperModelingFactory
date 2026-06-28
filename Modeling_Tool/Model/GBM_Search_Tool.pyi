@@ -1,3 +1,0 @@
-from typing import Any
-
-def param_search(self: Any, data: Any, varlist: Any, tgt_name: str, eval_sets: Any, search_space: Any = ..., param_grid: Any = ..., primary_set: str = ..., gap_ref_sets: Any = ..., weight_col: Any = ..., eval_weight_col: Any = ..., fit_kwargs: Any = ..., refit: bool = ..., verbose: bool = ..., **kwargs: Any) -> Any: ...
