@@ -35,7 +35,7 @@ brew install libomp
 
 2030-06-24 后自动转为 Apache 2.0。商业授权请联系作者。
 
-核心算法模块（22 个，分布在 `WOE / Feature / Model / Eval / Sample / Core`）通过 Cython 编译为 `.so` / `.pyd` 后分发，源码可在仓库阅读但**不**包含在 wheel 中。
+项目现在以源码形式打包和分发；wheel 与 sdist 均包含 Python 源码，不再通过 Cython 隐藏核心模块实现。
 
 ## 项目概述
 

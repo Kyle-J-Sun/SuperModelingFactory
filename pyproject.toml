@@ -1,22 +1,11 @@
 # =============================================================================
 # SuperModelingFactory — PEP 517 build configuration
 # =============================================================================
-# build-system tells pip how to build the wheel: it needs setuptools + Cython
-# available *before* setup.py executes. cibuildwheel reuses this exact stanza
-# inside the per-platform manylinux / macOS / windows containers.
-# =============================================================================
 
 [build-system]
 requires = [
     "setuptools>=68",
     "wheel",
-    "cython>=3.0",
-    # numpy is pre-installed during the build because several core modules
-    # depend on numpy's C-API (only relevant if any closed-source module
-    # uses `cimport numpy`; harmless otherwise).
-    # Upper-bound <2 is required: all .so/.pyd extensions shipped in this
-    # package were compiled against NumPy 1.x ABI and will crash under 2.x.
-    "numpy>=1.23,<2",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -47,18 +36,9 @@ classifiers = [
     "License :: Other/Proprietary License",
 ]
 
-# Runtime deps — duplicated in requirements.txt for dev convenience.
-# NOTE: numpy is pinned <2 because the compiled .so/.pyd extensions in this
-# package were built against NumPy 1.x C-API. NumPy 2.x changed its ABI
-# (_ARRAY_API), causing AttributeError at import time. Recompile all
-# extensions before removing the upper bound.
-# pandas is pinned <3 because pandas 3.x requires numpy>=2 and refuses to
-# install otherwise, which on Python 3.13 silently mixes pandas 3.x with
-# numpy 1.26 and produces an Access Violation (0xC0000005) at import time.
-# Lift this cap only after the .so/.pyd are rebuilt against the numpy 2.x ABI.
 dependencies = [
     "pandas>=1.5.0,<3",
-    "numpy>=1.23.0,<2",
+    "numpy>=1.23.0",
     "scipy>=1.9.0",
     "scikit-learn>=1.1.0",
     "joblib>=1.2.0",
@@ -75,67 +55,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-optuna  = ["optuna>=4.0.0"]
-stats   = ["statsmodels>=0.13.0"]
+optuna = ["optuna>=4.0.0"]
+stats = ["statsmodels>=0.13.0"]
 imblearn = ["imbalanced-learn>=0.10.0"]
-# Model explainability (Modeling_Tool.Explainability.ModelExplainer).
-# Optional + lazily imported so the base install stays light and
-# `import Modeling_Tool` never pulls shap/lime.
 explain = ["shap>=0.44.0", "lime>=0.2.0.1"]
-# pyodps drags libcst which needs Rust in manylinux2014. Kept optional so the
-# Linux wheel build container doesn't need a Rust toolchain. Users who need
-# ODPSRunner install with `pip install supermodelingfactory[odps]`.
-odps    = ["pyodps>=0.11.0"]
+odps = ["pyodps>=0.11.0"]
 
 [project.urls]
-Homepage      = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
+Homepage = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
 Documentation = "https://kyle-j-sun.github.io/SuperModelingFactory_doc"
-Source        = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
-
-
-# -----------------------------------------------------------------------------
-# cibuildwheel — invoked by .github/workflows/build.yml on every push.
-# We target CPython 3.10 / 3.11 / 3.12 across Linux x86_64, macOS arm64, and
-# Windows amd64. Each wheel embeds the compiled .so / .pyd; no source is shipped.
-# -----------------------------------------------------------------------------
-[tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-*"
-# musllinux (Alpine) wheels skipped — not enough demand to justify the
-# OpenBLAS-from-source dance. win32 skipped — we only ship 64-bit Windows.
-# i686 is excluded at the arch level (see [tool.cibuildwheel.linux] below).
-skip  = "*-musllinux_* *-win32"
-
-# Before pytest runs inside the wheel container, make sure the wheel itself
-# imports cleanly — this validates that .so files were produced and shipped.
-test-command = "python -c \"import Modeling_Tool, Modeling_Tool.WOE.WOE_Master, Modeling_Tool.Model.LRM_Tool, ExcelMaster.ExcelMaster, Report.Report_Tool; print('SMF wheel ok:', Modeling_Tool.__name__)\""
-
-[tool.cibuildwheel.linux]
-# Only build for 64-bit Intel/AMD Linux. The default cibuildwheel arch list
-# on Linux is 'auto', which expands to ['x86_64', 'i686'] on x86_64 runners
-# and tries to also build manylinux_i686 wheels. That fails because scipy /
-# pandas no longer publish i686 wheels — pip falls back to a source build
-# which then crashes when OpenBLAS isn't installed in the test container.
-# Note that the [tool.cibuildwheel].skip = "*_i686" filter only suppresses
-# the matching identifiers; cibuildwheel still pulls the i686 image first,
-# so being explicit here is more robust.
-archs = ["x86_64"]
-# manylinux_2_28 is the modern PEP 600 baseline (RHEL/Rocky 8 glibc 2.28).
-# manylinux2014 (CentOS 7, glibc 2.17) is EOL and recent scipy / numpy no
-# longer publish wheels for it, which forces a source build that fails
-# because OpenBLAS isn't pre-installed in the test container.
-manylinux-x86_64-image = "manylinux_2_28"
-
-[tool.cibuildwheel.macos]
-# Apple Silicon only. Building x86_64 on the ARM macos-14 runner requires
-# Rosetta 2 + an x86_64 Homebrew prefix to install libomp for lightgbm,
-# which GitHub-hosted runners don't provision. Intel-Mac users (rare on
-# the team) can pip-install from the sdist published in each release.
-archs = ["arm64"]
-# lightgbm wheels on macOS dynamically link libomp.dylib from Homebrew.
-# Install it before the smoke-import so 'import lightgbm' (and therefore
-# 'import Modeling_Tool.Model.LRM_Tool') doesn't crash with
-# 'Library not loaded: @rpath/libomp.dylib'.
-before-test = "brew install libomp"
-
-[tool.cibuildwheel.windows]
-archs = ["AMD64"]
+Source = "https://github.com/Kyle-J-Sun/SuperModelingFactory"
