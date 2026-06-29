@@ -89,4 +89,9 @@ jobs:
         working-directory: SuperModelingFactory_pytest
         env:
           PYTHONPATH: ${{ github.workspace }}/SuperModelingFactory
-        run: python -m pytest --no-header -q -rN -m "not weighted"
+        run: |
+          python -m pytest --no-header -q -rN \
+            --ignore=test_gbm_weighted_training.py \
+            --ignore=test_lrmaster_weighted_training.py \
+            --ignore=test_eval_weighted_metrics.py \
+            --ignore=test_backward_weighted.py
