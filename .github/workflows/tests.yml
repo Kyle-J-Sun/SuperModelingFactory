@@ -62,15 +62,24 @@ jobs:
       - name: Install main package runtime deps
         working-directory: SuperModelingFactory
         run: |
-          # Install declared runtime deps without upgrading/downgrading the matrix pins.
+          # Keep the matrix's resolved compatibility pins while allowing
+          # transitive dependencies (for example optuna -> colorlog) to install.
+          python - <<'PY'
+          import importlib
+          packages = ["numpy", "scipy", "pandas", "lightgbm"]
+          with open("/tmp/matrix-constraints.txt", "w", encoding="utf-8") as fh:
+              for package in packages:
+                  module = importlib.import_module(package)
+                  fh.write(f"{package}=={module.__version__}\n")
+          PY
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt --no-deps
+            pip install -r requirements.txt -c /tmp/matrix-constraints.txt
           fi
           if [ -f pyproject.toml ] || [ -f setup.py ]; then
-            pip install -e . --no-deps || true
+            pip install -e . -c /tmp/matrix-constraints.txt || true
           fi
           # Belt-and-suspenders: install the libs the test suite imports directly.
-          pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn
+          pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn -c /tmp/matrix-constraints.txt
 
       - name: Show resolved versions
         run: |
