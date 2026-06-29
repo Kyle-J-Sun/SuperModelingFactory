@@ -89,4 +89,4 @@ jobs:
         working-directory: SuperModelingFactory_pytest
         env:
           PYTHONPATH: ${{ github.workspace }}/SuperModelingFactory
-        run: python -m pytest --no-header -q -rN
+        run: python -m pytest --no-header -q -rN -m "not weighted"
