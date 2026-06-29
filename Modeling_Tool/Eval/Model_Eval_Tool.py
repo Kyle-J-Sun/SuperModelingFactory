@@ -817,7 +817,11 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
         是否使用全部数据分组
     add_func : callable, optional
         自定义统计函数
-    
+    weight_col : str, optional
+        样本权重列名；提供且无 ``grp_name`` 时按权重聚合 Gains（输出 ``N`` 为权重和、``N_RAW`` 为行数）
+    weighted_binning : bool, optional
+        True 时按累计权重等频分箱；False 时按行数（默认）
+
     Returns
     -------
     pandas.DataFrame
@@ -1173,7 +1177,9 @@ def get_perf_summary(train, validation, oot, tgt_name,
         随机种子
     gains_table : bool, default True
         是否计算收益表
-    
+    weight_col : str, optional
+        各数据集 DataFrame 中的样本权重列；无分组时用于加权 AUC/KS 等指标
+
     Returns
     -------
     pandas.DataFrame
@@ -1999,6 +2005,10 @@ class GainsTableCalculator:
             随机种子
         ascending : bool, default False
             分箱顺序是否升序
+        weight_col : str, optional
+            样本权重列名（须在 ``data`` 中）
+        weighted_binning : bool, optional
+            True 时按累计权重等频分箱
         """
         self.data = data
         self.dep = dep
@@ -2123,7 +2133,9 @@ class PerformanceEvaluator:
         是否使用决策树分箱
     random_state : int, default 42
         随机种子
-    
+    weight_col : str, optional
+        默认权重列；各 ``add_dataset`` 也可单独指定
+
     Examples
     --------
     >>> evaluator = PerformanceEvaluator(tgt_name='target', model=model, feature_cols=features)
@@ -2179,6 +2191,8 @@ class PerformanceEvaluator:
             是否使用决策树分箱
         random_state : int, default 42
             随机种子
+        weight_col : str, optional
+            默认权重列；各 ``add_dataset`` 也可单独指定
         """
         self.tgt_name = tgt_name
         self.scr_name = scr_name

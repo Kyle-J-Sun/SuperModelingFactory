@@ -1,10 +1,9 @@
 # encoding: utf-8
 """Native weighted evaluation helpers.
 
-This module contains the shared implementation used by the public Eval APIs
-when ``sample_weight`` / ``weight_col`` is supplied.  Unweighted callers keep
-using the historical implementations in ``evaluate_model.py`` and
-``Model_Eval_Tool.py``.
+Shared implementation for public Eval APIs when ``sample_weight`` or
+``weight_col`` is supplied. Unweighted callers keep using the historical
+implementations in ``evaluate_model.py`` and ``Model_Eval_Tool.py``.
 """
 from __future__ import annotations
 

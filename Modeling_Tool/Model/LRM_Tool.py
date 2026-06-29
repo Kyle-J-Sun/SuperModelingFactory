@@ -66,6 +66,8 @@ def lr_model(mdlx, mdly, valx, valy, params_dict, sample_weight=None):
         Validation target variable (used for reference only)
     params_dict : dict
         Dictionary of parameters for LogisticRegression
+    sample_weight : array-like, optional
+        Per-sample weights passed to ``LogisticRegression.fit``.
 
     Returns
     -------
@@ -207,6 +209,8 @@ def compute_aic(model, x, y, sample_weight=None):
         Feature matrix
     y : pandas.Series or numpy.ndarray
         Target variable
+    sample_weight : array-like, optional
+        Per-sample weights for log-likelihood / information criteria.
 
     Returns
     -------
@@ -231,6 +235,8 @@ def compute_bic(model, x, y, sample_weight=None):
         Feature matrix
     y : pandas.Series or numpy.ndarray
         Target variable
+    sample_weight : array-like, optional
+        Per-sample weights for log-likelihood / information criteria.
 
     Returns
     -------
@@ -539,6 +545,9 @@ class LRMaster:
             Validation feature column names
         val_tgt_name : str, optional
             Validation target variable column name
+        weight_col : str, optional
+            Column in ``data`` with per-sample training weights (non-negative).
+            Mutually exclusive with passing ``sample_weight`` to lower-level helpers.
 
         Returns
         -------
