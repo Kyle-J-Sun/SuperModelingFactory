@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SuperModelingFactory"
-version = "0.1.3"
+version = "0.2.0"
 description = "Credit risk modeling factory: WOE binning, scorecards, LightGBM, Excel reporting."
 readme = "README.md"
 requires-python = ">=3.10"

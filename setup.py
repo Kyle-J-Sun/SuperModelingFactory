@@ -15,7 +15,7 @@ def _read(path: str) -> str:
 
 setup(
     name="SuperModelingFactory",
-    version=os.environ.get("SMF_VERSION", "0.1.3"),
+    version=os.environ.get("SMF_VERSION", "0.2.0"),
     description="Credit risk modeling factory: WOE binning, scorecards, LightGBM, Excel reporting.",
     long_description=_read("README.md"),
     long_description_content_type="text/markdown",
