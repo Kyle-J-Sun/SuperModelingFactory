@@ -5,6 +5,7 @@ import pandas as pd
 from Modeling_Tool.Core.Binning_Tool import get_bin_range_list, super_binning
 from Modeling_Tool.Core.utils import load_model, calc_iv, calc_woe
 from .evaluate_model import evaluate_performance
+from . import weighted_eval_utils as _weighted_eval
 
 ###################################################### Private Functions #############################################################
 
@@ -755,7 +756,7 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
                     grp_name = None, min_data_size = 100, grp_colname = None, sync_range = True,
                     chi2_p = 0.95, init_equi_bins = 100, fillna = -999999, spec_values = [], retSummary = False,
                     tree_binning = False, random_state=42, ascending = False, withSummary = False, wholeGroup = False, 
-                    add_func = None):
+                    add_func = None, weight_col = None, weighted_binning = None):
     """
     计算分组收益表。
     
@@ -823,6 +824,56 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
         分组收益表
     """
     
+    if weight_col is not None and grp_name is None:
+        work_data = data.copy()
+        work_score = score
+        if work_score is None:
+            if model is None or varlist is None:
+                return _get_gains_table_single(
+                    data=data,
+                    dep=dep,
+                    nbins=nbins,
+                    precision=precision,
+                    min_bin_prop=min_bin_prop,
+                    include_missing=include_missing,
+                    score=score,
+                    model=model,
+                    varlist=varlist,
+                    equal_freq=equal_freq,
+                    chi2_method=chi2_method,
+                    chi2_p=chi2_p,
+                    init_equi_bins=init_equi_bins,
+                    fillna=fillna,
+                    spec_values=spec_values,
+                    retSummary=retSummary,
+                    tree_binning=tree_binning,
+                    random_state=random_state,
+                    ascending=ascending,
+                    withSummary=withSummary,
+                    add_func=add_func,
+                )
+            work_score = "_mdl_scr"
+            work_data[work_score] = model.predict_proba(work_data.loc[:, varlist])[:, 1]
+        gains = _weighted_eval.get_gains_table(
+            work_data,
+            dep,
+            work_score,
+            nbins=nbins,
+            weight_col=weight_col,
+            weighted_binning=weighted_binning,
+        )
+        if retSummary:
+            return pd.DataFrame({
+                "N_BUMP": [gains["RANK_ORDER_BUMP"].sum()],
+                "MIN_RISK_DEP": [gains["TRUE_BAD_SHIFT"].round(4).min()],
+                "MAX_RISK_DEP": [gains["TRUE_BAD_SHIFT"].round(4).max()],
+                "KS_IN_GAINS": [gains["KS_PER_BIN"].round(4).max()],
+                "LIFT_IN_GAINS": [gains["LIFT"].round(4).max()],
+                "IV": [gains["IV"].replace([np.inf, -np.inf], 0).sum()],
+                "N_BINS": [gains.shape[0]],
+            })
+        return gains
+
     if grp_colname is None:
         grp_colname = grp_name
         
@@ -1060,7 +1111,8 @@ def get_perf_summary(train, validation, oot, tgt_name,
                      grp_colname = None,
                      tree_binning = False, 
                      random_state = 42,
-                     gains_table = False):
+                     gains_table = False,
+                     weight_col = None):
     """
     计算分组性能评估汇总。
     
@@ -1128,6 +1180,17 @@ def get_perf_summary(train, validation, oot, tgt_name,
         分组性能评估汇总表
     """
     
+    if weight_col is not None and oot_grp_name is None:
+        return _weighted_eval.get_perf_summary(
+            train=train,
+            validation=validation,
+            oot=oot,
+            tgt_name=tgt_name,
+            scr_name=scr_name,
+            weight_col=weight_col,
+            nbins=pct_bins,
+        )
+
     if grp_colname is None:
         grp_colname = oot_grp_name
         
@@ -1893,7 +1956,8 @@ class GainsTableCalculator:
                  include_missing = True, score = None, model = None, varlist = None,
                  equal_freq = True, chi2_method = False, chi2_p = 0.95, 
                  init_equi_bins = 100, fillna = -999999, spec_values = [],
-                 tree_binning = False, random_state = 42, ascending = False):
+                 tree_binning = False, random_state = 42, ascending = False,
+                 weight_col = None, weighted_binning = None):
         """
         初始化收益表计算器。
         
@@ -1954,10 +2018,12 @@ class GainsTableCalculator:
         self.tree_binning = tree_binning
         self.random_state = random_state
         self.ascending = ascending
+        self.weight_col = weight_col
+        self.weighted_binning = weighted_binning
     
     def calculate(self, grp_name = None, min_data_size = 100, grp_colname = None,
                   sync_range = True, retSummary = False, withSummary = False,
-                  wholeGroup = False, add_func = None):
+                  wholeGroup = False, add_func = None, weight_col = None):
         """
         计算收益表。
         
@@ -2011,7 +2077,9 @@ class GainsTableCalculator:
             ascending = self.ascending,
             withSummary = withSummary,
             wholeGroup = wholeGroup,
-            add_func = add_func
+            add_func = add_func,
+            weight_col = self.weight_col if weight_col is None else weight_col,
+            weighted_binning = self.weighted_binning,
         )
 
 
@@ -2073,7 +2141,8 @@ class PerformanceEvaluator:
     def __init__(self, tgt_name, scr_name = None, model = None, feature_cols = None,
                  dist_bins = 20, pct_bins = 10, precision = 5, min_bin_prop = 0.05,
                  include_missing = False, equal_freq = True, chi2_method = False,
-                 init_equi_bins = 1000, chi2_p = 0.9, tree_binning = False, random_state = 42):
+                 init_equi_bins = 1000, chi2_p = 0.9, tree_binning = False, random_state = 42,
+                 weight_col = None):
         """
         初始化性能评估器。
         
@@ -2126,9 +2195,11 @@ class PerformanceEvaluator:
         self.chi2_p = chi2_p
         self.tree_binning = tree_binning
         self.random_state = random_state
+        self.weight_col = weight_col
         self.datasets = {}
+        self.dataset_weight_cols = {}
     
-    def add_dataset(self, name, data):
+    def add_dataset(self, name, data, weight_col = None):
         """
         添加数据集。
         
@@ -2145,11 +2216,13 @@ class PerformanceEvaluator:
             返回自身以便链式调用
         """
         self.datasets[name] = data
+        self.dataset_weight_cols[name] = weight_col
         return self
     
     def evaluate(self, oot_grp_name = None, min_data_size = 100, grp_colname = None,
                  fig_save_path = None, rpt_save_path = None, to_show = False, 
-                 display = True, gains_table = False, benchmark_dataset = None):
+                 display = True, gains_table = False, benchmark_dataset = None,
+                 weight_col = None):
         """
         执行性能评估。
         
@@ -2193,6 +2266,37 @@ class PerformanceEvaluator:
         
         if self.scr_name is None and self.feature_cols is None:
             return -3
+
+        active_weight_col = weight_col or self.weight_col
+        has_dataset_weight = any(v is not None for v in self.dataset_weight_cols.values())
+        if (active_weight_col is not None or has_dataset_weight) and oot_grp_name is None and benchmark_dataset is None and not isinstance(self.tgt_name, (list, tuple)):
+            rows = []
+            for name, data in self.datasets.items():
+                if data is None:
+                    continue
+                wc = self.dataset_weight_cols.get(name) or active_weight_col
+                work_data = data.copy()
+                scr_name = self.scr_name
+                if scr_name is None:
+                    scr_name = "_mdl_scr"
+                    work_data[scr_name] = self.model.predict_proba(work_data.loc[:, self.feature_cols])[:, 1]
+                rows.append(
+                    _weighted_eval.dataset_summary(
+                        name,
+                        work_data,
+                        self.tgt_name,
+                        scr_name,
+                        weight_col=wc,
+                        nbins=self.pct_bins,
+                    )
+                )
+            fnl_df = pd.DataFrame(rows)
+            if display:
+                from IPython.display import display as _ipy_display
+                _ipy_display(fnl_df)
+            if rpt_save_path:
+                fnl_df.to_csv(rpt_save_path, index=False)
+            return fnl_df
 
         # ── 多 y 标签支持: tgt_name 为 list/tuple 时, 逐标签评估后纵向拼接 ──
         #    表格: 每个标签结果新增 tgt_name 列后纵向拼接;
