@@ -69,9 +69,9 @@ jobs:
 
       - name: Install main package runtime deps
         working-directory: SuperModelingFactory
+        shell: bash
         run: |
-          # Keep the matrix's resolved compatibility pins while allowing
-          # transitive dependencies (for example optuna -> colorlog) to install.
+          set -o pipefail
           python - <<'PY'
           import importlib
           packages = ["numpy", "scipy", "pandas", "lightgbm"]
@@ -81,12 +81,15 @@ jobs:
                   fh.write(f"{package}=={module.__version__}\n")
           PY
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt -c /tmp/matrix-constraints.txt
+            if ! pip install -r requirements.txt -c /tmp/matrix-constraints.txt 2>&1 | tee /tmp/runtime-install.log; then
+              echo "::warning::requirements install with constraints failed; retrying --no-deps plus optuna extras"
+              pip install -r requirements.txt --no-deps -c /tmp/matrix-constraints.txt
+              pip install colorlog statsmodels tqdm xlsxwriter Pillow optuna shap
+            fi
           fi
           if [ -f pyproject.toml ] || [ -f setup.py ]; then
-            pip install -e . -c /tmp/matrix-constraints.txt || true
+            pip install -e . --no-deps -c /tmp/matrix-constraints.txt || true
           fi
-          # Belt-and-suspenders: install the libs the test suite imports directly.
           pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn -c /tmp/matrix-constraints.txt
 
       - name: Show resolved versions
