@@ -572,8 +572,8 @@ class LRMaster:
         self.model = lr_model(train_x, data[tgt_name], val_x, val_y, self.params, sample_weight=sample_weight)
         return self
     
-    def calibrate_model(self, model = None, train_df = None, method='sigmoid', cv=5):
-        """ Model Calibration """
+    def calibrate_model(self, model=None, train_df=None, method='sigmoid', cv=5, weight_col=None, sample_weight=None):
+        """Model calibration with optional sample weights."""
         from sklearn.calibration import CalibratedClassifierCV
         from sklearn.base import clone
         
@@ -614,19 +614,30 @@ class LRMaster:
             calibrated_model = CalibratedClassifierCV(estimator=model, method=method, cv=cv)
         except TypeError:
             calibrated_model = CalibratedClassifierCV(base_estimator=model, method=method, cv=cv)
-        calibrated_model.fit(cal_x, train_df[self.tgt_name])
+        fit_weight = resolve_sample_weight(
+            data=train_df,
+            weight_col=weight_col,
+            sample_weight=sample_weight,
+            expected_len=len(train_df),
+        )
+        calibrated_model.fit(cal_x, train_df[self.tgt_name], sample_weight=fit_weight)
         
         self.calibrated_model = calibrated_model
         
         return self
     
-    def eval_calibrated_outcome(self, evalset, plot = False):
-        """ Eval Calibrated Outcome. """
-        
+    def eval_calibrated_outcome(self, evalset, plot=False, weight_col=None, sample_weight=None):
+        """Evaluate calibrated vs raw probabilities on a holdout set."""
         from sklearn.calibration import calibration_curve
         from sklearn.metrics import brier_score_loss
 
         y_val = evalset[self.tgt_name]
+        eval_weight = resolve_sample_weight(
+            data=evalset,
+            weight_col=weight_col,
+            sample_weight=sample_weight,
+            expected_len=len(evalset),
+        )
 
         # 原始概率
         prob_raw = self.predict_proba(evalset)[:, 1]
@@ -634,12 +645,31 @@ class LRMaster:
         prob_cal = self.predict_proba(evalset, calibrated_model=True)[:, 1]
 
         # 1. Brier Score（越小越好）
-        logger.info(f"Raw Brier: {brier_score_loss(y_val, prob_raw):.6f}")
-        logger.info(f"Cal Brier: {brier_score_loss(y_val, prob_cal):.6f}")
+        logger.info(
+            "Raw Brier: %.6f",
+            brier_score_loss(y_val, prob_raw, sample_weight=eval_weight),
+        )
+        logger.info(
+            "Cal Brier: %.6f",
+            brier_score_loss(y_val, prob_cal, sample_weight=eval_weight),
+        )
 
         # 2. 可靠性曲线
-        fraction_of_positives_raw, mean_predicted_value_raw = calibration_curve(y_val, prob_raw, n_bins=10)
-        fraction_of_positives_cal, mean_predicted_value_cal = calibration_curve(y_val, prob_cal, n_bins=10)
+        curve_kwargs = {} if eval_weight is None else {"sample_weight": eval_weight}
+        try:
+            fraction_of_positives_raw, mean_predicted_value_raw = calibration_curve(
+                y_val, prob_raw, n_bins=10, **curve_kwargs
+            )
+            fraction_of_positives_cal, mean_predicted_value_cal = calibration_curve(
+                y_val, prob_cal, n_bins=10, **curve_kwargs
+            )
+        except TypeError:
+            fraction_of_positives_raw, mean_predicted_value_raw = calibration_curve(
+                y_val, prob_raw, n_bins=10
+            )
+            fraction_of_positives_cal, mean_predicted_value_cal = calibration_curve(
+                y_val, prob_cal, n_bins=10
+            )
         
         if plot:
             import matplotlib.pyplot as plt
