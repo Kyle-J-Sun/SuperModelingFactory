@@ -16,9 +16,6 @@ from .Binning_Tool import (
     quick_binning,
 )
 
-# ODPSRunner is lazy-loaded so the package import doesn't require pyodps
-# (and its libcst -> Rust toolchain chain). Users who actually call
-# ODPSRunner must `pip install supermodelingfactory[odps]`.
 def __getattr__(name):
     if name == "ODPSRunner":
         from .ODPS_Tool import ODPSRunner as _ODPSRunner
@@ -31,6 +28,14 @@ from .Slope_Tool import (
     calculate_slope_numpy,
     calculate_slope_manual,
     SlopeCalculator,
+)
+
+from .sample_weight_utils import (
+    resolve_sample_weight,
+    validate_sample_weight,
+    weighted_sum,
+    weighted_mean,
+    weighted_rate,
 )
 
 from .utils import (
@@ -71,21 +76,16 @@ from .XOR_Encryptor import TextEncryptor
 from .kDataFrame import kSeries, kDataFrame
 
 __all__ = [
-    # Binning
     'Binning', 'chi2_binning', 'run_binning', 'super_binning',
     'get_max_nbins', 'get_decision_tree_binning_edges', 'NumVarBinning',
     'cre_pvt', 'merge_bins', 'observed_laplace', 'cat_2_list',
     'get_bin_range', 'get_bin_range_list', 'chi2_auto_binning', 'quick_binning',
-
-    # ODPS
     'ODPSRunner',
-
-    # Slope
     'calculate_slope_sklearn', 'calculate_slope_scipy',
     'calculate_slope_numpy', 'calculate_slope_manual',
     'SlopeCalculator',
-
-    # Utils
+    'resolve_sample_weight', 'validate_sample_weight',
+    'weighted_sum', 'weighted_mean', 'weighted_rate',
     'cut2pieces', 'proc_freq', 'read_attr_list', 'write_attr_list',
     'odds_score', 'parse_odps_schema', 'npnan2none', 'drop_tmp_cols',
     'mkdir_if_not_exist', 'parse_sql_file', 'calc_woe', 'calc_iv',
@@ -93,13 +93,7 @@ __all__ = [
     'scoring', 'get_missing_indicator', 'upload_score',
     'get_feature_names', 'get_feature_names_lgb', 'get_feature_names_xgb',
     'get_feature_names_batch', 'pull_attributes_in_batch',
-
-    # Utility Classes
     'DataFrameProcessor', 'FilePathManager', 'DateTimeUtils', 'WOEIVCalculator',
-
-    # Encryption
     'TextEncryptor',
-
-    # Extended DataFrame
     'kSeries', 'kDataFrame',
 ]
