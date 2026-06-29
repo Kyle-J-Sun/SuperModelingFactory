@@ -1346,7 +1346,14 @@ class GradientBoostingModel:
             传入未 fit / 空模型时。
         """
         if isinstance(model, cls):
-            return model
+            try:
+                object.__getattribute__(model, '_model')
+                return model
+            except AttributeError:
+                raise ValueError(
+                    "Loaded GradientBoostingModel is missing _model (Cython pickle bug "
+                    "in a previous package version). Please retrain and re-save the model."
+                )
         # 解包 LightGBMModel / XGBoostModel / CatBoostModel（它们把裸估计器放在 .model）
         estimator = getattr(model, 'model', model)
         if estimator is None:
@@ -1374,11 +1381,16 @@ class GradientBoostingModel:
         """
         if name.startswith('__') and name.endswith('__'):
             raise AttributeError(name)
-        model = self.__dict__.get('_model', None)
-        inner = getattr(model, 'model', None) if model is not None else None
+        if name == '_model':
+            raise AttributeError(name)
+        try:
+            model = object.__getattribute__(self, '_model')
+        except AttributeError:
+            raise AttributeError(name)
+        inner = getattr(model, 'model', None)
         if inner is not None and hasattr(inner, name):
             return getattr(inner, name)
-        if name == 'feature_names_in_' and model is not None:
+        if name == 'feature_names_in_':
             feat = getattr(model, 'feature_names_', None)
             if feat is None and inner is not None:
                 feat = _extract_estimator_feature_names(inner)
@@ -1386,9 +1398,32 @@ class GradientBoostingModel:
                 return np.asarray(feat, dtype=object)
         raise AttributeError(name)
 
+    def __getstate__(self):
+        return {
+            'model_type': self.model_type,
+            'params': self.params,
+            '_model_params': self._model.params,
+            '_model_model': self._model.model,
+            '_model_feature_names_': getattr(self._model, 'feature_names_', None),
+        }
+
+    def __setstate__(self, state):
+        self.model_type = state['model_type']
+        self.params = state['params']
+        mt = self.model_type
+        mp = state.get('_model_params', self.params)
+        if mt == 'lgb':
+            self._model = LightGBMModel(mp)
+        elif mt == 'xgb':
+            self._model = XGBoostModel(mp)
+        else:
+            self._model = CatBoostModel(mp)
+        self._model.model = state.get('_model_model')
+        self._model.feature_names_ = state.get('_model_feature_names_')
+
     @staticmethod
     def _sigmoid(z):
-        """数值稳定的 Sigmoid（log-odds → 概率）。"""
+        """数値稳定的 Sigmoid（log-odds → 概率）。"""
         z = np.clip(np.asarray(z, dtype=float), -709, 709)
         return 1.0 / (1.0 + np.exp(-z))
 
@@ -1429,7 +1464,7 @@ class GradientBoostingModel:
         Notes
         -----
         与既有生产流程一致，偏移仅作用于训练集；验证集未注入偏移，因此早停
-        的 eval 指标是在“未加偏移”的空间上评估的。如需严格一致，可后续透传
+        的 eval 指标是在"未加偏移"的空间上评估的。如需严格一致，可后续透传
         lgb 的 ``eval_init_score`` / xgb 的 ``base_margin_eval_set``。
         """
         if self.model_type == 'cat':
@@ -1447,7 +1482,7 @@ class GradientBoostingModel:
     def get_base_margin(self, x):
         """返回本模型对 ``x`` 的原始 log-odds（base margin / init score）。
 
-        统一兼容三种框架取“未经 sigmoid 的原始分数”：
+        统一兼容三种框架取"未经 sigmoid 的原始分数"：
 
         - XGBoost: ``predict(x, output_margin=True)``
         - LightGBM: ``predict(x, raw_score=True)``
