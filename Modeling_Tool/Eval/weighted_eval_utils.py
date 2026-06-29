@@ -293,3 +293,34 @@ class PerformanceEvaluator:
             wc = ds_weight_col or weight_col or self.weight_col
             rows.append(dataset_summary(name, data, self.tgt_name, self.scr_name, weight_col=wc, nbins=self.nbins))
         return pd.DataFrame(rows)
+
+
+def cross_risk_weighted_mean(data, agg_col, sample_weight, score_list, margin_name="Total_Avg_Risk"):
+    """Weighted-mean cross-risk table after bin columns are assigned."""
+    weight = np.asarray(sample_weight, dtype=float)
+    values = pd.to_numeric(data[agg_col], errors="coerce").to_numpy(dtype=float)
+    frame = data[["_bin_num1", "_bin_range1", "_bin_num2", "_bin_range2"]].copy()
+    frame["_w"] = weight
+    frame["_wv"] = values * weight
+
+    numerator = pd.crosstab(
+        [frame["_bin_num1"], frame["_bin_range1"]],
+        [frame["_bin_num2"], frame["_bin_range2"]],
+        values=frame["_wv"],
+        aggfunc="sum",
+        margins=True,
+        margins_name=margin_name,
+        rownames=[score_list[0], score_list[0]],
+        colnames=[score_list[1], score_list[1]],
+    )
+    denominator = pd.crosstab(
+        [frame["_bin_num1"], frame["_bin_range1"]],
+        [frame["_bin_num2"], frame["_bin_range2"]],
+        values=frame["_w"],
+        aggfunc="sum",
+        margins=True,
+        margins_name=margin_name,
+        rownames=[score_list[0], score_list[0]],
+        colnames=[score_list[1], score_list[1]],
+    )
+    return numerator / denominator.replace(0, np.nan)
