@@ -609,11 +609,25 @@ class LRMaster:
         # calibrated model operates in the same feature space as self.model.
         cal_x = self._apply_standardizer(train_df[varlist])
 
+        # sklearn 1.6 deprecated cv="prefit" in favour of wrapping the fitted
+        # estimator in FrozenEstimator, and 1.8 removed "prefit" entirely. Use
+        # FrozenEstimator when available, falling back to cv="prefit" on <1.6.
+        estimator = model
+        calib_kwargs = {"method": method}
+        if cv == "prefit":
+            try:
+                from sklearn.frozen import FrozenEstimator
+                estimator = FrozenEstimator(model)
+            except ImportError:
+                calib_kwargs["cv"] = "prefit"
+        else:
+            calib_kwargs["cv"] = cv
+
         # sklearn 1.2+ renamed base_estimator -> estimator; support both
         try:
-            calibrated_model = CalibratedClassifierCV(estimator=model, method=method, cv=cv)
+            calibrated_model = CalibratedClassifierCV(estimator=estimator, **calib_kwargs)
         except TypeError:
-            calibrated_model = CalibratedClassifierCV(base_estimator=model, method=method, cv=cv)
+            calibrated_model = CalibratedClassifierCV(base_estimator=estimator, **calib_kwargs)
         fit_weight = resolve_sample_weight(
             data=train_df,
             weight_col=weight_col,
