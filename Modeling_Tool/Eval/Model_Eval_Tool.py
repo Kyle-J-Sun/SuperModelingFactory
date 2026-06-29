@@ -1302,7 +1302,7 @@ def get_perf_summary(train, validation, oot, tgt_name,
 def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_bin_prop = 0.05, include_missing = False, 
                equal_freq = True, binning_numeric = [True, True], agg_func = 'mean', chi2_method = False,
                chi2_p = 0.95, init_equi_bins = 100, fillna = -999999, spec_values = [], 
-               tree_binning = False, random_state = 42):
+               tree_binning = False, random_state = 42, weight_col = None, sample_weight = None, wgt_col = None):
     """
     创建交叉风险表。
     
@@ -1376,6 +1376,12 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
         是否使用决策树分箱
     random_state : int, default 42
         随机种子
+    weight_col : str, optional
+        Column in ``data`` with per-row sample weights (alias: ``wgt_col``).
+    sample_weight : array-like, optional
+        Explicit per-row weights; must align with ``len(data)``.
+    wgt_col : str, optional
+        Alias for ``weight_col``.
     
     Returns
     -------
@@ -1391,6 +1397,15 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     
     if agg_col is None:
         agg_col = dep
+
+    resolved_weight = None
+    if weight_col is not None or sample_weight is not None or wgt_col is not None:
+        resolved_weight = _weighted_eval.resolve_weights(
+            data=data,
+            weight_col=weight_col or wgt_col,
+            sample_weight=sample_weight,
+            expected_len=len(data),
+        )
 
     def _parse_ratio_agg(agg_col, agg_func):
         """
@@ -1614,6 +1629,25 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
 
     actual_agg_func = regular_cfg["func"] if regular_cfg is not None else agg_func
     margin_name = regular_cfg.get("margins_name", "Total_Avg_Risk") if regular_cfg is not None else "Total_Avg_Risk"
+
+    if resolved_weight is not None:
+        if ratio_cfg is not None or regular_cfg is not None:
+            raise ValueError(
+                "weighted cross_risk currently supports only simple mean aggregation "
+                "(agg_func='mean' without extended ratio/regular dict syntax)."
+            )
+        agg_name = getattr(actual_agg_func, "__name__", str(actual_agg_func)).lower()
+        if agg_name != "mean":
+            raise ValueError(
+                "weighted cross_risk currently supports only agg_func='mean'; got {0!r}".format(actual_agg_func)
+            )
+        return _weighted_eval.cross_risk_weighted_mean(
+            data=data,
+            agg_col=agg_col,
+            sample_weight=resolved_weight,
+            score_list=score_list,
+            margin_name=margin_name,
+        )
 
     res = pd.crosstab([data['_bin_num1'], data['_bin_range1']], 
                         [data['_bin_num2'], data['_bin_range2']], 

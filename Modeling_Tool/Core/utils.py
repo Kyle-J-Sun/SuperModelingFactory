@@ -2467,6 +2467,24 @@ def get_feature_names(model, model_type=None):
     # 自动检测模型类型并获取特征名
     model_class_name = model.__class__.__name__.lower()
 
+    # SMF GradientBoostingModel wraps the fitted estimator in _model.model and
+    # stores DataFrame column names on _model.feature_names_ after fit.
+    wrapped_model_type = getattr(model, 'model_type', None)
+    wrapped_backend = getattr(model, '_model', None)
+    if wrapped_model_type is not None and wrapped_backend is not None:
+        wrapped_feature_names = getattr(wrapped_backend, 'feature_names_', None)
+        if wrapped_feature_names is not None:
+            return list(wrapped_feature_names)
+
+        wrapped_estimator = getattr(wrapped_backend, 'model', None)
+        if wrapped_estimator is not None:
+            wrapped_model_type_lower = str(wrapped_model_type).lower()
+            if wrapped_model_type_lower in ['lgb', 'lightgbm']:
+                return get_feature_names_lgb(wrapped_estimator)
+            if wrapped_model_type_lower in ['xgb', 'xgboost']:
+                return get_feature_names_xgb(wrapped_estimator)
+            return get_feature_names(wrapped_estimator)
+
     # LightGBM 检测
     if 'lgb' in model_class_name or 'lightgbm' in model_class_name:
         return get_feature_names_lgb(model)

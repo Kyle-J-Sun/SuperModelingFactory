@@ -1668,18 +1668,37 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
     
     roc_df = calc_roc(y_true, y_score, sample_weight=sample_weight)
     roc_info = summarize_roc(roc_df)
-    if pct_bin_edges is not None:
-        pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=True, sample_weight=sample_weight)
+    if sample_weight is not None:
+        bin_count = len(pct_bin_edges) - 1 if pct_bin_edges is not None else pct_bins
+        weighted_gains = _weighted_eval.get_gains_table(
+            pd.DataFrame({"y_true": y_true, "y_score": y_score, "w": sample_weight}),
+            "y_true",
+            "y_score",
+            nbins=bin_count,
+            weight_col="w",
+        )
+        pct_df = weighted_gains
+        pct_desc_df = weighted_gains.iloc[::-1].reset_index(drop=True)
+        if gains_table:
+            y_gains = weighted_gains
+        pct_info = {
+            "pct_bins": weighted_gains.shape[0],
+            "pct_interval": 100.0 / weighted_gains.shape[0] if weighted_gains.shape[0] else np.nan,
+            "pct_top_avgTrue": float(weighted_gains["AVG_BAD"].iloc[-1]) if len(weighted_gains) else np.nan,
+            "pct_btm_avgTrue": float(weighted_gains["AVG_BAD"].iloc[0]) if len(weighted_gains) else np.nan,
+        }
     else:
-        pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, sample_weight=sample_weight)
-    
-    if gains_table:
-        pct_index = pct_df['thresholds']
-        pct_df = resturct_gains(y_gains)
-        pct_df['thresholds'] = pct_index
-        
-#     display(pct_df)
-    pct_info = summarize_pct(pct_df, ascending=True)
+        if pct_bin_edges is not None:
+            pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=True, sample_weight=sample_weight)
+        else:
+            pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, sample_weight=sample_weight)
+
+        if gains_table:
+            pct_index = pct_df["thresholds"]
+            pct_df = resturct_gains(y_gains)
+            pct_df["thresholds"] = pct_index
+
+        pct_info = summarize_pct(pct_df, ascending=True)
     
     if len(y_true) < 2 or len(np.unique(y_true)) < 2:
         # 返回默认性能指标（全部为NaN）
@@ -1693,18 +1712,25 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
             'Top{0:.0f}%_TargetRate'.format(pct_info['pct_interval']): np.nan
         }
     
-    if pct_bin_edges is not None:
-        pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=False, sample_weight=sample_weight)
-    else:
-        pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False, sample_weight=sample_weight)
+    if sample_weight is None:
+        if pct_bin_edges is not None:
+            pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=False, sample_weight=sample_weight)
+        else:
+            pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False, sample_weight=sample_weight)
 
     __plot_single_roc_axes(roc_df, plt.subplot(nrow, ncol, i*ncol+1), fontdicts)
     __plot_single_kde_axes(y_true, y_score, dist_bins, plt.subplot(nrow, ncol, i*ncol+2), fontdicts)
-    __plot_single_pct_axes(pct_df, plt.subplot(nrow, ncol, i*ncol+3), fontdicts)
-    __plot_single_gain_axes(pct_desc_df, plt.subplot(nrow, ncol, i*ncol+4), fontdicts)
+    if sample_weight is None:
+        __plot_single_pct_axes(pct_df, plt.subplot(nrow, ncol, i*ncol+3), fontdicts)
+        __plot_single_gain_axes(pct_desc_df, plt.subplot(nrow, ncol, i*ncol+4), fontdicts)
+    else:
+        ax_pct = plt.subplot(nrow, ncol, i * ncol + 3)
+        ax_pct.set_title("Percentile Chart (Weighted)", fontdict=fontdicts["subtitle"])
+        ax_gain = plt.subplot(nrow, ncol, i * ncol + 4)
+        ax_gain.set_title("Gain Chart (Weighted)", fontdict=fontdicts["subtitle"])
 
     info = {
-        'N': len(y_true),
+        'N': float(np.sum(sample_weight)) if sample_weight is not None else len(y_true),
         'avgTrue': _weighted_eval.safe_weighted_average(y_true, sample_weight),
         'avgScore': _weighted_eval.safe_weighted_average(y_score, sample_weight),
         'KS': roc_info['ks'], 
