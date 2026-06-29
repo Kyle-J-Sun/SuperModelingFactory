@@ -41,6 +41,62 @@ from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 warnings.filterwarnings('ignore')
 
 
+def _resolve_backward_perf_weight_col(
+    split_name: str,
+    df: pd.DataFrame,
+    weight_col: Optional[str],
+    validation_weight_col: Optional[str],
+) -> Optional[str]:
+    """Pick the weight column present on a scored backward-evaluation frame."""
+    if split_name == "hd" and validation_weight_col and validation_weight_col in df.columns:
+        return validation_weight_col
+    if weight_col and weight_col in df.columns:
+        return weight_col
+    return None
+
+
+def _backward_perf_summary(
+    df_score: pd.DataFrame,
+    *,
+    split_name: str,
+    dep: str,
+    score_col: str,
+    weight_col: Optional[str] = None,
+    validation_weight_col: Optional[str] = None,
+    nbins: int = 10,
+    precision: int = 5,
+    min_bin_prop: float = 0.05,
+    include_missing: bool = True,
+    equal_freq: bool = True,
+):
+    """Build a performance summary for one backward-evaluation dataset split."""
+    from Modeling_Tool.Eval.Model_Eval_Tool import get_perf_summary
+
+    perf_weight_col = _resolve_backward_perf_weight_col(
+        split_name,
+        df_score,
+        weight_col=weight_col,
+        validation_weight_col=validation_weight_col,
+    )
+    kwargs = {
+        "train": df_score if split_name == "mdl" else None,
+        "validation": df_score if split_name == "hd" else None,
+        "oot": df_score if split_name not in ("mdl", "hd") else None,
+        "tgt_name": dep,
+        "scr_name": score_col,
+        "pct_bins": nbins,
+        "precision": precision,
+        "min_bin_prop": min_bin_prop,
+        "include_missing": include_missing,
+        "equal_freq": equal_freq,
+        "display": False,
+        "to_show": False,
+    }
+    if perf_weight_col is not None:
+        kwargs["weight_col"] = perf_weight_col
+    return get_perf_summary(**kwargs)
+
+
 def backward_lgbm(
     train_data: pd.DataFrame,
     varlist: List[str],
@@ -147,8 +203,6 @@ def backward_lgbm(
     except ImportError:
         raise ImportError("请安装lightgbm: pip install lightgbm")
 
-    from Modeling_Tool.Eval.Model_Eval_Tool import get_perf_summary
-
     if varreduct_params is None:
         varreduct_params = {}
 
@@ -247,22 +301,19 @@ def backward_lgbm(
     for name, df in datain_all.items():
         df_score = df.copy()
         df_score[score_col] = model.predict(df_score[varlist])
-        perf = get_perf_summary(
-            train=df_score if name == "mdl" else None,
-            validation=df_score if name == "hd" else None,
-            oot=df_score if name not in ("mdl", "hd") else None,
-            tgt_name=dep,
-            scr_name=score_col,
+        perf_dict[name] = _backward_perf_summary(
+            df_score,
+            split_name=name,
+            dep=dep,
+            score_col=score_col,
+            weight_col=weight_col,
+            validation_weight_col=validation_weight_col,
             nbins=nbins,
             precision=precision,
             min_bin_prop=min_bin_prop,
             include_missing=include_missing,
             equal_freq=equal_freq,
-            ascending=ascending,
-            fillna=fillna,
-            spec_values=spec_values
         )
-        perf_dict[name] = perf
 
     return selected_vars, model, perf_dict
 
@@ -376,8 +427,6 @@ def backward_xgbm(
     except ImportError:
         raise ImportError("请安装xgboost: pip install xgboost")
 
-    from Modeling_Tool.Eval.Model_Eval_Tool import get_perf_summary
-
     if varreduct_params is None:
         varreduct_params = {}
 
@@ -481,22 +530,19 @@ def backward_xgbm(
         df_score = df.copy()
         xgb_dmat = xgb.DMatrix(df_score[varlist])
         df_score[score_col] = model.predict(xgb_dmat)
-        perf = get_perf_summary(
-            train=df_score if name == "mdl" else None,
-            validation=df_score if name == "hd" else None,
-            oot=df_score if name not in ("mdl", "hd") else None,
-            tgt_name=dep,
-            scr_name=score_col,
+        perf_dict[name] = _backward_perf_summary(
+            df_score,
+            split_name=name,
+            dep=dep,
+            score_col=score_col,
+            weight_col=weight_col,
+            validation_weight_col=validation_weight_col,
             nbins=nbins,
             precision=precision,
             min_bin_prop=min_bin_prop,
             include_missing=include_missing,
             equal_freq=equal_freq,
-            ascending=ascending,
-            fillna=fillna,
-            spec_values=spec_values
         )
-        perf_dict[name] = perf
 
     return selected_vars, model, perf_dict
 
