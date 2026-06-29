@@ -62,14 +62,12 @@ jobs:
       - name: Install main package runtime deps
         working-directory: SuperModelingFactory
         run: |
-          # Install the runtime requirements declared by the main package.
-          # Tolerate missing requirements.txt — fall back to pip-installing
-          # whatever the package itself declares via setup.py/pyproject.toml.
+          # Install declared runtime deps without upgrading/downgrading the matrix pins.
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+            pip install -r requirements.txt --no-deps
           fi
           if [ -f pyproject.toml ] || [ -f setup.py ]; then
-            pip install -e . || true
+            pip install -e . --no-deps || true
           fi
           # Belt-and-suspenders: install the libs the test suite imports directly.
           pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn
