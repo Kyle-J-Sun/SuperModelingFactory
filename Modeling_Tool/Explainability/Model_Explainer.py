@@ -233,6 +233,68 @@ class ModelExplainer:
             return self._predict_log_odds
         raise ValueError("model_output must be 'probability' or 'log_odds'")
 
+    @staticmethod
+    def _coerce_single_xgb_base_score(base_score):
+        """Return a scalar base_score for XGBoost's single-target array format."""
+        if isinstance(base_score, str):
+            text = base_score.strip()
+            if text.startswith("[") and text.endswith("]"):
+                inner = text[1:-1].strip()
+                if inner and "," not in inner:
+                    return float(inner)
+            return base_score
+
+        if isinstance(base_score, (list, tuple, np.ndarray)):
+            flat = np.ravel(base_score)
+            if flat.size == 1:
+                return float(flat[0])
+        return base_score
+
+    @classmethod
+    def _normalize_xgb_base_score_in_dump(cls, model_dump):
+        """Normalize XGBoost 3.x single-target base_score for older SHAP loaders."""
+        learner = model_dump.get("learner", {})
+        params = learner.get("learner_model_param", {})
+        if "base_score" not in params:
+            return
+
+        params["base_score"] = cls._coerce_single_xgb_base_score(params["base_score"])
+
+    @classmethod
+    def _patch_shap_xgb_base_score_loader(cls):
+        """Patch old SHAP loaders that assume XGBoost base_score is scalar."""
+        try:
+            from shap.explainers import _tree as shap_tree  # noqa: WPS433
+        except Exception:  # pragma: no cover - depends on optional SHAP internals
+            return
+
+        decoder = getattr(shap_tree, "decode_ubjson_buffer", None)
+        if decoder is None or getattr(decoder, "_smf_xgb_base_score_patch", False):
+            return
+
+        def patched_decoder(*args, **kwargs):
+            model_dump = decoder(*args, **kwargs)
+            try:
+                cls._normalize_xgb_base_score_in_dump(model_dump)
+            except Exception:
+                pass
+            return model_dump
+
+        patched_decoder._smf_xgb_base_score_patch = True
+        patched_decoder._smf_original_decoder = decoder
+        shap_tree.decode_ubjson_buffer = patched_decoder
+
+    def _raise_xgb_shap_base_score_error(self, exc):
+        raise ValueError(
+            "SHAP TreeExplainer failed while parsing an XGBoost base_score. "
+            "This is a known incompatibility between XGBoost >= 3.1 and older "
+            "SHAP versions, where XGBoost serializes base_score as a single-item "
+            "array string such as '[5E-1]'. SuperModelingFactory attempted an "
+            "automatic compatibility patch but SHAP still rejected the model. "
+            "Use Python 3.11+ with shap>=0.50.0, or pin xgboost<3.1 on Python "
+            "3.10 environments."
+        ) from exc
+
     # ------------------------------------------------------------------ #
     # SHAP computation
     # ------------------------------------------------------------------ #
@@ -242,7 +304,15 @@ class ModelExplainer:
             data = None
             if self.background_data is not None:
                 data = self._as_frame(self.background_data)
-            self._explainer = shap.TreeExplainer(self.estimator, data=data)
+            if self.model_type in {"xgb", "xgboost"}:
+                self._patch_shap_xgb_base_score_loader()
+            try:
+                self._explainer = shap.TreeExplainer(self.estimator, data=data)
+            except ValueError as exc:
+                text = str(exc)
+                if self.model_type in {"xgb", "xgboost"} and "base_score" in text:
+                    self._raise_xgb_shap_base_score_error(exc)
+                raise
             self._explainer_kind = "tree"
         elif self._is_linear():
             if self.background_data is None:
