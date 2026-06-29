@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from sklearn.utils.extmath import density
 import time
 from functools import wraps
+from . import weighted_eval_utils as _weighted_eval
 
 # zhfont = FontProperties(fname=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'ref_font/KaiTi.ttf'))
 
@@ -104,7 +105,7 @@ def timeit_decorator(func):
 
 # P-R Curve
 @timeit_decorator
-def calc_pr(y_true, y_score):
+def calc_pr(y_true, y_score, sample_weight=None):
     """计算P-R曲线相关统计量.
     基于sklearn.metrics.precision_recall_curve
 
@@ -120,6 +121,9 @@ def calc_pr(y_true, y_score):
     pr_df: pandas.DataFrame
         PR相关的Precision、Recall、Thresholds等统计量数据集
     """
+    if sample_weight is not None:
+        return _weighted_eval.calc_pr(y_true, y_score, sample_weight=sample_weight)
+
     pr_df = pd.DataFrame(precision_recall_curve(y_true, y_score)).T
     pr_df.columns = ['precision', 'recall', 'thresholds']
     pr_df['thresholds_percentile'] = [100 * np.mean(y_score <= x) for x in pr_df['thresholds']] 
@@ -246,7 +250,7 @@ def __plot_multi_pr_axes(pr_dfs, ax):
 
 # ROC Curve
 @timeit_decorator
-def calc_roc(y_true, y_score):
+def calc_roc(y_true, y_score, sample_weight=None):
     """计算ROC曲线相关统计量.
     基于sklearn.metrics.roc_curve
     
@@ -263,6 +267,9 @@ def calc_roc(y_true, y_score):
         ROC相关的TPR、FPR、Thresholds等统计量数据集
     """
     
+    if sample_weight is not None:
+        return _weighted_eval.calc_roc(y_true, y_score, sample_weight=sample_weight)
+
     # 移除无效值
     mask = np.isfinite(y_score) & np.isfinite(y_true)
     y_true_clean = np.array(y_true)[mask]
@@ -713,7 +720,7 @@ def __calc_digit_min(value):
     return rst
 
 @timeit_decorator
-def calc_equid_dist(y_true, y_score, y_group=None, bins=10):
+def calc_equid_dist(y_true, y_score, y_group=None, bins=10, sample_weight=None):
     """将Score等距分组, 计算各组统计量.
 
     Parameters
@@ -732,6 +739,9 @@ def calc_equid_dist(y_true, y_score, y_group=None, bins=10):
     dist_df: pandas.DataFrame
         等距分组后各组统计量数据集
     """
+    if sample_weight is not None:
+        return _weighted_eval.calc_equid_dist(y_true, y_score, bins=bins, sample_weight=sample_weight)
+
     y_true = np.array(y_true)
     y_score = np.array(y_score)
 
@@ -754,7 +764,7 @@ def calc_equid_dist(y_true, y_score, y_group=None, bins=10):
     return dist_df
 
 @timeit_decorator
-def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True):
+def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sample_weight=None):
     """将Score严格的等分分组, 计算各组统计量.
 
     Parameters
@@ -775,6 +785,9 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True):
     pct_df: pandas.DataFrame
         等分分组后各组统计量数据集
     """
+    if sample_weight is not None:
+        return _weighted_eval.calc_equid_pct(y_true, y_score, bins=bins, sample_weight=sample_weight)
+
     y_true = np.array(y_true)
     y_score = np.array(y_score)
     size = len(y_true)
@@ -801,7 +814,7 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True):
 
 
 @timeit_decorator
-def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True):
+def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True, sample_weight=None):
     """使用固定Score边界分组, 计算各组统计量.
 
     Parameters
@@ -822,6 +835,9 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
     pct_df: pandas.DataFrame
         固定分箱后各组统计量数据集
     """
+    if sample_weight is not None:
+        return _weighted_eval.calc_fixed_pct(y_true, y_score, sample_weight=sample_weight)
+
     if bin_edges is None:
         raise ValueError("bin_edges cannot be None when using fixed pct bins.")
 
@@ -1509,7 +1525,7 @@ def __plot_multi_gain_axes(pct_dfs, ax, fontdicts):
         ax.plot(X, Y, color=palette['MorandiDark'][i], linewidth=2, marker='.', markersize=5, label='{0} avgTrue'.format(md))
 
 @timeit_decorator
-def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None):
+def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None):
     """绘制单模型预测效果评价图.
 
     Parameters
@@ -1558,7 +1574,8 @@ def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, 
         d = datas[i]
         y_true = datasets[d]['y_true']
         y_score = datasets[d]['y_score']
-        result.update({d: __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table, equal_freq, pct_bin_edges)})
+        dataset_weight = datasets[d].get('sample_weight', sample_weight)
+        result.update({d: __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table, equal_freq, pct_bin_edges, sample_weight=dataset_weight)})
 
     result_df = pd.DataFrame.from_dict(result, orient='index').reset_index()
 
@@ -1591,7 +1608,7 @@ def resturct_gains(gains_table):
     
     return gains_table
 
-def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table = True, equal_freq = True, pct_bin_edges = None):
+def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None):
     """绘制单模型在单样本集上预测效果评价图.
     包括: ROC、KDE、PCT、Gain四图.
 
@@ -1620,8 +1637,12 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
     
     # 清理数据
     mask = np.isfinite(y_score) & np.isfinite(y_true)
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=float)
+        mask = mask & np.isfinite(sample_weight)
     y_true = y_true[mask]
     y_score = y_score[mask]
+    sample_weight = sample_weight[mask] if sample_weight is not None else None
     
     y_true = np.array(y_true)
     y_score = np.array(y_score)
@@ -1629,6 +1650,8 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
     if gains_table:
         y_df = pd.DataFrame([y_true, y_score]).T
         y_df.columns = ['y_true', 'y_score']
+        if sample_weight is not None:
+            y_df['_sample_weight'] = sample_weight
         y_gains = get_gains_table(
             data = y_df,
             dep = 'y_true',
@@ -1639,15 +1662,16 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
             score = 'y_score',
             equal_freq = equal_freq,
             ascending = True ,
-            withSummary = False
+            withSummary = False,
+            weight_col = '_sample_weight' if sample_weight is not None else None,
         )
     
-    roc_df = calc_roc(y_true, y_score)
+    roc_df = calc_roc(y_true, y_score, sample_weight=sample_weight)
     roc_info = summarize_roc(roc_df)
     if pct_bin_edges is not None:
-        pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=True)
+        pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=True, sample_weight=sample_weight)
     else:
-        pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins)
+        pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, sample_weight=sample_weight)
     
     if gains_table:
         pct_index = pct_df['thresholds']
@@ -1670,9 +1694,9 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
         }
     
     if pct_bin_edges is not None:
-        pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=False)
+        pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=False, sample_weight=sample_weight)
     else:
-        pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False)
+        pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False, sample_weight=sample_weight)
 
     __plot_single_roc_axes(roc_df, plt.subplot(nrow, ncol, i*ncol+1), fontdicts)
     __plot_single_kde_axes(y_true, y_score, dist_bins, plt.subplot(nrow, ncol, i*ncol+2), fontdicts)
@@ -1681,8 +1705,8 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
 
     info = {
         'N': len(y_true),
-        'avgTrue': np.mean(y_true),
-        'avgScore': np.mean(y_score),
+        'avgTrue': _weighted_eval.safe_weighted_average(y_true, sample_weight),
+        'avgScore': _weighted_eval.safe_weighted_average(y_score, sample_weight),
         'KS': roc_info['ks'], 
         'AUC': roc_info['auc'], 
         'Btm{0:.0f}%_TargetRate'.format(pct_info['pct_interval']): pct_info['pct_btm_avgTrue'], 
@@ -1871,7 +1895,7 @@ def __comparison_performance(y_true, y_score_dict, nrow, ncol, i, pct_bins, font
 
 # lift table apt
 @timeit_decorator
-def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True):
+def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, sample_weight=None):
     """给定Lift取值范围, 求解Lift表.
 
     Parameters
@@ -1894,6 +1918,23 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True):
     lift_df: pandas.DataFrame
         Lift表
     """
+    if sample_weight is not None:
+        weight = np.asarray(sample_weight, dtype=float)
+        int_weight = np.rint(weight).astype(int)
+        if np.allclose(weight, int_weight) and np.all(int_weight >= 0):
+            repeat_idx = np.repeat(np.arange(len(int_weight)), int_weight)
+            y_true = np.asarray(y_true)[repeat_idx]
+            y_score = np.asarray(y_score)[repeat_idx]
+        else:
+            return _weighted_eval.calc_lift_apt(
+                y_true=y_true,
+                y_score=y_score,
+                start=start,
+                stop=stop,
+                step=step,
+                sample_weight=sample_weight,
+            )
+
     # 计算初始等分分组数, 在200组与LiftTable长度中取大
     init_bins = np.max([200, int((stop - start + step) / step)])
     

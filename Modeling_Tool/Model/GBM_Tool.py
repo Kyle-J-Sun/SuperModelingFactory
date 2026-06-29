@@ -216,7 +216,7 @@ def set_num_leaves(max_depth=5, wgt=1):
     return int(2 ** max_depth - 2 ** max_depth * wgt)
 
 
-def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None):
+def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sample_weight=None):
     """快速训练LightGBM模型。
 
     使用训练集和验证集训练LightGBM模型，支持早停机制。
@@ -269,6 +269,7 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None):
             lgb.log_evaluation(period=0),
         ],
         sample_weight=wgt,
+        eval_sample_weight=[eval_sample_weight] if eval_sample_weight is not None else None,
         init_score=init_score
     )
     return model
@@ -301,7 +302,7 @@ def lgb_varimp(model):
     return varimp_df
 
 
-def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, cat_x_train=None):
+def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, val_wgt_col = None, cat_x_train=None):
     """快速训练LightGBM模型（使用DataFrame接口）。
 
     接受DataFrame格式的训练集和验证集，自动提取特征和标签。
@@ -341,13 +342,15 @@ def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, 
     lgb = _get_lgb()
 
     wgt = train_data[wgt_col] if wgt_col is not None else None
+    eval_wgt = validation_data[val_wgt_col] if val_wgt_col is not None else None
     model = lgb_model(
         x=train_data[x],
         y=train_data[y],
         valx=validation_data[x],
         valy=validation_data[y],
         params_dict=params,
-        wgt=wgt
+        wgt=wgt,
+        eval_sample_weight=eval_wgt
     )
     return model
 
@@ -435,8 +438,8 @@ def xgb_varimp(model):
     return varimp_df
 
 
-def xgbm_quick_train(train_data, validation_data, x, y, wgt_col, params,
-                     sample_weight_eval_set=None):
+def xgbm_quick_train(train_data, validation_data, x, y, wgt_col=None, params=None,
+                     sample_weight_eval_set=None, val_wgt_col=None):
     """快速训练XGBoost模型（使用DataFrame接口）。
 
     接受DataFrame格式的训练集和验证集，自动提取特征和标签。
@@ -477,6 +480,8 @@ def xgbm_quick_train(train_data, validation_data, x, y, wgt_col, params,
     xgb = _get_xgb()
 
     wgt = train_data[wgt_col] if wgt_col is not None else None
+    if sample_weight_eval_set is None and val_wgt_col is not None:
+        sample_weight_eval_set = [validation_data[val_wgt_col]]
     model = xgb_model(
         x=train_data[x],
         y=train_data[y],
@@ -576,7 +581,7 @@ def catboost_varimp(model):
 
 
 def catboost_quick_train(train_data, validation_data, x, y, params, wgt_col=None,
-                         cat_features=None):
+                         val_wgt_col=None, cat_features=None):
     """快速训练CatBoost模型（使用DataFrame接口）。
 
     接受DataFrame格式的训练集和验证集，自动提取特征和标签。
@@ -667,7 +672,7 @@ class LightGBMModel:
         self.model = model
         self.feature_names_ = None
 
-    def fit(self, x, y, valx, valy, wgt=None, init_score=None):
+    def fit(self, x, y, valx, valy, wgt=None, init_score=None, sample_weight=None, eval_sample_weight=None):
         """训练LightGBM模型。
 
         使用训练集和验证集训练模型，支持早停机制。
@@ -691,9 +696,12 @@ class LightGBMModel:
         -------
         self
         """
+        if wgt is None:
+            wgt = sample_weight
         self.model = lgb_model(
             x=x, y=y, valx=valx, valy=valy,
-            params_dict=self.params, wgt=wgt, init_score=init_score
+            params_dict=self.params, wgt=wgt, init_score=init_score,
+            eval_sample_weight=eval_sample_weight
         )
         if hasattr(x, 'columns'):
             self.feature_names_ = list(x.columns)
@@ -1427,7 +1435,7 @@ class GradientBoostingModel:
         z = np.clip(np.asarray(z, dtype=float), -709, 709)
         return 1.0 / (1.0 + np.exp(-z))
 
-    def fit(self, x, y, valx, valy, init_score=None, **kwargs):
+    def fit(self, x, y, valx, valy, init_score=None, sample_weight=None, eval_sample_weight=None, sample_weight_eval_set=None, **kwargs):
         """训练模型（支持增量学习 warm-start）。
 
         当传入 ``init_score`` 时，以其作为 log-odds 偏移在新数据上继续训练：
@@ -1472,11 +1480,25 @@ class GradientBoostingModel:
                 raise NotImplementedError(
                     "CatBoost does not support init_score in GradientBoostingModel.fit"
                 )
-            self._model.fit(x, y, valx, valy, **kwargs)
+            self._model.fit(x, y, valx, valy, sample_weight=sample_weight, **kwargs)
         elif self.model_type == 'lgb':
-            self._model.fit(x, y, valx, valy, init_score=init_score, **kwargs)
+            self._model.fit(
+                x, y, valx, valy,
+                init_score=init_score,
+                sample_weight=sample_weight,
+                eval_sample_weight=eval_sample_weight,
+                **kwargs,
+            )
         else:
-            self._model.fit(x, y, valx, valy, base_margin=init_score, **kwargs)
+            if sample_weight_eval_set is None and eval_sample_weight is not None:
+                sample_weight_eval_set = [eval_sample_weight]
+            self._model.fit(
+                x, y, valx, valy,
+                base_margin=init_score,
+                sample_weight=sample_weight,
+                sample_weight_eval_set=sample_weight_eval_set,
+                **kwargs,
+            )
         return self
 
     def get_base_margin(self, x):

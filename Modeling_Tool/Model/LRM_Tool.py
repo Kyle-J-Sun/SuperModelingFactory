@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 import logging
+from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +50,7 @@ def _patch_calibrated_model(cal_model):
             classifier.estimator = classifier.base_estimator
 
 
-def lr_model(mdlx, mdly, valx, valy, params_dict):
+def lr_model(mdlx, mdly, valx, valy, params_dict, sample_weight=None):
     """
     Train a Logistic Regression model.
 
@@ -72,7 +74,7 @@ def lr_model(mdlx, mdly, valx, valy, params_dict):
     """
     params_dict = _sanitize_lr_params(params_dict)
     model = LogisticRegression(**params_dict)
-    model.fit(mdlx, mdly)
+    model.fit(mdlx, mdly, sample_weight=sample_weight)
     return model
 
 
@@ -179,18 +181,21 @@ def get_lr_statsmodel_summary(model, x, y, feature_names=None):
     return summary_df
 
 
-def _compute_log_likelihood(model, x, y):
+def _compute_log_likelihood(model, x, y, sample_weight=None):
     """Compute log-likelihood for a fitted logistic regression model."""
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
     y_arr = y.values if hasattr(y, 'values') else np.array(y)
+    weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
 
     prob = model.predict_proba(x_arr)[:, 1]
     prob = np.clip(prob, 1e-15, 1 - 1e-15)
-    log_likelihood = np.sum(y_arr * np.log(prob) + (1 - y_arr) * np.log(1 - prob))
-    return log_likelihood
+    point_ll = y_arr * np.log(prob) + (1 - y_arr) * np.log(1 - prob)
+    if weight is None:
+        return float(np.sum(point_ll))
+    return float(np.sum(weight * point_ll))
 
 
-def compute_aic(model, x, y):
+def compute_aic(model, x, y, sample_weight=None):
     """
     Compute AIC (Akaike Information Criterion) for a logistic regression model.
 
@@ -208,13 +213,13 @@ def compute_aic(model, x, y):
     float
         AIC value (lower is better)
     """
-    log_likelihood = _compute_log_likelihood(model, x, y)
+    log_likelihood = _compute_log_likelihood(model, x, y, sample_weight=sample_weight)
     k = model.coef_.shape[1] + 1  # number of params including intercept
     aic = 2 * k - 2 * log_likelihood
     return aic
 
 
-def compute_bic(model, x, y):
+def compute_bic(model, x, y, sample_weight=None):
     """
     Compute BIC (Bayesian Information Criterion) for a logistic regression model.
 
@@ -233,9 +238,10 @@ def compute_bic(model, x, y):
         BIC value (lower is better)
     """
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
-    log_likelihood = _compute_log_likelihood(model, x, y)
+    weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
+    log_likelihood = _compute_log_likelihood(model, x, y, sample_weight=weight)
     k = model.coef_.shape[1] + 1
-    n = x_arr.shape[0]
+    n = float(np.sum(weight)) if weight is not None else x_arr.shape[0]
     bic = k * np.log(n) - 2 * log_likelihood
     return bic
 
@@ -511,7 +517,7 @@ class LRMaster:
         self._data = data
         return self
 
-    def fit(self, data, varlist, tgt_name, val_data=None, val_varlist=None, val_tgt_name=None):
+    def fit(self, data, varlist, tgt_name, val_data=None, val_varlist=None, val_tgt_name=None, weight_col=None):
         """
         Train the logistic regression model.
 
@@ -553,7 +559,8 @@ class LRMaster:
         if val_x is not None:
             val_x = self._apply_standardizer(val_x)
 
-        self.model = lr_model(train_x, data[tgt_name], val_x, val_y, self.params)
+        sample_weight = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
+        self.model = lr_model(train_x, data[tgt_name], val_x, val_y, self.params, sample_weight=sample_weight)
         return self
     
     def calibrate_model(self, model = None, train_df = None, method='sigmoid', cv=5):
@@ -750,7 +757,7 @@ class LRMaster:
             feature_names=varlist
         )
 
-    def get_aic(self, data=None, varlist=None, tgt_name=None):
+    def get_aic(self, data=None, varlist=None, tgt_name=None, weight_col=None):
         """
         Compute AIC for the trained model.
 
@@ -770,9 +777,14 @@ class LRMaster:
             varlist = self.varlist
         if tgt_name is None:
             tgt_name = self.tgt_name
-        return compute_aic(self.model, self._apply_standardizer(data[varlist]), data[tgt_name])
+        return compute_aic(
+            self.model,
+            self._apply_standardizer(data[varlist]),
+            data[tgt_name],
+            sample_weight=resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data)),
+        )
 
-    def get_bic(self, data=None, varlist=None, tgt_name=None):
+    def get_bic(self, data=None, varlist=None, tgt_name=None, weight_col=None):
         """
         Compute BIC for the trained model.
 
@@ -792,7 +804,12 @@ class LRMaster:
             varlist = self.varlist
         if tgt_name is None:
             tgt_name = self.tgt_name
-        return compute_bic(self.model, self._apply_standardizer(data[varlist]), data[tgt_name])
+        return compute_bic(
+            self.model,
+            self._apply_standardizer(data[varlist]),
+            data[tgt_name],
+            sample_weight=resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data)),
+        )
 
     def stepwise_selection(
         self,
@@ -802,7 +819,8 @@ class LRMaster:
         criterion='aic',
         direction='both',
         max_iter=100,
-        verbose=True
+        verbose=True,
+        weight_col=None,
     ):
         """
         Perform stepwise variable selection.
@@ -836,9 +854,14 @@ class LRMaster:
             Selected feature list
         """
         if criterion == 'aic':
-            score_fn = compute_aic
+            score_fn = lambda model, x, y: compute_aic(
+                model, x, y, sample_weight=resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
+            )
         else:
-            score_fn = compute_bic
+            score_fn = lambda model, x, y: compute_bic(
+                model, x, y, sample_weight=resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
+            )
+        sample_weight = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
 
         # When standardizing, operate on a once-standardized feature frame.
         # Column-wise scalers (StandardScaler / MinMaxScaler) make slicing a
@@ -858,7 +881,7 @@ class LRMaster:
 
         best_model = lr_model(
             work[current_vars] if current_vars else pd.DataFrame(index=data.index),
-            data[tgt_name], None, None, self.params
+            data[tgt_name], None, None, self.params, sample_weight=sample_weight
         ) if current_vars else None
 
         best_score = score_fn(best_model, work[current_vars], data[tgt_name]) if best_model else float('inf')
@@ -872,7 +895,7 @@ class LRMaster:
                 for var in remaining_vars:
                     trial_vars = current_vars + [var]
                     try:
-                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params)
+                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params, sample_weight=sample_weight)
                         scores[var] = score_fn(model, work[trial_vars], data[tgt_name])
                     except Exception:
                         continue
@@ -892,7 +915,7 @@ class LRMaster:
                 for var in current_vars:
                     trial_vars = [v for v in current_vars if v != var]
                     try:
-                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params)
+                        model = lr_model(work[trial_vars], data[tgt_name], None, None, self.params, sample_weight=sample_weight)
                         scores[var] = score_fn(model, work[trial_vars], data[tgt_name])
                     except Exception:
                         continue
@@ -925,12 +948,13 @@ class LRMaster:
             self.standardizer = None
             final_x = data[current_vars]
 
-        self.model = lr_model(final_x, data[tgt_name], None, None, self.params)
+        self.model = lr_model(final_x, data[tgt_name], None, None, self.params, sample_weight=sample_weight)
         return current_vars
 
     def grid_search_params(self, data, varlist, tgt_name, eval_sets, param_grid,
                            objective='oot_gap_penalized', primary_set=None,
-                           gap_ref_sets=None, metric='auc', refit=True, verbose=True):
+                           gap_ref_sets=None, metric='auc', refit=True, verbose=True,
+                           weight_col=None, eval_weight_col=None):
         """
         Grid-search LogisticRegression hyperparameters over a holdout-based objective.
 
@@ -1056,12 +1080,13 @@ class LRMaster:
                 standardize=self.standardize,
                 scaler=self._scaler_proto,
             )
-            cand.fit(data, varlist, tgt_name)
+            cand.fit(data, varlist, tgt_name, weight_col=weight_col)
 
             auc_dict = {}
             for name, df_eval in eval_sets.items():
                 proba = cand.predict_proba(df_eval, varlist)[:, 1]
-                auc_dict[name] = roc_auc_score(df_eval[tgt_name], proba)
+                eval_sw = resolve_sample_weight(data=df_eval, weight_col=eval_weight_col, expected_len=len(df_eval))
+                auc_dict[name] = roc_auc_score(df_eval[tgt_name], proba, sample_weight=eval_sw)
 
             row = dict(combo_dict)
             for name in set_names:
@@ -1096,7 +1121,7 @@ class LRMaster:
                 best_row['AUC_{0}'.format(primary_set)]))
 
         if refit:
-            self.fit(data, varlist, tgt_name)
+            self.fit(data, varlist, tgt_name, weight_col=weight_col)
 
         return search_df
 

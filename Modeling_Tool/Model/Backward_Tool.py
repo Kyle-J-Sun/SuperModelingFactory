@@ -35,6 +35,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
+from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
@@ -62,6 +64,9 @@ def backward_lgbm(
     ascending: bool = True,
     fillna: Optional[float] = None,
     spec_values: Optional[List] = None,
+    weight_col: Optional[str] = None,
+    validation_weight_col: Optional[str] = None,
+    wgt_col: Optional[str] = None,
 ) -> Tuple:
     """
     使用LightGBM模型进行向后变量消除。
@@ -181,11 +186,19 @@ def backward_lgbm(
     for param in lacked_params:
         varreduct_params[param] = hyperparams_preset[param]
 
+    weight_col = weight_col or wgt_col
+
     # 构建 LightGBM 数据集
-    lgb_train = lgb.Dataset(train_data[varlist], label=train_data[dep])
+    train_weight = resolve_sample_weight(data=train_data, weight_col=weight_col, expected_len=len(train_data))
+    lgb_train = lgb.Dataset(train_data[varlist], label=train_data[dep], weight=train_weight)
 
     if validation_data is not None:
-        lgb_valid = lgb.Dataset(validation_data[varlist], label=validation_data[dep])
+        valid_weight = resolve_sample_weight(
+            data=validation_data,
+            weight_col=validation_weight_col or weight_col,
+            expected_len=len(validation_data),
+        )
+        lgb_valid = lgb.Dataset(validation_data[varlist], label=validation_data[dep], weight=valid_weight)
         valid_sets = [lgb_valid]
         valid_names = ["hd"]
     else:
@@ -278,6 +291,9 @@ def backward_xgbm(
     fillna: Optional[float] = None,
     spec_values: Optional[List] = None,
     monotone_constraints: Optional[Dict[str, int]] = None,
+    weight_col: Optional[str] = None,
+    validation_weight_col: Optional[str] = None,
+    wgt_col: Optional[str] = None,
 ) -> Tuple:
     """
     使用XGBoost模型进行向后变量消除。
@@ -405,12 +421,20 @@ def backward_xgbm(
     for param in lacked_params:
         varreduct_params[param] = hyperparams_preset[param]
 
+    weight_col = weight_col or wgt_col
+
     # 构建 XGBoost 数据集
-    xgb_train = xgb.DMatrix(train_data[varlist], label=train_data[dep])
+    train_weight = resolve_sample_weight(data=train_data, weight_col=weight_col, expected_len=len(train_data))
+    xgb_train = xgb.DMatrix(train_data[varlist], label=train_data[dep], weight=train_weight)
 
     evals = [(xgb_train, "mdl")]
     if validation_data is not None:
-        xgb_valid = xgb.DMatrix(validation_data[varlist], label=validation_data[dep])
+        valid_weight = resolve_sample_weight(
+            data=validation_data,
+            weight_col=validation_weight_col or weight_col,
+            expected_len=len(validation_data),
+        )
+        xgb_valid = xgb.DMatrix(validation_data[varlist], label=validation_data[dep], weight=valid_weight)
         evals.append((xgb_valid, "hd"))
 
     # 训练模型
@@ -519,6 +543,9 @@ class BackwardVariableEliminator:
         model_type: str = "lgbm",
         validation_data: Optional[pd.DataFrame] = None,
         test_data_dict: Optional[Dict[str, pd.DataFrame]] = None,
+        weight_col: Optional[str] = None,
+        validation_weight_col: Optional[str] = None,
+        wgt_col: Optional[str] = None,
     ):
         self.train_data = train_data
         self.varlist = varlist
@@ -526,6 +553,8 @@ class BackwardVariableEliminator:
         self.model_type = model_type.lower()
         self.validation_data = validation_data
         self.test_data_dict = test_data_dict or {}
+        self.weight_col = weight_col or wgt_col
+        self.validation_weight_col = validation_weight_col
         self._results = []
 
     def run(
@@ -600,6 +629,8 @@ class BackwardVariableEliminator:
                 test_data_dict=self.test_data_dict,
                 ret_perf=ret_perf,
                 nbins=nbins,
+                weight_col=self.weight_col,
+                validation_weight_col=self.validation_weight_col,
                 **kwargs,
             )
 
