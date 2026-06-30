@@ -9,6 +9,11 @@ from .score_comparison import (
     ScoreComparisonPipelineConfig,
     ScoreComparisonPipelineResult,
 )
+from .score_consistency_uat import (
+    ScoreConsistencyUATPipeline,
+    ScoreConsistencyUATPipelineConfig,
+    ScoreConsistencyUATPipelineResult,
+)
 
 __all__ = [
     "RejectInferencePipeline",
@@ -20,4 +25,7 @@ __all__ = [
     "ScoreComparisonPipeline",
     "ScoreComparisonPipelineConfig",
     "ScoreComparisonPipelineResult",
+    "ScoreConsistencyUATPipeline",
+    "ScoreConsistencyUATPipelineConfig",
+    "ScoreConsistencyUATPipelineResult",
 ]
