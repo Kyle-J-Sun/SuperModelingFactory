@@ -59,6 +59,7 @@ optuna = ["optuna>=4.0.0"]
 stats = ["statsmodels>=0.13.0"]
 imblearn = ["imbalanced-learn>=0.10.0"]
 explain = ["shap>=0.44.0", "lime>=0.2.0.1"]
+mic = ["minepy>=1.2.6; python_version < '3.11'"]
 odps = ["pyodps>=0.11.0"]
 
 [project.urls]
