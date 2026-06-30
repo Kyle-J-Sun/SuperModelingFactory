@@ -12,9 +12,41 @@ import pandas as pd
 import numpy as np
 import inspect
 from typing import List, Dict, Optional, Callable, Any, Union
-from .Model_Eval_Tool import get_perf_summary, get_gains_table, get_gains_table_by_cust_metrics, cross_risk
+from .Model_Eval_Tool import (
+    cross_risk,
+    get_perf_summary,
+    GainsTableCalculator,
+    PerformanceEvaluator,
+)
 import logging
 logger = logging.getLogger(__name__)
+
+_DEFAULT_GAINS_DISPLAY_METRICS = [
+    'MIN', 'MAX', 'N', 'PROP', 'AVG_SCORE', 'AVG_BAD',
+    'CUM_BAD_PCT', 'KS_PER_BIN', 'LIFT', 'RANK_ORDER_BUMP',
+]
+_LEGACY_EVAL_YLABELS = ['is_dpd7']
+_LEGACY_GRP_NAMELIST = ['sample_ind_fnl', 'aprvvrsn_2', 'week_start_date']
+
+
+def _legacy_subset_condition_dict():
+    return {
+        "Overall": "",
+        "AE": "aprvvrsn_2 in ('AE')",
+        "NON_AE": "aprvvrsn_2 not in ('AE')",
+        "FT": "aprvvrsn_2 in ('FT2.0')",
+        "NON_FT": "aprvvrsn_2 not in ('FT2.0')",
+        "NON_FT_AE": "aprvvrsn_2 not in ('FT2.0') and aprvvrsn_2 not in ('AE')",
+    }
+
+
+def _legacy_cross_agg_dict(udf):
+    return {
+        'is_dpd7': ['count', lambda x: (x.sum() / x.count()).round(4)],
+        'credit_limit': ['count', lambda x: udf.valid_average(x)],
+        'monthlyincome': ['count', lambda x: udf.valid_average(x)],
+        'education': ['count', lambda x: udf.valid_average(x)],
+    }
 
 class EvaluationPipeline:
     """
@@ -202,7 +234,6 @@ class Model_Evaluation_Tool:
     - Base score calculation and correlation analysis
     - Model performance comparison across multiple metrics
     - Gains table generation and analysis
-    - Custom metric evaluation
     - Cross-risk analysis
     - Multi-dimensional evaluation with subsets and groupings
     
@@ -255,8 +286,6 @@ class Model_Evaluation_Tool:
         Name of the base score column.
     comp_scrlist : list
         List of comparison score names.
-    eval_metrics : list
-        List of evaluation metrics.
     eval_ylabels : list
         Labels for y-axis evaluation.
     gains_display_metric_list : list
@@ -283,8 +312,15 @@ class Model_Evaluation_Tool:
         include_missing: bool = True,
         missing_rate_ref: Union[int, float] = -99999999,
         excel_path: Optional[str] = None,
-        fillna = -999999,
-        spec_values = []
+        fillna=-999999,
+        spec_values=None,
+        cross_agg_dict: Optional[Dict] = None,
+        subset_condition_dict: Optional[Dict[str, str]] = None,
+        eval_ylabels: Optional[List[str]] = None,
+        grp_namelist: Optional[List[str]] = None,
+        gains_display_metric_list: Optional[List[str]] = None,
+        weight_col: Optional[str] = None,
+        positive_score_only: bool = True,
     ):
         """
         Initialize the Model_Evaluation_Tool with configuration parameters.
@@ -344,39 +380,105 @@ class Model_Evaluation_Tool:
         self.excel_path = excel_path
         self.missing_rate_ref = missing_rate_ref
         self.fillna = fillna
-        self.spec_values = spec_values
+        self.spec_values = [] if spec_values is None else spec_values
+        self.weight_col = weight_col
+        self.positive_score_only = positive_score_only
         
         self.chi2_method = chi2_method
         self.chi2_p = chi2_p
         self.init_equi_bins = init_equi_bins
         
-        self.eval_metrics = [
-            'age', 
-            'monthlyincome', 
-            'education', 
-            'credit_limit'
-        ]
-        
         self.udf = Utility_Functions()
-        self.cross_agg_dict = {
-            'is_dpd7':                          ['count', lambda x: (x.sum() / x.count()).round(4)],
-            'credit_limit':                     ['count', lambda x: self.udf.valid_average(x)],
-            'monthlyincome':                    ['count', lambda x: self.udf.valid_average(x)],
-            'education':                        ['count', lambda x: self.udf.valid_average(x)],
-        }
-        
-        self.subset_condition_dict = {
-            "Overall": "", 
-            "AE": "aprvvrsn_2 in ('AE')",
-            "NON_AE": "aprvvrsn_2 not in ('AE')",
-            "FT": "aprvvrsn_2 in ('FT2.0')",
-            "NON_FT": "aprvvrsn_2 not in ('FT2.0')",
-            "NON_FT_AE": "aprvvrsn_2 not in ('FT2.0') and aprvvrsn_2 not in ('AE')"
-        }
-        
-        self.eval_ylabels = ['is_dpd7']
-        self.grp_namelist = ['sample_ind_fnl', 'aprvvrsn_2', 'week_start_date']
-        self.gains_display_metric_list = ['MIN', 'MAX', 'N', 'PROP', 'AVG_SCORE', 'AVG_BAD', 'CUM_BAD_PCT', 'KS_PER_BIN', 'LIFT', 'RANK_ORDER_BUMP']
+        self.cross_agg_dict = (
+            cross_agg_dict if cross_agg_dict is not None
+            else _legacy_cross_agg_dict(self.udf)
+        )
+        self.subset_condition_dict = (
+            subset_condition_dict if subset_condition_dict is not None
+            else _legacy_subset_condition_dict()
+        )
+        self.eval_ylabels = (
+            eval_ylabels if eval_ylabels is not None else list(_LEGACY_EVAL_YLABELS)
+        )
+        self.grp_namelist = (
+            grp_namelist if grp_namelist is not None else list(_LEGACY_GRP_NAMELIST)
+        )
+        self.gains_display_metric_list = (
+            gains_display_metric_list if gains_display_metric_list is not None
+            else list(_DEFAULT_GAINS_DISPLAY_METRICS)
+        )
+    
+    def _score_order(self) -> List[str]:
+        scores = []
+        if self.base_score is not None:
+            scores.append(self.base_score)
+        scores.extend(self.comp_scrlist or [])
+        return scores
+
+    def _filter_positive_scores(self, data: pd.DataFrame, scores: List[str]) -> pd.DataFrame:
+        if not self.positive_score_only or not scores:
+            return data
+        mask = pd.Series(True, index=data.index)
+        for score in scores:
+            if score in data.columns:
+                mask &= data[score] > 0
+        return data.loc[mask]
+
+    def _build_performance_evaluator(
+        self,
+        score: str,
+        dist_bins: int,
+        pct_bins: int,
+        min_bin_prop: Optional[float] = None,
+        include_missing: Optional[bool] = None,
+        equal_freq: Optional[bool] = None,
+    ) -> PerformanceEvaluator:
+        return PerformanceEvaluator(
+            tgt_name=self.dep,
+            scr_name=score,
+            dist_bins=dist_bins,
+            pct_bins=pct_bins,
+            precision=self.precision,
+            min_bin_prop=self.min_bin_prop if min_bin_prop is None else min_bin_prop,
+            include_missing=False if include_missing is None else include_missing,
+            equal_freq=self.equal_freq if equal_freq is None else equal_freq,
+            chi2_method=self.chi2_method,
+            init_equi_bins=self.init_equi_bins,
+            chi2_p=self.chi2_p,
+            tree_binning=self.tree_binning,
+            random_state=self.seed,
+            weight_col=self.weight_col,
+        )
+
+    def _build_gains_calculator(
+        self,
+        data: pd.DataFrame,
+        score: str,
+        nbins: int,
+        fillna,
+        spec_values,
+        include_missing: bool,
+        ascending: bool = True,
+    ) -> GainsTableCalculator:
+        return GainsTableCalculator(
+            data=data,
+            dep=self.dep,
+            score=score,
+            nbins=nbins,
+            precision=self.precision,
+            min_bin_prop=self.min_bin_prop,
+            include_missing=include_missing,
+            equal_freq=self.equal_freq,
+            chi2_method=self.chi2_method,
+            chi2_p=self.chi2_p,
+            init_equi_bins=self.init_equi_bins,
+            fillna=fillna,
+            spec_values=spec_values,
+            tree_binning=self.tree_binning,
+            random_state=self.seed,
+            ascending=ascending,
+            weight_col=self.weight_col,
+        )
     
     def __init_excel_master(self):
         """
@@ -491,13 +593,17 @@ class Model_Evaluation_Tool:
         dist_bins: int = 100,
         pct_bins: int = 10,
         min_data_size: int = 50,
-        sync_data_size: bool = True
+        sync_data_size: bool = True,
+        min_bin_prop: Optional[float] = None,
+        include_missing: Optional[bool] = None,
+        equal_freq: Optional[bool] = None,
     ) -> pd.DataFrame:
         """
         Compare model performance across different scores.
         
         This method calculates performance metrics (AUC, KS, etc.) for the base score
-        and all comparison scores, optionally filtering by group.
+        and all comparison scores via ``PerformanceEvaluator``, optionally filtering
+        by group.
         
         Parameters
         ----------
@@ -513,108 +619,90 @@ class Model_Evaluation_Tool:
             Minimum data size per bin. Default is 50.
         sync_data_size : bool, optional
             Whether to filter out zero/negative scores. Default is True.
+        min_bin_prop : float, optional
+            Minimum bin proportion. Defaults to the instance setting.
+        include_missing : bool, optional
+            Whether to include missing values in performance binning.
+            Defaults to ``False`` for performance comparison.
+        equal_freq : bool, optional
+            Use equal-frequency binning. Defaults to the instance setting.
             
         Returns
         -------
         pandas.DataFrame
             Performance comparison results sorted by score order.
         """
-        
         data = self.data.copy() if data is None else data.copy()
         score_list = self.comp_scrlist
         dep = self.dep
         base_score = self.base_score
-        precision = self.precision
-        
-        # 过滤掉无效分数和目标值
-        valid_mask = (
-            data[dep].notna() & 
-            data[base_score].notna() &
-            np.isfinite(data[base_score])
-        )
-        clean_data = data[valid_mask]
-        
-        if len(clean_data) == 0:
-            return pd.DataFrame()  # 返回空结果
-        # 后续使用 clean_data 进行计算
-        
-        oot_df = clean_data.copy()
         sample_name = 'oot'
-        oot_df_ = clean_data.copy()
-        
-        if sync_data_size:
-            if len(score_list) > 0:
-                score_query = " and ".join([s + " > 0" for s in score_list])
-                oot_df_ = oot_df.query(score_query) if oot_df is not None else None
-        
+
+        if base_score is None:
+            return pd.DataFrame()
+
+        valid_mask = (
+            data[dep].notna()
+            & data[base_score].notna()
+            & np.isfinite(data[base_score])
+        )
+        clean_data = data.loc[valid_mask]
+        if clean_data.empty:
+            return pd.DataFrame()
+
+        shared_data = clean_data.copy()
+        if sync_data_size and score_list:
+            shared_data = self._filter_positive_scores(shared_data, score_list)
+
         perf_comp_dict = {}
-        
-        if base_score is not None:
-            base_perf = get_perf_summary(
-                train=None, 
-                validation=None, 
-                oot=oot_df_.query(f"{base_score} > 0"), 
-                tgt_name=dep,
-                scr_name=base_score,
-                to_show=False,
-                display=False,
+        score_order = self._score_order()
+
+        for score in score_order:
+            if score not in clean_data.columns:
+                continue
+            score_data = shared_data if sync_data_size and score in (score_list or []) else clean_data
+            score_data = score_data.loc[score_data[score] > 0] if self.positive_score_only else score_data
+            if score_data.empty:
+                continue
+
+            evaluator = self._build_performance_evaluator(
+                score=score,
                 dist_bins=dist_bins,
                 pct_bins=pct_bins,
-                precision=precision,
-                min_bin_prop=0.05,
-                include_missing=False,
-                equal_freq=True,
-                oot_grp_name=grp_name,
-                min_data_size=min_data_size
+                min_bin_prop=min_bin_prop,
+                include_missing=include_missing,
+                equal_freq=equal_freq,
             )
-            
-            if not base_perf.empty and 'index' in base_perf.columns:
-                base_perf = base_perf.query(f"index == '{sample_name}'")
-            
-            perf_comp_dict[base_score] = base_perf
-        
-        if len(score_list) > 0:
-            for score in score_list:
-                """Loop Score List."""
-                perf_comp_dict[score] = get_perf_summary(
-                    train=None, 
-                    validation=None, 
-                    oot=oot_df_.query(f"{score} > 0"), 
-                    scr_name=score,
-                    tgt_name=dep,
-                    to_show=False,
-                    display=False,
-                    dist_bins=dist_bins,
-                    pct_bins=pct_bins,
-                    precision=precision,
-                    min_bin_prop=0.05,
-                    include_missing=False,
-                    equal_freq=True,
-                    oot_grp_name=grp_name,
-                    min_data_size=min_data_size
-                ).query(f"index == '{sample_name}'")
-        
+            perf = evaluator.add_dataset(sample_name, score_data).evaluate(
+                oot_grp_name=grp_name,
+                min_data_size=min_data_size,
+                to_show=False,
+                display=False,
+            )
+            if isinstance(perf, pd.DataFrame) and not perf.empty and 'index' in perf.columns:
+                perf = perf.query(f"index == '{sample_name}'")
+            perf_comp_dict[score] = perf
+
         if not perf_comp_dict:
             return pd.DataFrame()
-        
+
         perf_comp_res = []
         for score_name, perf in perf_comp_dict.items():
             perf = perf.copy()
             perf['score_name'] = score_name
             perf_comp_res.append(perf)
-        
+
         perf_comp_res = pd.concat(perf_comp_res)
-        
+
         drop_cols = ['AUC_Shift', 'KS_Shift']
         for col in drop_cols:
             if col in perf_comp_res.columns:
                 perf_comp_res = perf_comp_res.drop(columns=[col])
-        
-        custom_order = [base_score] + score_list if base_score else score_list
-        order_map = {val: i for i, val in enumerate(custom_order) if val in perf_comp_dict}
+
+        order_map = {val: i for i, val in enumerate(score_order) if val in perf_comp_dict}
         perf_comp_res['sort_key'] = perf_comp_res['score_name'].map(order_map)
         perf_comp_res_sorted = perf_comp_res.sort_values('sort_key').drop('sort_key', axis=1)
-        
+
         return perf_comp_res_sorted
     
     def get_gains_summary(
@@ -627,15 +715,16 @@ class Model_Evaluation_Tool:
         withSummary: bool = True,
         add_func: Optional[Callable] = None,
         sync_range: bool = True,
-        spec_values = [],
-        include_missing = False,
-        fillna = None
+        spec_values=None,
+        include_missing: Optional[bool] = None,
+        fillna=None,
     ) -> pd.DataFrame:
         """
         Generate gains summary table for score analysis.
         
-        This method creates gains tables showing the distribution of targets
-        across score bins, with optional group stratification.
+        This method creates gains tables via ``GainsTableCalculator``, showing the
+        distribution of targets across score bins, with optional group stratification.
+        Custom metrics can be injected through ``add_func``.
         
         Parameters
         ----------
@@ -652,9 +741,15 @@ class Model_Evaluation_Tool:
         withSummary : bool, optional
             Include summary row. Default is True.
         add_func : callable, optional
-            Additional function to apply to gains table.
+            Custom metric function merged into each gains table.
         sync_range : bool, optional
             Synchronize bin ranges. Default is True.
+        spec_values : list, optional
+            Special values to treat separately during binning.
+        include_missing : bool, optional
+            Whether to include missing values. Defaults to the instance setting.
+        fillna : any, optional
+            Missing-value fill for score binning. Defaults to the instance setting.
             
         Returns
         -------
@@ -663,188 +758,120 @@ class Model_Evaluation_Tool:
         """
         if grp_disp_metric is None:
             grp_disp_metric = ['N', 'PROP', 'AVG_BAD', 'LIFT']
-            
+
         if fillna is None:
             fillna = self.fillna
-        
+        if spec_values is None:
+            spec_values = self.spec_values
+        if include_missing is None:
+            include_missing = self.include_missing
+
         new_oot_df = self.data.copy() if data is None else data.copy()
-        
+
         dep = self.dep
-        tree_binning = self.tree_binning
-        digit = self.precision
         base_score = self.base_score
-        equal_freq = self.equal_freq
         min_data_size = self.min_data_size
         nbins = self.nbins if grp_name is None else grp_nbins
-        min_bin_prop = self.min_bin_prop
-        
-        score_list = [base_score] + self.comp_scrlist
+
+        score_list = self._score_order()
         display_metric_list = self.gains_display_metric_list if add_func is None else None
-        
+
         if self.data is None or len(self.data) == 0:
             empty_df = pd.DataFrame()
             empty_df.index = pd.MultiIndex.from_tuples([], names=['_bin_num', '_bin_range'])
-            return empty_df  # 或返回空结果
-        
+            return empty_df
+
         gains_table_dict = {}
         for score in score_list:
+            if score not in new_oot_df.columns:
+                continue
+
+            calculator = self._build_gains_calculator(
+                data=new_oot_df,
+                score=score,
+                nbins=nbins,
+                fillna=fillna,
+                spec_values=spec_values,
+                include_missing=include_missing,
+                ascending=True,
+            )
+
             if grp_name is None:
-                ### Overall Gains
-                gains_table_dict[score] = get_gains_table(
-#                     data=new_oot_df.query(f"{score} > 0"), 
-                    data=new_oot_df, 
-                    dep=dep, 
-                    ascending=True,
-                    tree_binning=tree_binning,
-                    nbins=nbins, 
-                    precision=digit, 
-                    min_bin_prop=min_bin_prop, 
-                    include_missing=False, 
-                    score=score, 
-                    fillna = fillna,
-                    equal_freq=equal_freq,
+                gains_table_dict[score] = calculator.calculate(
                     withSummary=withSummary,
                     add_func=add_func,
-                    spec_values=spec_values
                 )
                 if display_metric_list is not None:
                     gains_table_dict[score] = gains_table_dict[score][display_metric_list]
                 gains_table_dict[score] = gains_table_dict[score].reset_index(drop=False)
-                
             else:
                 if new_oot_df.query(f"{score} > 0").shape[0] > 10:
-                    oot_by_group = get_gains_table(
-                        data=new_oot_df, 
-                        dep=dep, 
-                        ascending=True,
-                        tree_binning=tree_binning,
-                        nbins=grp_nbins, 
-                        precision=digit, 
-                        min_bin_prop=min_bin_prop, 
-                        include_missing=False, 
-                        score=score,
-                        fillna = fillna,
-                        equal_freq=equal_freq, 
-                        sync_range=sync_range, 
-                        retSummary=False,
-                        grp_name=grp_name, 
+                    oot_by_group = calculator.calculate(
+                        grp_name=grp_name,
                         min_data_size=min_data_size,
+                        sync_range=sync_range,
+                        retSummary=False,
                         withSummary=withSummary,
-                        spec_values=spec_values,
-                        add_func=add_func
+                        add_func=add_func,
                     )
                     if display_metric_list is not None:
                         oot_by_group = oot_by_group[[*display_metric_list, grp_name]]
                     oot_by_group = oot_by_group.reset_index(drop=False)
-                    
+
                     grp_metric_dict = {}
                     for value in [x for x in grp_disp_metric if x not in ['PROP']]:
                         grp_metric_dict[value] = oot_by_group\
                             .reset_index(drop=False)\
-                            .pivot_table(index=['_bin_num', '_bin_range'], columns=[grp_name], values=value, margins=True, margins_name="Grand_Total")
-                    
+                            .pivot_table(
+                                index=['_bin_num', '_bin_range'],
+                                columns=[grp_name],
+                                values=value,
+                                margins=True,
+                                margins_name="Grand_Total",
+                            )
+
                     if 'PROP' in grp_disp_metric:
                         tot_cnt = oot_by_group\
                             .reset_index(drop=False)\
-                            .pivot_table(index=['_bin_num', '_bin_range'], columns=[grp_name], values=['N'], margins=True, margins_name="Grand_Total", aggfunc='sum')
-                        
+                            .pivot_table(
+                                index=['_bin_num', '_bin_range'],
+                                columns=[grp_name],
+                                values=['N'],
+                                margins=True,
+                                margins_name="Grand_Total",
+                                aggfunc='sum',
+                            )
+
                         if tot_cnt.shape[0] > 0:
-                            grp_metric_dict['PROP'] = tot_cnt.iloc[0:tot_cnt.shape[0]:] / np.array(tot_cnt.iloc[-1:].T['Grand_Total'].tolist())
-                            grp_metric_dict['PROP'].columns = grp_metric_dict['PROP'].rename(columns={'N': ''}).columns.map("".join)
-                    
+                            grp_metric_dict['PROP'] = tot_cnt.iloc[0:tot_cnt.shape[0]:] / np.array(
+                                tot_cnt.iloc[-1:].T['Grand_Total'].tolist()
+                            )
+                            grp_metric_dict['PROP'].columns = grp_metric_dict['PROP'].rename(
+                                columns={'N': ''}
+                            ).columns.map("".join)
+
                     fnl_grp_gains_res = []
                     for colname, gains in grp_metric_dict.items():
                         gains = gains.copy()
                         gains['variable'] = colname
-#                         gains = gains.reset_index(drop=False)
                         if disp:
                             from IPython.display import display
                             display(gains)
                         fnl_grp_gains_res.append(gains)
                     fnl_grp_gains_res = pd.concat(fnl_grp_gains_res)
-                    
+
                     gains_table_dict[score] = oot_by_group
-        
+
         fnl_gains_res = []
         for score_name, gains_res in gains_table_dict.items():
             gains_res = gains_res.copy()
             gains_res['score_name'] = score_name
             fnl_gains_res.append(gains_res)
-        
-        fnl_gains_res = pd.concat(fnl_gains_res)
-        
-        return fnl_gains_res
-    
-    def get_cust_metric_summary(
-        self,
-        eval_metrics: Optional[List[str]] = None,
-        metric_agg_func: Union[str, Callable] = 'mean',
-        withSummary: bool = True,
-        spec_values = []
-    ) -> pd.DataFrame:
-        """
-        Generate summary for custom evaluation metrics.
-        
-        This method calculates gains tables for custom metrics defined in
-        self.eval_metrics, allowing analysis of various feature distributions
-        across score bins.
-        
-        Parameters
-        ----------
-        eval_metrics : list, optional
-            List of metrics to evaluate. If None, uses self.eval_metrics.
-        metric_agg_func : str or callable, optional
-            Aggregation function for metrics. Default is 'mean'.
-        withSummary : bool, optional
-            Include summary row. Default is True.
-            
-        Returns
-        -------
-        pandas.DataFrame
-            Custom metric summary with score names.
-        """
-        data = self.data.copy()
-        tgt_name = self.dep
-        nbins = self.nbins
-        precision = self.precision
-        min_bin_prop = self.min_bin_prop
-        include_missing = self.include_missing
-        equal_freq = self.equal_freq
-        
-        score_list = [self.base_score] + self.comp_scrlist
-        
-        if eval_metrics is None:
-            eval_metrics = self.eval_metrics
-        
-        cust_metric_res = {}
-        for score in score_list:
-            cust_metric_res[score] = get_gains_table_by_cust_metrics(
-                data=data,
-                dep=tgt_name,
-                nbins=nbins,
-                precision=precision,
-                min_bin_prop=min_bin_prop,
-                include_missing=include_missing,
-                score=score,
-                tree_binning=self.tree_binning,
-                equal_freq=equal_freq,
-                fillna=-999999,
-                spec_values=spec_values,
-                ascending=True,
-                eval_metrics=eval_metrics,
-                metric_agg_func=metric_agg_func,
-                withSummary=withSummary
-            )
-        
-        cust_gains_fnl_res = []
-        for score_name, res in cust_metric_res.items():
-            res = res.copy()
-            res['score_name'] = score_name
-            cust_gains_fnl_res.append(res)
-        
-        cust_gains_fnl_res = pd.concat(cust_gains_fnl_res)
-        
-        return cust_gains_fnl_res
+
+        if not fnl_gains_res:
+            return pd.DataFrame()
+
+        return pd.concat(fnl_gains_res)
     
     def get_cross_risk_summary(
         self,
@@ -852,7 +879,7 @@ class Model_Evaluation_Tool:
         nbins: int = 5,
         equal_freq: Optional[bool] = None,
         disp: bool = True,
-        spec_values = []
+        spec_values=None,
     ) -> pd.DataFrame:
         """
         Generate cross-risk analysis summary between base and comparison scores.
@@ -890,7 +917,9 @@ class Model_Evaluation_Tool:
         
         if cross_agg_dict is None:
             cross_agg_dict = self.cross_agg_dict.copy()
-        
+        if spec_values is None:
+            spec_values = self.spec_values
+
         multi_scr_res = {}
         for compare_scr in compare_scrlist:
             logger.info(compare_scr)
