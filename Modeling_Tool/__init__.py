@@ -92,6 +92,12 @@ _EXPLAIN_EXPORTS = frozenset({
     'ModelExplainer', 'build_coalition_structure', 'CREDIT_PRIOR_GROUPS',
 })
 
+_PIPELINE_EXPORTS = frozenset({
+    'RejectInferencePipeline', 'RejectInferencePipelineConfig', 'RejectInferencePipelineResult',
+    'CreditModelPipeline', 'CreditModelPipelineConfig', 'CreditModelPipelineResult',
+    'ScoreComparisonPipeline', 'ScoreComparisonPipelineConfig', 'ScoreComparisonPipelineResult',
+})
+
 def __getattr__(name):
     if name in _MODEL_EXPORTS:
         from . import Model as _Model
@@ -99,6 +105,9 @@ def __getattr__(name):
     if name in _EXPLAIN_EXPORTS:
         from . import Explainability as _explain
         return getattr(_explain, name)
+    if name in _PIPELINE_EXPORTS:
+        from . import Pipeline as _pipeline
+        return getattr(_pipeline, name)
     if name == "ODPSRunner":
         from .Core import ODPSRunner
         return ODPSRunner
@@ -136,6 +145,15 @@ __all__ = [
     'ModelExplainer',
     'build_coalition_structure',
     'CREDIT_PRIOR_GROUPS',
+    'RejectInferencePipeline',
+    'RejectInferencePipelineConfig',
+    'RejectInferencePipelineResult',
+    'CreditModelPipeline',
+    'CreditModelPipelineConfig',
+    'CreditModelPipelineResult',
+    'ScoreComparisonPipeline',
+    'ScoreComparisonPipelineConfig',
+    'ScoreComparisonPipelineResult',
     'cross_risk',
     'GainsTableCalculator',
     'PerformanceEvaluator',
