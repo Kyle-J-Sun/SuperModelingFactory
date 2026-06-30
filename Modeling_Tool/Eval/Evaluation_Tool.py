@@ -880,6 +880,7 @@ class Model_Evaluation_Tool:
         equal_freq: Optional[bool] = None,
         disp: bool = True,
         spec_values=None,
+        binning_numeric=None,
     ) -> pd.DataFrame:
         """
         Generate cross-risk analysis summary between base and comparison scores.
@@ -897,6 +898,13 @@ class Model_Evaluation_Tool:
             Use equal frequency binning. If None, uses self.equal_freq.
         disp : bool, optional
             Whether to display results. Default is True.
+        spec_values : list, optional
+            Special values to keep separate during binning.
+        binning_numeric : bool or list/tuple of bool, optional
+            Whether numeric score columns should be binned before cross-risk
+            aggregation. If None, defaults to [True, True] for backward
+            compatibility. Passing a bool applies the same setting to both
+            base and comparison score.
             
         Returns
         -------
@@ -919,6 +927,38 @@ class Model_Evaluation_Tool:
             cross_agg_dict = self.cross_agg_dict.copy()
         if spec_values is None:
             spec_values = self.spec_values
+        if binning_numeric is None:
+            binning_numeric = [True, True]
+        elif isinstance(binning_numeric, (bool, np.bool_)):
+            binning_numeric = [bool(binning_numeric), bool(binning_numeric)]
+        elif isinstance(binning_numeric, (list, tuple)):
+            if len(binning_numeric) != 2:
+                raise ValueError(
+                    "binning_numeric must be a bool or a two-element list/tuple."
+                )
+            if not all(isinstance(value, (bool, np.bool_)) for value in binning_numeric):
+                raise TypeError("binning_numeric values must be booleans.")
+            binning_numeric = [bool(binning_numeric[0]), bool(binning_numeric[1])]
+        else:
+            raise TypeError("binning_numeric must be None, a bool, or a two-element list/tuple.")
+
+        def _ensure_three_level_columns(frame: pd.DataFrame) -> pd.DataFrame:
+            frame = frame.copy()
+            if isinstance(frame.columns, pd.MultiIndex):
+                normalized_columns = []
+                for col in frame.columns:
+                    col_tuple = tuple(col)
+                    if len(col_tuple) < 3:
+                        col_tuple = col_tuple + ("",) * (3 - len(col_tuple))
+                    elif len(col_tuple) > 3:
+                        col_tuple = col_tuple[:2] + ("_".join(map(str, col_tuple[2:])),)
+                    normalized_columns.append(col_tuple)
+                frame.columns = pd.MultiIndex.from_tuples(normalized_columns)
+            else:
+                frame.columns = pd.MultiIndex.from_tuples(
+                    [(col, "", "") for col in frame.columns]
+                )
+            return frame
 
         multi_scr_res = {}
         for compare_scr in compare_scrlist:
@@ -948,7 +988,7 @@ class Model_Evaluation_Tool:
                         min_bin_prop=min_bin_prop,
                         include_missing=include_missing,
                         equal_freq=equal_freq,
-                        binning_numeric=[True, True],
+                        binning_numeric=binning_numeric,
                         tree_binning=tree_binning,
                         agg_func=aggfunc,
                         fillna=fillna,
@@ -957,7 +997,7 @@ class Model_Evaluation_Tool:
             
             fnl_res = []
             for colname, res in cross_res.items():
-                res = res.copy()
+                res = _ensure_three_level_columns(res)
                 res[('', 'eval_metric', '')] = colname
                 res = res.rename(columns={"<lambda>": "", "count": "n"})
                 if disp:
