@@ -14,6 +14,11 @@ from .score_consistency_uat import (
     ScoreConsistencyUATPipelineConfig,
     ScoreConsistencyUATPipelineResult,
 )
+from .sample_analysis import (
+    SampleAnalysisPipeline,
+    SampleAnalysisPipelineConfig,
+    SampleAnalysisPipelineResult,
+)
 
 __all__ = [
     "RejectInferencePipeline",
@@ -28,4 +33,7 @@ __all__ = [
     "ScoreConsistencyUATPipeline",
     "ScoreConsistencyUATPipelineConfig",
     "ScoreConsistencyUATPipelineResult",
+    "SampleAnalysisPipeline",
+    "SampleAnalysisPipelineConfig",
+    "SampleAnalysisPipelineResult",
 ]

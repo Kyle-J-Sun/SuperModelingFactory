@@ -97,6 +97,7 @@ _PIPELINE_EXPORTS = frozenset({
     'CreditModelPipeline', 'CreditModelPipelineConfig', 'CreditModelPipelineResult',
     'ScoreComparisonPipeline', 'ScoreComparisonPipelineConfig', 'ScoreComparisonPipelineResult',
     'ScoreConsistencyUATPipeline', 'ScoreConsistencyUATPipelineConfig', 'ScoreConsistencyUATPipelineResult',
+    'SampleAnalysisPipeline', 'SampleAnalysisPipelineConfig', 'SampleAnalysisPipelineResult',
 })
 
 def __getattr__(name):
@@ -158,6 +159,9 @@ __all__ = [
     'ScoreConsistencyUATPipeline',
     'ScoreConsistencyUATPipelineConfig',
     'ScoreConsistencyUATPipelineResult',
+    'SampleAnalysisPipeline',
+    'SampleAnalysisPipelineConfig',
+    'SampleAnalysisPipelineResult',
     'cross_risk',
     'GainsTableCalculator',
     'PerformanceEvaluator',
