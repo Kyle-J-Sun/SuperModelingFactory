@@ -51,6 +51,65 @@ CREDIT_PRIOR_GROUPS = {
 }
 
 _ALLOWED_LINKAGE_METHODS = frozenset({"complete", "average", "single"})
+_MIC_MIN_SAMPLES = 3
+
+
+def _normalize_corr_method(corr_method: str) -> str:
+    if isinstance(corr_method, str) and corr_method.lower() == "mic":
+        return "mic"
+    return corr_method
+
+
+def _lazy_minepy_mine():
+    try:
+        from minepy import MINE  # noqa: WPS433
+    except ImportError as exc:
+        raise ImportError(
+            "corr_method='MIC' requires the optional `minepy` dependency, which is "
+            "not installed.\n"
+            "Install it with:  pip install 'supermodelingfactory[mic]'\n"
+            "Note: minepy currently supports Python < 3.11; on newer Python versions "
+            "use corr_method='spearman' or run in a Python 3.10 environment."
+        ) from exc
+    return MINE(alpha=0.6, c=15, est="mic_approx")
+
+
+def _mic_score(x: pd.Series, y: pd.Series) -> float:
+    pair = pd.concat([x, y], axis=1).dropna()
+    if pair.shape[0] < _MIC_MIN_SAMPLES:
+        return 0.0
+    a = pair.iloc[:, 0].to_numpy(dtype=float)
+    b = pair.iloc[:, 1].to_numpy(dtype=float)
+    if np.nanstd(a) == 0.0 or np.nanstd(b) == 0.0:
+        return 0.0
+    mine = _lazy_minepy_mine()
+    mine.compute_score(a, b)
+    return float(np.clip(mine.mic(), 0.0, 1.0))
+
+
+def _mic_association_matrix(frame: pd.DataFrame) -> pd.DataFrame:
+    cols = list(frame.columns)
+    n = len(cols)
+    values = np.eye(n, dtype=float)
+    for i in range(n):
+        for j in range(i + 1, n):
+            score = _mic_score(frame[cols[i]], frame[cols[j]])
+            values[i, j] = score
+            values[j, i] = score
+    return pd.DataFrame(values, index=cols, columns=cols)
+
+
+def _association_matrix(frame: pd.DataFrame, corr_method: str = "spearman") -> pd.DataFrame:
+    """Return an absolute association matrix for clustering and summaries."""
+    corr_method = _normalize_corr_method(corr_method)
+    if corr_method == "mic":
+        assoc = _mic_association_matrix(frame)
+    else:
+        assoc = frame.corr(method=corr_method).abs()
+        assoc = assoc.reindex(index=frame.columns, columns=frame.columns).fillna(0.0)
+    assoc = assoc.clip(lower=0.0, upper=1.0)
+    np.fill_diagonal(assoc.values, 1.0)
+    return assoc
 
 
 def _as_numeric_frame(X: pd.DataFrame) -> pd.DataFrame:
@@ -75,11 +134,8 @@ def _check_method(method: str) -> str:
 
 def _correlation_distance(X: pd.DataFrame, corr_method: str = "spearman") -> pd.DataFrame:
     frame = _as_numeric_frame(X)
-    corr = frame.corr(method=corr_method).abs()
-    corr = corr.reindex(index=frame.columns, columns=frame.columns).fillna(0.0)
-    corr = corr.clip(lower=0.0, upper=1.0)
-    np.fill_diagonal(corr.values, 1.0)
-    dist = 1.0 - corr
+    assoc = _association_matrix(frame, corr_method=corr_method)
+    dist = 1.0 - assoc
     np.fill_diagonal(dist.values, 0.0)
     return dist
 
@@ -209,14 +265,18 @@ def group_correlation_summary(
     groups: Mapping[str, Sequence[str]],
     corr_method: str = "spearman",
 ) -> pd.DataFrame:
-    """Summarize within-group absolute correlation."""
+    """Summarize within-group absolute association.
+
+    For ``corr_method='spearman'`` (default) the summary reports mean/max absolute
+    correlation. For ``corr_method='MIC'`` the same columns report mean/max MIC.
+    """
     frame = _as_numeric_frame(X)
-    corr = frame.corr(method=corr_method).abs().reindex(index=frame.columns, columns=frame.columns).fillna(0.0)
+    assoc = _association_matrix(frame, corr_method=corr_method)
     rows = []
     for group_name, feats in groups.items():
-        valid = [feat for feat in feats if feat in corr.columns]
+        valid = [feat for feat in feats if feat in assoc.columns]
         if len(valid) > 1:
-            sub = corr.loc[valid, valid].values
+            sub = assoc.loc[valid, valid].values
             vals = sub[np.triu_indices_from(sub, k=1)]
             avg_corr = float(np.nanmean(vals)) if vals.size else float("nan")
             max_corr = float(np.nanmax(vals)) if vals.size else float("nan")
@@ -274,6 +334,10 @@ def build_coalition_structure(
     inter_dist: float = 0.99,
 ) -> dict:
     """Build a complete coalition structure for Owen Value explanations.
+
+    ``corr_method`` may be any pandas correlation method (``pearson``,
+    ``spearman``, ``kendall``) or ``MIC`` for maximal information coefficient
+    clustering.
 
     Returns a dict containing final groups, automatic groups, correlation
     linkage, SHAP-compatible linkage, and a within-group correlation summary.
