@@ -20,6 +20,9 @@ def __getattr__(name):
     if name == "ODPSRunner":
         from .ODPS_Tool import ODPSRunner as _ODPSRunner
         return _ODPSRunner
+    if name in {"ParallelODPSConfig", "ParallelODPSManager", "ParallelODPSPuller"}:
+        from . import Parallel_ODPS_Manager as _parallel_odps
+        return getattr(_parallel_odps, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from .Slope_Tool import (
@@ -95,6 +98,7 @@ __all__ = [
     'weighted_sum', 'weighted_mean', 'weighted_rate',
     'ParallelApplyConfig', 'ParallelApplyEngine', 'ParallelApplyResult',
     'parallel_apply',
+    'ParallelODPSConfig', 'ParallelODPSManager',
     'cut2pieces', 'proc_freq', 'read_attr_list', 'write_attr_list',
     'odds_score', 'parse_odps_schema', 'npnan2none', 'drop_tmp_cols',
     'mkdir_if_not_exist', 'parse_sql_file', 'calc_woe', 'calc_iv',

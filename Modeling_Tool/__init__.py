@@ -118,6 +118,9 @@ def __getattr__(name):
     if name == "ODPSRunner":
         from .Core import ODPSRunner
         return ODPSRunner
+    if name in {"ParallelODPSConfig", "ParallelODPSManager", "ParallelODPSPuller"}:
+        from . import Core as _Core
+        return getattr(_Core, name)
     raise AttributeError(f"module 'Modeling_Tool' has no attribute {name!r}")
 
 
@@ -139,6 +142,8 @@ __all__ = [
     'ParallelApplyEngine',
     'ParallelApplyResult',
     'parallel_apply',
+    'ParallelODPSConfig',
+    'ParallelODPSManager',
     'save_model',
     'load_model',
     'load_model_metadata',
