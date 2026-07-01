@@ -38,6 +38,13 @@ from .sample_weight_utils import (
     weighted_rate,
 )
 
+from .Parallel_Engine import (
+    ParallelApplyConfig,
+    ParallelApplyEngine,
+    ParallelApplyResult,
+    parallel_apply,
+)
+
 from .utils import (
     cut2pieces,
     proc_freq,
@@ -86,6 +93,8 @@ __all__ = [
     'SlopeCalculator',
     'resolve_sample_weight', 'validate_sample_weight',
     'weighted_sum', 'weighted_mean', 'weighted_rate',
+    'ParallelApplyConfig', 'ParallelApplyEngine', 'ParallelApplyResult',
+    'parallel_apply',
     'cut2pieces', 'proc_freq', 'read_attr_list', 'write_attr_list',
     'odds_score', 'parse_odps_schema', 'npnan2none', 'drop_tmp_cols',
     'mkdir_if_not_exist', 'parse_sql_file', 'calc_woe', 'calc_iv',
