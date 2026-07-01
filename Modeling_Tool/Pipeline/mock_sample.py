@@ -23,7 +23,7 @@ _BUSINESS_TYPES = [
 
 @dataclass
 class MockSamplePipelineConfig:
-    n_samples: int = 80_000
+    n_samples: int = 80000
     applied_sample: int = 1
     approve_rate: float = 0.25
     num_online_scores: int = 5
