@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,19 @@ class CreditModelPipelineConfig:
 
     train_models: list[str] = field(default_factory=lambda: ["lr", "lgb", "xgb", "cat"])
     model_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    lr_search_enabled: bool = False
+    lr_search_param_grid: dict[str, list[Any]] = field(
+        default_factory=lambda: {"C": [0.01, 0.1, 1.0, 10.0]}
+    )
+    lr_search_params: dict[str, Any] = field(default_factory=dict)
+    use_lr_search_params: bool = True
+
+    warm_start_enabled: bool = False
+    warm_start_score_col: str | None = None
+    warm_start_score_type: Literal["probability", "log_odds"] = "probability"
+    warm_start_models: list[str] = field(default_factory=lambda: ["lgb", "xgb"])
+    warm_start_on_unsupported: Literal["skip", "raise"] = "skip"
+    warm_start_apply_to_optuna: bool = False
 
     backward_enabled: bool = True
     backward_model: str = "lgb"
@@ -81,6 +94,8 @@ class CreditModelPipelineResult:
     perf_results: dict[str, pd.DataFrame] = field(default_factory=dict)
     explain_outputs: dict[str, Any] = field(default_factory=dict)
     report_path: str | None = None
+    lr_search_results: pd.DataFrame | None = None
+    warm_start_summary: pd.DataFrame | None = None
 
 
 class CreditModelPipeline:
@@ -162,6 +177,8 @@ class CreditModelPipeline:
                 selected_features = list(woe_features)
 
         feature_set = selected_features if cfg.use_backward_features else woe_features
+        lr_search_results = self._run_lr_search(woe_splits, feature_set)
+        warm_start_summary = self._build_warm_start_summary(woe_splits, feature_set)
         models = self._train_models(woe_splits, feature_set)
         if not models:
             models = initial_models
@@ -171,7 +188,16 @@ class CreditModelPipeline:
         explain_outputs = self._run_explainability(woe_splits, models)
 
         if cfg.write_outputs:
-            self._write_outputs(output_dir, fs_summary, woe_artifacts, backward_summary, optuna_results, perf_results)
+            self._write_outputs(
+                output_dir,
+                fs_summary,
+                woe_artifacts,
+                backward_summary,
+                optuna_results,
+                perf_results,
+                lr_search_results,
+                warm_start_summary,
+            )
 
         report_path = None
         if cfg.write_excel:
@@ -180,6 +206,8 @@ class CreditModelPipeline:
                 "Feature_Selection": self._summary_to_frame(fs_summary),
                 "WOE_Table": woe_artifacts.get("woe_table"),
                 "Backward": backward_summary,
+                "LR_Param_Search": lr_search_results,
+                "Warm_Start": warm_start_summary,
             }
             for name, perf in perf_results.items():
                 sheets[f"Perf_{name.upper()}"] = perf
@@ -196,6 +224,8 @@ class CreditModelPipeline:
             perf_results=perf_results,
             explain_outputs=explain_outputs,
             report_path=report_path,
+            lr_search_results=lr_search_results,
+            warm_start_summary=warm_start_summary,
         )
 
     def _resolve_feature_cols(self, data: pd.DataFrame) -> list[str]:
@@ -214,6 +244,15 @@ class CreditModelPipeline:
         missing = [col for col in missing if col not in data.columns]
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
+        if cfg.warm_start_enabled:
+            if not cfg.warm_start_score_col:
+                raise ValueError("warm_start_score_col is required when warm_start_enabled=True")
+            if cfg.warm_start_score_col not in data.columns:
+                raise KeyError(f"Missing warm_start_score_col {cfg.warm_start_score_col!r}")
+            if cfg.warm_start_score_type not in {"probability", "log_odds"}:
+                raise ValueError("warm_start_score_type must be 'probability' or 'log_odds'")
+            if cfg.warm_start_on_unsupported not in {"skip", "raise"}:
+                raise ValueError("warm_start_on_unsupported must be 'skip' or 'raise'")
 
     def _split_data(self, data: pd.DataFrame) -> dict[str, pd.DataFrame]:
         from Modeling_Tool import SampleSplitter
@@ -358,6 +397,11 @@ class CreditModelPipeline:
             woe_table = get_overall_woe_table(master, splits["ins"], varlist=feature_cols)
             engine = master
 
+        if cfg.warm_start_enabled and cfg.warm_start_score_col:
+            for name, df in woe_splits.items():
+                if cfg.warm_start_score_col not in df.columns:
+                    df[cfg.warm_start_score_col] = splits[name][cfg.warm_start_score_col].to_numpy()
+
         return {
             "engine": engine,
             "engine_name": cfg.woe_engine,
@@ -380,6 +424,8 @@ class CreditModelPipeline:
         for raw_name in as_list(cfg.train_models):
             name = str(raw_name).lower()
             params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), cfg.model_params.get(name, {}))
+            if name == "lr" and cfg.use_lr_search_params and hasattr(self, "_lr_best_params"):
+                params = merge_dict(params, getattr(self, "_lr_best_params", {}))
             if name == "lr":
                 lr = LRMaster(params=params or None, standardize=bool(params.pop("standardize", False)) if params else False)
                 lr.fit(
@@ -392,13 +438,18 @@ class CreditModelPipeline:
                 )
                 models[name] = (lr, getattr(lr, "model", lr), list(feature_cols))
             elif name in {"lgb", "xgb", "cat"}:
+                if self._warm_start_requested_for(name) and name == "cat":
+                    if cfg.warm_start_on_unsupported == "raise":
+                        raise NotImplementedError("CatBoost does not support warm-start init_score")
                 params.setdefault("random_state", cfg.random_state)
                 gbm = GradientBoostingModel(name, params)
+                init_score = self._get_warm_start_init_score(name, train)
                 gbm.fit(
                     x=train[feature_cols],
                     y=train[cfg.target_col].astype(int),
                     valx=val[feature_cols],
                     valy=val[cfg.target_col].astype(int),
+                    init_score=init_score,
                 )
                 raw = gbm._model.model if hasattr(gbm, "_model") else gbm
                 models[name] = (gbm, raw, list(feature_cols))
@@ -452,6 +503,103 @@ class CreditModelPipeline:
         except Exception as exc:
             return pd.DataFrame({"step": ["backward"], "error": [repr(exc)]}), list(feature_cols)
 
+    def _run_lr_search(
+        self,
+        splits: dict[str, pd.DataFrame],
+        feature_cols: list[str],
+    ) -> pd.DataFrame | None:
+        from Modeling_Tool import LRMaster
+
+        cfg = self.config
+        self._lr_best_params = {}
+        if not cfg.lr_search_enabled or "lr" not in {str(x).lower() for x in as_list(cfg.train_models)}:
+            return None
+        base_params = dict(cfg.model_params.get("lr", {}))
+        standardize = bool(base_params.pop("standardize", False))
+        lr = LRMaster(params=base_params or None, standardize=standardize)
+        params = merge_dict(
+            {
+                "objective": "oot_gap_penalized",
+                "primary_set": "oos",
+                "gap_ref_sets": ["oot"],
+                "metric": "auc",
+                "refit": False,
+                "verbose": False,
+            },
+            cfg.lr_search_params,
+        )
+        results = lr.grid_search_params(
+            data=splits["ins"],
+            varlist=feature_cols,
+            tgt_name=cfg.target_col,
+            eval_sets={"oos": splits["oos"], "oot": splits["oot"]},
+            param_grid=cfg.lr_search_param_grid,
+            **params,
+        )
+        self._lr_best_params = dict(getattr(lr, "best_params_", {}) or {})
+        return results
+
+    def _warm_start_requested_for(self, model_name: str) -> bool:
+        cfg = self.config
+        return bool(
+            cfg.warm_start_enabled
+            and cfg.warm_start_score_col
+            and model_name in {str(x).lower() for x in as_list(cfg.warm_start_models)}
+        )
+
+    def _get_warm_start_init_score(self, model_name: str, data: pd.DataFrame) -> np.ndarray | None:
+        if not self._warm_start_requested_for(model_name):
+            return None
+        if model_name == "cat":
+            return None
+        cfg = self.config
+        score = data[cfg.warm_start_score_col]
+        if score.isna().any():
+            raise ValueError(f"warm_start_score_col {cfg.warm_start_score_col!r} contains missing values")
+        arr = score.to_numpy(dtype=float)
+        if cfg.warm_start_score_type == "probability":
+            arr = np.clip(arr, 1e-6, 1 - 1e-6)
+            return np.log(arr / (1 - arr))
+        return arr
+
+    def _build_warm_start_summary(
+        self,
+        splits: dict[str, pd.DataFrame],
+        feature_cols: list[str],
+    ) -> pd.DataFrame | None:
+        cfg = self.config
+        if not cfg.warm_start_enabled:
+            return None
+        rows = []
+        train_models = {str(x).lower() for x in as_list(cfg.train_models)}
+        requested = {str(x).lower() for x in as_list(cfg.warm_start_models)}
+        for model_name in sorted(requested):
+            if model_name not in train_models:
+                status = "not_in_train_models"
+            elif model_name == "cat":
+                status = "skipped_unsupported"
+                if cfg.warm_start_on_unsupported == "raise":
+                    raise NotImplementedError("CatBoost does not support warm-start init_score")
+            elif model_name in {"lgb", "xgb"}:
+                status = "enabled"
+            else:
+                status = "skipped_unknown_model"
+            missing_rate = np.nan
+            if cfg.warm_start_score_col and cfg.warm_start_score_col in splits["ins"].columns:
+                missing_rate = float(splits["ins"][cfg.warm_start_score_col].isna().mean())
+            rows.append(
+                {
+                    "model": model_name,
+                    "status": status,
+                    "score_col": cfg.warm_start_score_col,
+                    "score_type": cfg.warm_start_score_type,
+                    "missing_rate_ins": missing_rate,
+                    "apply_to_optuna": bool(cfg.warm_start_apply_to_optuna and model_name in {"lgb", "xgb"}),
+                    "n_features": len(feature_cols),
+                }
+            )
+        return pd.DataFrame(rows)
+
     def _run_optuna(
         self,
         splits: dict[str, pd.DataFrame],
@@ -486,12 +634,19 @@ class CreditModelPipeline:
             name = str(raw_name).lower()
             if name not in {"lgb", "xgb", "cat"} or name not in search_spaces:
                 continue
+            if self._warm_start_requested_for(name) and name == "cat":
+                if cfg.warm_start_on_unsupported == "raise":
+                    raise NotImplementedError("CatBoost does not support warm-start init_score")
             try:
                 params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), cfg.model_params.get(name, {}))
                 searcher = GradientBoostingModel(name, params)
+                fit_kwargs = dict(cfg.optuna_params.get("fit_kwargs", {}))
+                if cfg.warm_start_apply_to_optuna and self._warm_start_requested_for(name):
+                    fit_kwargs["init_score"] = self._get_warm_start_init_score(name, splits["ins"])
                 results[name] = searcher.param_search(
                     data=splits["ins"],
                     search_space=search_spaces[name],
+                    fit_kwargs=fit_kwargs or None,
                     **common,
                 )
             except Exception as exc:
@@ -517,10 +672,22 @@ class CreditModelPipeline:
             )
             for ds_name, df in splits.items():
                 scored = df.copy()
-                scored[f"pred_{name}"] = predict_positive(wrapper, scored, feature_cols)
+                scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
                 add_dataset_with_optional_weight(evaluator, ds_name, scored)
             results[name] = evaluator.evaluate(to_show=False, display=False)
         return results
+
+    def _predict_model_positive(
+        self,
+        model_name: str,
+        wrapper: Any,
+        data: pd.DataFrame,
+        feature_cols: list[str],
+    ) -> np.ndarray:
+        if self._warm_start_requested_for(model_name) and model_name in {"lgb", "xgb"}:
+            init_score = self._get_warm_start_init_score(model_name, data)
+            return wrapper.predict_with_base_margin(data[feature_cols], init_score, return_prob=True)
+        return predict_positive(wrapper, data, feature_cols)
 
     def _run_explainability(
         self,
@@ -632,6 +799,8 @@ class CreditModelPipeline:
         backward_summary: pd.DataFrame | None,
         optuna_results: dict[str, pd.DataFrame],
         perf_results: dict[str, pd.DataFrame],
+        lr_search_results: pd.DataFrame | None,
+        warm_start_summary: pd.DataFrame | None,
     ) -> None:
         if isinstance(fs_summary.get("psi"), pd.DataFrame):
             safe_to_csv(fs_summary["psi"], output_dir / "psi_result.csv", index=False)
@@ -639,6 +808,8 @@ class CreditModelPipeline:
             safe_to_csv(fs_summary["iv"], output_dir / "iv_report.csv", index=False)
         safe_to_csv(woe_artifacts.get("woe_table"), output_dir / "woe_table_ins.csv", index=False)
         safe_to_csv(backward_summary, output_dir / "backward_summary.csv", index=False)
+        safe_to_csv(lr_search_results, output_dir / "lr_param_search.csv", index=False)
+        safe_to_csv(warm_start_summary, output_dir / "warm_start_summary.csv", index=False)
         for name, df in optuna_results.items():
             safe_to_csv(df, output_dir / f"{name}_optuna_search.csv", index=False)
         for name, df in perf_results.items():
