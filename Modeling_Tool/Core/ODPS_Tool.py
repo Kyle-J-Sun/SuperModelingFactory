@@ -103,7 +103,7 @@ class ODPSRunner(object):
                         df = reader.to_pandas()
                     if bool(csv_path):
                         logging.info(f'  to_csv: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-                        df.to_csv(csv_path)
+                        df.to_csv(csv_path, index=False)
                     break
                 except Exception as e:
                     logging.error(f'  download failed [{i+1}/{k}]: {e}')
