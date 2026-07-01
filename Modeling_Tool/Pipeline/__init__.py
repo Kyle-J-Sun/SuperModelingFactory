@@ -19,6 +19,11 @@ from .sample_analysis import (
     SampleAnalysisPipelineConfig,
     SampleAnalysisPipelineResult,
 )
+from .mock_sample import (
+    MockSamplePipeline,
+    MockSamplePipelineConfig,
+    MockSamplePipelineResult,
+)
 
 __all__ = [
     "RejectInferencePipeline",
@@ -36,4 +41,7 @@ __all__ = [
     "SampleAnalysisPipeline",
     "SampleAnalysisPipelineConfig",
     "SampleAnalysisPipelineResult",
+    "MockSamplePipeline",
+    "MockSamplePipelineConfig",
+    "MockSamplePipelineResult",
 ]
