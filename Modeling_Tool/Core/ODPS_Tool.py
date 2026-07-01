@@ -1,6 +1,8 @@
 from datetime import datetime
+from contextlib import contextmanager
 import logging
 import os
+import threading
 logger = logging.getLogger(__name__)
 import pandas as pd
 from odps import ODPS, options
@@ -16,6 +18,11 @@ pd.options.mode.chained_assignment = None  # default='warn'
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 class ODPSRunner(object):
+    _wide_schema_patch_lock = threading.RLock()
+    _wide_schema_patch_ref_count = 0
+    _wide_schema_orig_build = None
+    _wide_schema_patch_active = False
+
     """ODPS执行类
     """
     def __init__(self):
@@ -64,7 +71,7 @@ class ODPSRunner(object):
         -----
         - **执行**阶段(execute_sql)只跑一次, 无重试.
         - **下载**阶段(to_pandas + to_csv)最多重试 6 次, 适用于网络抖动.
-        - 当 SQL 返回列数 > 200 时, ``_patch_wide_schema_download`` 自动 patch ODPS Tunnel,
+        - 当 SQL 返回列数 > 200 时, 线程安全的 wide-schema patch 会自动 patch ODPS Tunnel,
           防止 HTTP 414 (URI too long).
 
         Examples
@@ -92,15 +99,14 @@ class ODPSRunner(object):
         if should_download:
             k = 6
             for i in range(k):
-                orig_build = None
                 try:
                     logging.info(f'  to_pandas: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                     reader = executor.open_reader()
-                    orig_build = self._patch_wide_schema_download(reader)
-                    if n_process > 1:
-                        df = reader.to_pandas(n_process=n_process)
-                    else:
-                        df = reader.to_pandas()
+                    with self._wide_schema_download_patch(reader):
+                        if n_process > 1:
+                            df = reader.to_pandas(n_process=n_process)
+                        else:
+                            df = reader.to_pandas()
                     if bool(csv_path):
                         logging.info(f'  to_csv: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                         df.to_csv(csv_path, index=False)
@@ -113,10 +119,6 @@ class ODPSRunner(object):
                         raise SystemError(
                             f'  break: {endtime.strftime("%Y-%m-%d %H:%M:%S")} duration {duration}\n'
                         )
-                finally:
-                    if orig_build is not None:
-                        from odps.tunnel.instancetunnel import InstanceDownloadSession
-                        InstanceDownloadSession._build_input_stream = orig_build
 
         # 当用户显式要求不要 DataFrame 时, 主动释放引用, 节省内存
         if not to_df:
@@ -170,34 +172,55 @@ class ODPSRunner(object):
 
         return df
 
-    @staticmethod
-    def _patch_wide_schema_download(reader, col_threshold=200):
+    @classmethod
+    @contextmanager
+    def _wide_schema_download_patch(cls, reader, col_threshold=200):
         """Prevent HTTP 414 when a query result has many columns.
 
         ODPS Tunnel encodes column names as URL query params. With 200+ columns
-        the URI exceeds the server limit. We temporarily replace the class-level
-        _build_input_stream to omit the columns param, so the server returns all
-        columns without URL-based filtering.
-
-        Returns the original method so the caller can restore it in a finally block.
-        Returns None when no patch is needed (schema is narrow enough).
+        the URI exceeds the server limit. This context temporarily replaces the
+        class-level _build_input_stream to omit the columns param. The patch is
+        guarded by a lock and reference count, so concurrent threads do not
+        restore the global method while another wide-schema download is active.
         """
         ds = getattr(reader, '_download_session', None)
         if ds is None:
-            return None
+            yield False
+            return
         schema = getattr(ds, 'schema', None)
         if schema is None or len(schema.simple_columns) <= col_threshold:
-            return None
+            yield False
+            return
 
         from odps.tunnel.instancetunnel import InstanceDownloadSession
-        orig_build = InstanceDownloadSession._build_input_stream
 
-        def _build_no_column_filter(self, start, count, compress=False, columns=None, arrow=False, raw_size=None):
-            return orig_build(self, start, count, compress=compress, columns=None, arrow=arrow, raw_size=raw_size)
+        with cls._wide_schema_patch_lock:
+            if not cls._wide_schema_patch_active:
+                cls._wide_schema_orig_build = InstanceDownloadSession._build_input_stream
 
-        InstanceDownloadSession._build_input_stream = _build_no_column_filter
-        logging.info(f'  wide schema ({len(schema.simple_columns)} cols): patched tunnel to omit column filter from URL')
-        return orig_build
+                def _build_no_column_filter(self, start, count, compress=False, columns=None, arrow=False, raw_size=None):
+                    with cls._wide_schema_patch_lock:
+                        orig_build = cls._wide_schema_orig_build
+                    if orig_build is None:
+                        raise RuntimeError("ODPS wide-schema download patch lost its original method.")
+                    return orig_build(self, start, count, compress=compress, columns=None, arrow=arrow, raw_size=raw_size)
+
+                InstanceDownloadSession._build_input_stream = _build_no_column_filter
+                cls._wide_schema_patch_active = True
+                logging.info(f'  wide schema ({len(schema.simple_columns)} cols): patched tunnel to omit column filter from URL')
+            cls._wide_schema_patch_ref_count += 1
+
+        try:
+            yield True
+        finally:
+            with cls._wide_schema_patch_lock:
+                cls._wide_schema_patch_ref_count -= 1
+                if cls._wide_schema_patch_ref_count <= 0:
+                    if cls._wide_schema_orig_build is not None:
+                        InstanceDownloadSession._build_input_stream = cls._wide_schema_orig_build
+                    cls._wide_schema_orig_build = None
+                    cls._wide_schema_patch_ref_count = 0
+                    cls._wide_schema_patch_active = False
 
     @staticmethod
     def cre_table_schema(df, partition_name=None):
