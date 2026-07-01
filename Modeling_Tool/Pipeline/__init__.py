@@ -24,6 +24,11 @@ from .mock_sample import (
     MockSamplePipelineConfig,
     MockSamplePipelineResult,
 )
+from .feature_validation import (
+    FeatureValidationPipeline,
+    FeatureValidationPipelineConfig,
+    FeatureValidationPipelineResult,
+)
 
 __all__ = [
     "RejectInferencePipeline",
@@ -44,4 +49,7 @@ __all__ = [
     "MockSamplePipeline",
     "MockSamplePipelineConfig",
     "MockSamplePipelineResult",
+    "FeatureValidationPipeline",
+    "FeatureValidationPipelineConfig",
+    "FeatureValidationPipelineResult",
 ]

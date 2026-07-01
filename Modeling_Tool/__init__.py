@@ -103,6 +103,7 @@ _PIPELINE_EXPORTS = frozenset({
     'ScoreConsistencyUATPipeline', 'ScoreConsistencyUATPipelineConfig', 'ScoreConsistencyUATPipelineResult',
     'SampleAnalysisPipeline', 'SampleAnalysisPipelineConfig', 'SampleAnalysisPipelineResult',
     'MockSamplePipeline', 'MockSamplePipelineConfig', 'MockSamplePipelineResult',
+    'FeatureValidationPipeline', 'FeatureValidationPipelineConfig', 'FeatureValidationPipelineResult',
 })
 
 def __getattr__(name):
@@ -179,6 +180,9 @@ __all__ = [
     'MockSamplePipeline',
     'MockSamplePipelineConfig',
     'MockSamplePipelineResult',
+    'FeatureValidationPipeline',
+    'FeatureValidationPipelineConfig',
+    'FeatureValidationPipelineResult',
     'cross_risk',
     'GainsTableCalculator',
     'PerformanceEvaluator',
