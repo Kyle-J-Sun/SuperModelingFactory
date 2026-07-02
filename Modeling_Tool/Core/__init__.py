@@ -48,6 +48,13 @@ from .Parallel_Engine import (
     parallel_apply,
 )
 
+from .Proc_Compare import (
+    ProcCompareConfig,
+    ProcCompareEngine,
+    ProcCompareResult,
+    proc_compare,
+)
+
 from .utils import (
     cut2pieces,
     proc_freq,
@@ -98,6 +105,8 @@ __all__ = [
     'weighted_sum', 'weighted_mean', 'weighted_rate',
     'ParallelApplyConfig', 'ParallelApplyEngine', 'ParallelApplyResult',
     'parallel_apply',
+    'ProcCompareConfig', 'ProcCompareEngine', 'ProcCompareResult',
+    'proc_compare',
     'ParallelODPSConfig', 'ParallelODPSManager',
     'cut2pieces', 'proc_freq', 'read_attr_list', 'write_attr_list',
     'odds_score', 'parse_odps_schema', 'npnan2none', 'drop_tmp_cols',
