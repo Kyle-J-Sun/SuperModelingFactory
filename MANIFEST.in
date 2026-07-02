@@ -7,6 +7,7 @@ include requirements.txt
 # Ship source and typing stubs in sdists/wheels. The project is distributed as
 # an open-source Python package; no module sources are intentionally withheld.
 recursive-include Modeling_Tool *.py *.pyi
+recursive-include Modeling_Tool/ref_font *.ttf *.ttc
 recursive-include ExcelMaster *.py
 recursive-include Report *.py
 

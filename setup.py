@@ -35,6 +35,7 @@ setup(
         ],
     ),
     package_data={
+        "Modeling_Tool.ref_font": ["*.ttf", "*.ttc"],
         "Modeling_Tool.WOE": ["*.pyi"],
         "Modeling_Tool.Feature": ["*.pyi"],
         "Modeling_Tool.Model": ["*.pyi"],
