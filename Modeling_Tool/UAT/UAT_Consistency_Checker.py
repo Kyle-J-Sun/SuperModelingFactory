@@ -584,6 +584,15 @@ class UATConsistencyChecker:
                     len(self.feature_pairs))
 
         records = []
+        summary_columns = [
+            "feature",
+            "n_compared",
+            "n_one_side_null",
+            "n_mismatch",
+            "pct_mismatch",
+            "mean_diff",
+            "max_abs_diff",
+        ]
         for off_col, on_col in sorted(self.feature_pairs.items()):
             on_num   = pd.to_numeric(self.df_both[on_col],  errors="coerce")
             off_num  = pd.to_numeric(self.df_both[off_col], errors="coerce")
@@ -605,7 +614,8 @@ class UATConsistencyChecker:
                 "max_abs_diff":    float(diff.abs().max()) if n_valid > 0 else float("nan"),
             })
 
-        self.diff_summary = pd.DataFrame(records).sort_values("n_mismatch", ascending=False)
+        self.diff_summary = pd.DataFrame(records, columns=summary_columns)
+        self.diff_summary = self.diff_summary.sort_values("n_mismatch", ascending=False)
         n_ok  = int((self.diff_summary["n_mismatch"] == 0).sum())
         n_bad = int((self.diff_summary["n_mismatch"] > 0).sum())
         logger.info("✅ Consistent: %d / %d | ⚠ Mismatched: %d / %d",
@@ -697,6 +707,14 @@ class UATConsistencyChecker:
         df_idx  = self.df_compare.set_index("flow_id")
         off_col = self.offline_score_col
         on_col  = self.online_score_col
+        per_flow_columns = ["flow_id"] + list(self._info_cols)
+        if off_col and on_col:
+            per_flow_columns.extend(["main_score_diff", "main_score_ok"])
+        for s_off, s_on in self.cfg.submodel_pairs.items():
+            if s_off in self.df_compare.columns and s_on in self.df_compare.columns:
+                per_flow_columns.append(f"{s_off}_diff")
+        per_flow_columns.extend(["n_feature_mismatch", "mismatch_features"])
+        per_flow_columns = list(dict.fromkeys(per_flow_columns))
         records = []
 
         for fid in sorted(self.common_fids):
@@ -748,7 +766,7 @@ class UATConsistencyChecker:
             rec["mismatch_features"]  = ", ".join(feat_bad)
             records.append(rec)
 
-        self.per_flow_df = pd.DataFrame(records)
+        self.per_flow_df = pd.DataFrame(records, columns=per_flow_columns)
         n_issues = int((self.per_flow_df["n_feature_mismatch"] > 0).sum())
         logger.info("Per-flow report: %d flows | %d with feature mismatches",
                     len(self.per_flow_df), n_issues)
