@@ -29,6 +29,7 @@ class CreditModelPipelineConfig:
     random_state: int = 42
     write_outputs: bool = True
     write_excel: bool = True
+    plot_outputs: bool = True
 
     split_config: dict[str, Any] = field(default_factory=lambda: {"test_size": 0.3, "stratify": True})
     feature_selection: dict[str, Any] = field(
@@ -382,6 +383,17 @@ class CreditModelPipeline:
                     dep=cfg.target_col,
                     iv_cut=0.0,
                 )
+                if cfg.write_outputs and cfg.plot_outputs and current:
+                    make_dirs(Path(plot_path) / "overall")
+                    plot_data = ins.copy()
+                    plot_data["_smf_plot_group"] = "overall"
+                    vi.plot_woe(
+                        data=plot_data,
+                        varlist=current,
+                        plot_group="_smf_plot_group",
+                        plot_dirname="overall",
+                        plot_path=plot_path,
+                    )
                 keep = iv.loc[iv["iv"] >= float(fs_cfg.get("iv_threshold", 0.02)), "var"].tolist()
                 current = keep or current
                 summary["iv"] = iv
@@ -427,6 +439,8 @@ class CreditModelPipeline:
             )
             binner = MonotoneWOEBinner(**params)
             binner.fit(splits["ins"], chi2_binning=bool(cfg.monotone_woe_params.get("chi2_binning", False)))
+            if cfg.write_outputs and cfg.plot_outputs:
+                binner.plot_woe_graph(graph_path=str(Path(cfg.output_dir) / "figs" / "mono_woe"))
             adapter = as_woe_engine(binner, woe_suffix=woe_suffix)
             woe_splits = {
                 name: adapter.transform(df, varlist=feature_cols, suffix=woe_suffix)
@@ -446,6 +460,16 @@ class CreditModelPipeline:
             fit_params = {k: v for k, v in cfg.woe_params.items() if k not in {"woe_suffix", "missing_ref_value"}}
             master.fit(**fit_params)
             woe_splits = {name: master.transform(df) for name, df in splits.items()}
+            if cfg.write_outputs and cfg.plot_outputs:
+                make_dirs(Path(graph_dir) / "overall")
+                plot_data = woe_splits["ins"].copy()
+                plot_data["_smf_plot_group"] = "overall"
+                master.plot_bivar_graph(
+                    plot_data,
+                    group="_smf_plot_group",
+                    dirname="overall",
+                    varlist=feature_cols,
+                )
             woe_table = get_overall_woe_table(master, splits["ins"], varlist=feature_cols)
             engine = master
 
@@ -811,7 +835,10 @@ class CreditModelPipeline:
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
                 add_dataset_with_optional_weight(evaluator, ds_name, scored)
-            results[name] = evaluator.evaluate(to_show=False, display=False)
+            fig_save_path = None
+            if cfg.write_outputs and cfg.plot_outputs:
+                fig_save_path = str(Path(cfg.output_dir) / "figs" / "perf" / f"perf_{name}.png")
+            results[name] = evaluator.evaluate(to_show=False, display=False, fig_save_path=fig_save_path)
         return results
 
     def _predict_model_positive(

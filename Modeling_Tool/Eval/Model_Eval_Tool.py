@@ -2342,6 +2342,31 @@ class PerformanceEvaluator:
             if display:
                 from IPython.display import display as _ipy_display
                 _ipy_display(fnl_df)
+            if fig_save_path:
+                eval_datasets = {}
+                for name, data in self.datasets.items():
+                    if data is None:
+                        continue
+                    work_data = data.copy()
+                    scr_name = self.scr_name
+                    if scr_name is None:
+                        scr_name = "_mdl_scr"
+                        work_data[scr_name] = self.model.predict_proba(work_data.loc[:, self.feature_cols])[:, 1]
+                    eval_datasets[name] = {
+                        "y_true": work_data[self.tgt_name],
+                        "y_score": work_data[scr_name],
+                    }
+                if eval_datasets:
+                    evaluate_performance(
+                        datasets=eval_datasets,
+                        dist_bins=self.dist_bins,
+                        pct_bins=self.pct_bins,
+                        square_figsize=5,
+                        to_show=to_show,
+                        save_path=fig_save_path,
+                        gains_table=gains_table,
+                        equal_freq=self.equal_freq,
+                    )
             if rpt_save_path:
                 fnl_df.to_csv(rpt_save_path, index=False)
             return fnl_df
