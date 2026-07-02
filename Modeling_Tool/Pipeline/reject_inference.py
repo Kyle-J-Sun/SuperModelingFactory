@@ -453,21 +453,22 @@ class RejectInferencePipeline:
         cfg = self.config
         rng = np.random.default_rng(cfg.random_state)
         if cfg.oot_data is not None:
-            oot = cfg.oot_data.copy()
+            oot = self._prepare_external_oot_data(feature_cols)
+            val = approved.copy()
         else:
             n_oot = max(1, int(len(approved) * cfg.oot_frac))
             oot_ids = set(rng.choice(approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
             oot = approved[approved["_smf_ri_row_id"].isin(oot_ids)].copy()
+            val = approved[~approved["_smf_ri_row_id"].isin(oot_ids)].copy()
+            if len(val) == 0:
+                val = approved.copy()
 
         rows = []
         models: dict[str, Any] = {}
         for method, df_ri in ri_datasets.items():
             train = df_ri.copy()
             if "_smf_ri_row_id" in train.columns and cfg.oot_data is None:
-                train = train[~train["_smf_ri_row_id"].isin(set(oot["_smf_ri_row_id"]))]
-            val = approved[~approved["_smf_ri_row_id"].isin(set(oot["_smf_ri_row_id"]))].copy()
-            if len(val) == 0:
-                val = approved.copy()
+                train = train[~train["_smf_ri_row_id"].isin(oot_ids)]
 
             params = merge_dict(self._DEFAULT_RI_MODEL_PARAMS, cfg.ri_model_params)
             params.setdefault("random_state", cfg.random_state)
@@ -520,3 +521,14 @@ class RejectInferencePipeline:
         if sort_col:
             perf_df = perf_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
         return perf_df, models
+
+    def _prepare_external_oot_data(self, feature_cols: list[str]) -> pd.DataFrame:
+        cfg = self.config
+        oot = cfg.oot_data.copy()
+        required = [cfg.target_col] + feature_cols
+        missing = [col for col in dict.fromkeys(required) if col not in oot.columns]
+        if missing:
+            raise KeyError(f"External oot_data missing required columns: {missing}")
+        if oot[cfg.target_col].notna().sum() == 0:
+            raise ValueError("External oot_data target column must not be empty")
+        return oot.reset_index(drop=True)
