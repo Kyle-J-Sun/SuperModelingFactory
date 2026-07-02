@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,10 @@ class RejectInferencePipelineConfig:
     train_ri_models: bool = True
     ri_model_type: str = "lgb"
     ri_model_params: dict[str, Any] = field(default_factory=dict)
+    include_no_ri_benchmark: bool = True
+    save_models: bool = False
+    model_output_dir: str | None = None
+    model_include_metadata: bool = True
     oot_data: pd.DataFrame | None = None
     oot_frac: float = 0.2
     perf_pct_bins: int = 10
@@ -70,6 +75,8 @@ class RejectInferencePipelineResult:
     approved_full_data: pd.DataFrame | None = None
     ri_approved_reference_data: pd.DataFrame | None = None
     ri_approved_summary: pd.DataFrame | None = None
+    model_paths: dict[str, str] = field(default_factory=dict)
+    oot_summary: pd.DataFrame | None = None
 
 
 class RejectInferencePipeline:
@@ -125,14 +132,27 @@ class RejectInferencePipeline:
         datasets_dir = Path(cfg.output_dir) / "datasets"
         report_dir = Path(cfg.output_dir) / "report"
         figs_dir = report_dir / "perf_figs"
+        model_dir = Path(cfg.model_output_dir) if cfg.model_output_dir else Path(cfg.output_dir) / "models"
         if cfg.write_outputs or cfg.write_excel:
             make_dirs(datasets_dir, report_dir, figs_dir)
+        if cfg.save_models:
+            make_dirs(model_dir)
 
         work = data.copy()
         work["_smf_ri_row_id"] = np.arange(len(work))
         prescore_model = None
+        model_paths: dict[str, str] = {}
         if cfg.train_prescore or cfg.score_col not in work.columns:
             work, prescore_model = self._fit_prescore(work, feature_cols)
+            if cfg.save_models:
+                model_paths["prescore"] = self._save_pipeline_model(
+                    model=prescore_model,
+                    path=model_dir / "prescore_model.pkl",
+                    feature_cols=feature_cols,
+                    model_role="prescore",
+                    ri_method=None,
+                    model_type=cfg.prescore_model_type,
+                )
 
         approved_full = work[work[cfg.approved_col] == 1].copy().reset_index(drop=True)
         rejected = work[work[cfg.approved_col] == 0].copy().reset_index(drop=True)
@@ -174,17 +194,24 @@ class RejectInferencePipeline:
         ri_model_perf = None
         best_method = None
         ri_models: dict[str, Any] = {}
+        oot_summary = None
         if cfg.train_ri_models:
-            ri_model_perf, ri_models = self._train_and_evaluate_models(
+            ri_model_perf, ri_models, ri_model_paths, oot_summary = self._train_and_evaluate_models(
                 ri_datasets=ri_datasets,
                 approved=approved_output,
                 feature_cols=feature_cols,
                 report_dir=report_dir,
+                model_dir=model_dir,
             )
+            model_paths.update(ri_model_paths)
             if ri_model_perf is not None and len(ri_model_perf):
                 best_method = str(ri_model_perf.iloc[0]["ri_method"])
                 if cfg.write_outputs:
                     safe_to_csv(ri_model_perf, report_dir / "ri_model_perf.csv", index=False)
+            if cfg.write_outputs and oot_summary is not None:
+                safe_to_csv(oot_summary, report_dir / "oot_summary.csv", index=False)
+        if cfg.write_outputs and model_paths:
+            safe_to_csv(self._model_paths_to_frame(model_paths), report_dir / "model_paths.csv", index=False)
 
         report_path = None
         if cfg.write_excel:
@@ -193,6 +220,8 @@ class RejectInferencePipeline:
                 "RI_Dataset_Stats": ri_summary,
                 "Model_Performance": ri_model_perf,
                 "RI_Approved_Sample": ri_approved_summary,
+                "OOT_Sample": oot_summary,
+                "Model_Paths": self._model_paths_to_frame(model_paths) if model_paths else None,
             }
             write_basic_excel(report_path, sheets, title="SMF Reject Inference Pipeline Report")
 
@@ -209,6 +238,8 @@ class RejectInferencePipeline:
             approved_full_data=approved_full,
             ri_approved_reference_data=ri_approved_ref,
             ri_approved_summary=ri_approved_summary,
+            model_paths=model_paths,
+            oot_summary=oot_summary,
         )
 
     def _resolve_feature_cols(self, data: pd.DataFrame) -> list[str]:
@@ -447,13 +478,14 @@ class RejectInferencePipeline:
         approved: pd.DataFrame,
         feature_cols: list[str],
         report_dir: Path,
-    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        model_dir: Path,
+    ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str], pd.DataFrame]:
         from Modeling_Tool import GradientBoostingModel, PerformanceEvaluator
 
         cfg = self.config
         rng = np.random.default_rng(cfg.random_state)
         if cfg.oot_data is not None:
-            oot = self._prepare_external_oot_data(feature_cols)
+            oot, oot_summary = self._prepare_external_oot_data(feature_cols)
             val = approved.copy()
         else:
             n_oot = max(1, int(len(approved) * cfg.oot_frac))
@@ -462,10 +494,26 @@ class RejectInferencePipeline:
             val = approved[~approved["_smf_ri_row_id"].isin(oot_ids)].copy()
             if len(val) == 0:
                 val = approved.copy()
+            oot_summary = self._summarize_oot_data(
+                source="approved_random_split",
+                raw_n=len(oot),
+                observed_n=len(oot),
+                dropped_n=0,
+            )
 
         rows = []
         models: dict[str, Any] = {}
-        for method, df_ri in ri_datasets.items():
+        model_paths: dict[str, str] = {}
+        training_datasets: dict[str, pd.DataFrame] = {}
+        if cfg.include_no_ri_benchmark:
+            benchmark = approved.copy()
+            if "_weight" in benchmark.columns:
+                benchmark = benchmark.drop(columns=["_weight"])
+            benchmark["ri_method"] = "no_ri_benchmark"
+            training_datasets["no_ri_benchmark"] = benchmark
+        training_datasets.update(ri_datasets)
+
+        for method, df_ri in training_datasets.items():
             train = df_ri.copy()
             if "_smf_ri_row_id" in train.columns and cfg.oot_data is None:
                 train = train[~train["_smf_ri_row_id"].isin(oot_ids)]
@@ -515,20 +563,104 @@ class RejectInferencePipeline:
                             if col in subset.columns:
                                 row[f"{ds_name}_{col}"] = float(subset.iloc[0][col])
             rows.append(row)
+            if cfg.save_models:
+                model_paths[method] = self._save_pipeline_model(
+                    model=model,
+                    path=model_dir / f"ri_model_{method}.pkl",
+                    feature_cols=feature_cols,
+                    model_role="ri_model",
+                    ri_method=method,
+                    model_type=cfg.ri_model_type,
+                    metrics=row,
+                )
 
         perf_df = pd.DataFrame(rows)
         sort_col = "oot_AUC" if "oot_AUC" in perf_df.columns else None
         if sort_col:
             perf_df = perf_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
-        return perf_df, models
+        return perf_df, models, model_paths, oot_summary
 
-    def _prepare_external_oot_data(self, feature_cols: list[str]) -> pd.DataFrame:
+    def _prepare_external_oot_data(self, feature_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
         cfg = self.config
         oot = cfg.oot_data.copy()
         required = [cfg.target_col] + feature_cols
         missing = [col for col in dict.fromkeys(required) if col not in oot.columns]
         if missing:
             raise KeyError(f"External oot_data missing required columns: {missing}")
-        if oot[cfg.target_col].notna().sum() == 0:
-            raise ValueError("External oot_data target column must not be empty")
-        return oot.reset_index(drop=True)
+        raw_n = len(oot)
+        observed_mask = oot[cfg.target_col].notna()
+        observed_n = int(observed_mask.sum())
+        dropped_n = raw_n - observed_n
+        if dropped_n:
+            warnings.warn(
+                "External oot_data contains missing target rows; "
+                f"dropped {dropped_n} of {raw_n} rows and kept {observed_n} observed rows.",
+                UserWarning,
+                stacklevel=2,
+            )
+            oot = oot[observed_mask].copy()
+        if observed_n == 0:
+            raise ValueError("External oot_data has no observed target rows after filtering missing target values")
+        summary = self._summarize_oot_data(
+            source="external_oot_data",
+            raw_n=raw_n,
+            observed_n=observed_n,
+            dropped_n=dropped_n,
+        )
+        return oot.reset_index(drop=True), summary
+
+    def _summarize_oot_data(
+        self,
+        source: str,
+        raw_n: int,
+        observed_n: int,
+        dropped_n: int,
+    ) -> pd.DataFrame:
+        missing_rate = dropped_n / raw_n if raw_n else np.nan
+        rows = [
+            ("oot_source", source),
+            ("oot_raw_n", raw_n),
+            ("oot_observed_n", observed_n),
+            ("oot_dropped_missing_target_n", dropped_n),
+            ("oot_missing_target_rate", missing_rate),
+        ]
+        return pd.DataFrame(rows, columns=["metric", "value"])
+
+    def _save_pipeline_model(
+        self,
+        model: Any,
+        path: Path,
+        feature_cols: list[str],
+        model_role: str,
+        ri_method: str | None,
+        model_type: str,
+        metrics: dict[str, Any] | None = None,
+    ) -> str:
+        from Modeling_Tool import save_model
+
+        cfg = self.config
+        metadata = {
+            "pipeline": "RejectInferencePipeline",
+            "model_role": model_role,
+            "ri_method": ri_method,
+            "target_col": cfg.target_col,
+            "score_col": cfg.score_col,
+            "model_type": model_type,
+            "random_state": cfg.random_state,
+        }
+        save_model(
+            model,
+            path,
+            metadata=metadata,
+            feature_cols=feature_cols,
+            metrics=metrics,
+            model_name=f"reject_inference_{model_role}",
+            model_version=str(ri_method or model_role),
+            include_metadata=cfg.model_include_metadata,
+        )
+        return str(path)
+
+    def _model_paths_to_frame(self, model_paths: dict[str, str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{"model_key": key, "model_path": path} for key, path in model_paths.items()]
+        )
