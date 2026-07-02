@@ -23,6 +23,7 @@ class CreditModelPipelineConfig:
     output_dir: str = "output"
     target_col: str = "badflag"
     feature_cols: list[str] | None = None
+    split_col: str | None = None
     sample_col: str = "sample_ind"
     oot_col: str | None = "oot_flag"
     random_state: int = 42
@@ -253,6 +254,8 @@ class CreditModelPipeline:
         if cfg.feature_cols:
             return list(cfg.feature_cols)
         excluded = {cfg.target_col, cfg.sample_col}
+        if cfg.split_col:
+            excluded.add(cfg.split_col)
         if cfg.oot_col:
             excluded.add(cfg.oot_col)
         numeric_cols = data.select_dtypes(include=[np.number]).columns
@@ -298,8 +301,16 @@ class CreditModelPipeline:
 
         cfg = self.config
         work = data.copy()
-        if cfg.sample_col in work.columns:
-            lower = work[cfg.sample_col].astype(str).str.lower()
+        sample_col = cfg.split_col or cfg.sample_col
+        if cfg.split_col and cfg.split_col not in work.columns:
+            raise KeyError(f"Missing split_col {cfg.split_col!r}")
+        if sample_col in work.columns:
+            raw_split = work[sample_col]
+            lower = raw_split.astype(str).str.strip().str.lower()
+            if cfg.split_col:
+                invalid = sorted(set(raw_split.dropna().astype(str).str.strip().str.lower()) - {"ins", "oos", "oot"})
+                if invalid:
+                    raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
             ins = work[lower == "ins"].copy()
             oos = work[lower == "oos"].copy()
             oot = work[lower == "oot"].copy()
@@ -307,6 +318,8 @@ class CreditModelPipeline:
                 if not len(oot):
                     oot = oos.copy()
                 return {"ins": ins, "oos": oos, "oot": oot}
+            if cfg.split_col:
+                raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
 
         if cfg.oot_col and cfg.oot_col in work.columns:
             ins_oos = work[work[cfg.oot_col] == 0].copy()

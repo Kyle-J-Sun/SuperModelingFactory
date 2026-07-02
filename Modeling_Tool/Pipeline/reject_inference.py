@@ -27,6 +27,7 @@ class RejectInferencePipelineConfig:
     target_col: str = "badflag"
     score_col: str = "prescore_prob"
     feature_cols: list[str] | None = None
+    split_col: str | None = None
     random_state: int = 42
     write_outputs: bool = True
     write_excel: bool = True
@@ -140,6 +141,9 @@ class RejectInferencePipeline:
 
         work = data.copy()
         work["_smf_ri_row_id"] = np.arange(len(work))
+        split_oot_data = None
+        if cfg.split_col:
+            work, split_oot_data = self._prepare_split_col_data(work)
         prescore_model = None
         model_paths: dict[str, str] = {}
         if cfg.train_prescore or cfg.score_col not in work.columns:
@@ -202,6 +206,7 @@ class RejectInferencePipeline:
                 feature_cols=feature_cols,
                 report_dir=report_dir,
                 model_dir=model_dir,
+                split_oot_data=split_oot_data,
             )
             model_paths.update(ri_model_paths)
             if ri_model_perf is not None and len(ri_model_perf):
@@ -247,6 +252,8 @@ class RejectInferencePipeline:
         if cfg.feature_cols:
             return list(cfg.feature_cols)
         excluded = {cfg.target_col, cfg.approved_col, cfg.score_col, "true_badflag"}
+        if cfg.split_col:
+            excluded.add(cfg.split_col)
         numeric_cols = data.select_dtypes(include=[np.number]).columns
         return [col for col in numeric_cols if col not in excluded]
 
@@ -273,6 +280,22 @@ class RejectInferencePipeline:
             raise ValueError("ri_approved_data cannot be combined with ri_approved_query or ri_approved_func")
         if cfg.ri_approved_data is not None and cfg.ri_approved_scope == "output_subset":
             raise ValueError("ri_approved_scope='output_subset' cannot be used with external ri_approved_data")
+
+    def _prepare_split_col_data(self, work: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        cfg = self.config
+        if cfg.split_col not in work.columns:
+            raise KeyError(f"Missing split_col {cfg.split_col!r}")
+        raw_split = work[cfg.split_col]
+        lower = raw_split.astype(str).str.strip().str.lower()
+        valid = {"ins", "oos", "oot"}
+        invalid = sorted(set(raw_split.dropna().astype(str).str.strip().str.lower()) - valid)
+        if invalid:
+            raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
+        train = work[lower.isin(["ins", "oos"])].copy()
+        oot = work[lower == "oot"].copy()
+        if not (lower == "ins").any() or not (lower == "oos").any():
+            raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
+        return train.reset_index(drop=True), oot.reset_index(drop=True)
 
     def _prepare_ri_approved_reference(
         self,
@@ -479,15 +502,25 @@ class RejectInferencePipeline:
         feature_cols: list[str],
         report_dir: Path,
         model_dir: Path,
+        split_oot_data: pd.DataFrame | None = None,
     ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str], pd.DataFrame]:
         from Modeling_Tool import GradientBoostingModel, PerformanceEvaluator
 
         cfg = self.config
         rng = np.random.default_rng(cfg.random_state)
+        use_random_oot = False
         if cfg.oot_data is not None:
             oot, oot_summary = self._prepare_external_oot_data(feature_cols)
             val = approved.copy()
+        elif split_oot_data is not None and len(split_oot_data):
+            oot, oot_summary = self._prepare_observed_oot_data(
+                split_oot_data,
+                feature_cols=feature_cols,
+                source="split_col",
+            )
+            val = approved.copy()
         else:
+            use_random_oot = True
             n_oot = max(1, int(len(approved) * cfg.oot_frac))
             oot_ids = set(rng.choice(approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
             oot = approved[approved["_smf_ri_row_id"].isin(oot_ids)].copy()
@@ -515,7 +548,7 @@ class RejectInferencePipeline:
 
         for method, df_ri in training_datasets.items():
             train = df_ri.copy()
-            if "_smf_ri_row_id" in train.columns and cfg.oot_data is None:
+            if "_smf_ri_row_id" in train.columns and use_random_oot:
                 train = train[~train["_smf_ri_row_id"].isin(oot_ids)]
 
             params = merge_dict(self._DEFAULT_RI_MODEL_PARAMS, cfg.ri_model_params)
@@ -581,28 +614,41 @@ class RejectInferencePipeline:
         return perf_df, models, model_paths, oot_summary
 
     def _prepare_external_oot_data(self, feature_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+        return self._prepare_observed_oot_data(
+            self.config.oot_data,
+            feature_cols=feature_cols,
+            source="external_oot_data",
+        )
+
+    def _prepare_observed_oot_data(
+        self,
+        oot_data: pd.DataFrame,
+        feature_cols: list[str],
+        source: str,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         cfg = self.config
-        oot = cfg.oot_data.copy()
+        oot = oot_data.copy()
+        label = "External oot_data" if source == "external_oot_data" else source
         required = [cfg.target_col] + feature_cols
         missing = [col for col in dict.fromkeys(required) if col not in oot.columns]
         if missing:
-            raise KeyError(f"External oot_data missing required columns: {missing}")
+            raise KeyError(f"{label} missing required columns: {missing}")
         raw_n = len(oot)
         observed_mask = oot[cfg.target_col].notna()
         observed_n = int(observed_mask.sum())
         dropped_n = raw_n - observed_n
         if dropped_n:
             warnings.warn(
-                "External oot_data contains missing target rows; "
+                f"{label} contains missing target rows; "
                 f"dropped {dropped_n} of {raw_n} rows and kept {observed_n} observed rows.",
                 UserWarning,
                 stacklevel=2,
             )
             oot = oot[observed_mask].copy()
         if observed_n == 0:
-            raise ValueError("External oot_data has no observed target rows after filtering missing target values")
+            raise ValueError("OOT data has no observed target rows after filtering missing target values")
         summary = self._summarize_oot_data(
-            source="external_oot_data",
+            source=source,
             raw_n=raw_n,
             observed_n=observed_n,
             dropped_n=dropped_n,

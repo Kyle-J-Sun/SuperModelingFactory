@@ -17,6 +17,7 @@ class ScoreComparisonPipelineConfig:
     base_score: str | None = None
     comp_scores: list[str] | None = None
     weight_col: str | None = None
+    split_col: str | None = None
     random_state: int = 42
     write_outputs: bool = True
     write_excel: bool = True
@@ -205,9 +206,16 @@ class ScoreComparisonPipeline:
         required = [cfg.target_col, base_score] + comp_scores + score_cols + list(cfg.cross_vars)
         if cfg.weight_col:
             required.append(cfg.weight_col)
+        if cfg.split_col:
+            required.append(cfg.split_col)
         missing = [col for col in dict.fromkeys(required) if col not in data.columns]
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
+        if cfg.split_col:
+            values = data[cfg.split_col].dropna().astype(str).str.strip().str.lower()
+            invalid = sorted(set(values) - {"ins", "oos", "oot"})
+            if invalid:
+                raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
 
     def _custom_metrics_func(self, sub_df: pd.DataFrame) -> pd.Series:
         cfg = self.config
@@ -283,6 +291,8 @@ class ScoreComparisonPipeline:
         time_dims = [str(col) for col in as_list(cfg.time_dims)]
         population_dims = [str(col) for col in as_list(cfg.population_dims)]
 
+        if cfg.split_col:
+            add([cfg.split_col], name=cfg.split_col)
         for time_col in time_dims:
             add([time_col], name=time_col)
         for pop_col in population_dims:
