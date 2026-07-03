@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,16 @@ class FeatureValidationPipelineConfig:
     target_cols: list[str] | None = None
     new_feature_cols: list[str] | None = None
     incumbent_feature_cols: list[str] | None = None
+
+    input_type: Literal["auto", "dataframe", "csv"] = "auto"
+    csv_read_kwargs: dict[str, Any] = field(default_factory=dict)
+    feature_batch_size: int | None = None
+    feature_batches: list[list[str]] | None = None
+    batch_base_cols: list[str] | None = None
+    batch_output_subdir: str = "feature_batches"
+    batch_keep_intermediate: bool = True
+    batch_corr_mode: Literal["within_batch", "block_pairwise", "off"] = "within_batch"
+    batch_corr_pair_chunk_size: int | None = None
 
     split_col: str | None = None
     sample_col: str = "sample_ind"
@@ -96,6 +106,8 @@ class FeatureValidationPipelineResult:
     validation_summary: pd.DataFrame
     output_paths: dict[str, str] = field(default_factory=dict)
     report_path: str | None = None
+    batch_metadata: pd.DataFrame | None = None
+    batch_results: dict[str, Any] = field(default_factory=dict)
 
 
 class FeatureValidationPipeline:
@@ -115,7 +127,18 @@ class FeatureValidationPipeline:
     def __init__(self, config: FeatureValidationPipelineConfig | None = None):
         self.config = config or FeatureValidationPipelineConfig()
 
-    def run(self, data: pd.DataFrame) -> FeatureValidationPipelineResult:
+    def run(self, data: pd.DataFrame | str | Path) -> FeatureValidationPipelineResult:
+        input_type = self._resolve_input_type(data)
+        if input_type == "csv":
+            csv_path = Path(data)
+            if self._is_batch_mode():
+                return self._run_csv_batches(csv_path)
+            return self._run_dataframe(self._read_csv(csv_path))
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError("data must be a pandas DataFrame when input_type='dataframe'.")
+        return self._run_dataframe(data)
+
+    def _run_dataframe(self, data: pd.DataFrame) -> FeatureValidationPipelineResult:
         cfg = self.config
         work = data.copy()
         self._add_time_columns(work)
@@ -198,6 +221,402 @@ class FeatureValidationPipeline:
             output_paths=output_paths,
             report_path=report_path,
         )
+
+    def _resolve_input_type(self, data: pd.DataFrame | str | Path) -> str:
+        cfg = self.config
+        if cfg.input_type not in {"auto", "dataframe", "csv"}:
+            raise ValueError("input_type must be one of auto/dataframe/csv")
+        if cfg.input_type != "auto":
+            return cfg.input_type
+        return "dataframe" if isinstance(data, pd.DataFrame) else "csv"
+
+    def _is_batch_mode(self) -> bool:
+        cfg = self.config
+        return bool(cfg.feature_batches) or cfg.feature_batch_size is not None
+
+    def _read_csv(self, csv_path: Path, usecols: list[str] | None = None, nrows: int | None = None) -> pd.DataFrame:
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        kwargs = dict(self.config.csv_read_kwargs or {})
+        if "usecols" in kwargs:
+            raise ValueError("csv_read_kwargs cannot include usecols; FeatureValidationPipeline controls usecols.")
+        if "chunksize" in kwargs:
+            raise ValueError("csv_read_kwargs cannot include chunksize; CSV batch mode splits by feature columns.")
+        return pd.read_csv(csv_path, usecols=usecols, nrows=nrows, **kwargs)
+
+    def _run_csv_batches(self, csv_path: Path) -> FeatureValidationPipelineResult:
+        cfg = self.config
+        header = list(self._read_csv(csv_path, nrows=0).columns)
+        header_set = set(header)
+        new_features = self._resolve_csv_new_features(header)
+        if not new_features:
+            raise ValueError("new_feature_cols cannot be empty")
+        incumbent_features = [col for col in as_list(cfg.incumbent_feature_cols) if col in header_set and col not in set(new_features)]
+        target_cols = [col for col in as_list(cfg.target_cols) if col in header_set]
+        self._validate_batch_config(new_features)
+        feature_batches = self._make_feature_batches(new_features)
+        base_cols = self._resolve_batch_base_cols(header, incumbent_features, target_cols)
+
+        base_df = self._read_csv(csv_path, usecols=base_cols).copy()
+        base_df["_smf_batch_row_id"] = np.arange(len(base_df))
+        self._add_time_columns(base_df)
+        base_splits = self._split_data(base_df, target_cols[0] if target_cols else None)
+        split_labels = self._stable_split_labels(base_df, base_splits)
+
+        batch_results: list[FeatureValidationPipelineResult] = []
+        batch_rows: list[dict[str, Any]] = []
+        for idx, batch_features in enumerate(feature_batches):
+            read_cols = self._dedupe([col for col in base_cols + batch_features + incumbent_features if col in header_set])
+            batch_dir = Path(cfg.output_dir) / cfg.batch_output_subdir / f"batch_{idx:03d}"
+            row: dict[str, Any] = {
+                "batch_id": idx,
+                "features": ",".join(batch_features),
+                "n_features": len(batch_features),
+                "read_cols": ",".join(read_cols),
+                "output_dir": str(batch_dir),
+                "status": "ok",
+            }
+            try:
+                batch_df = self._read_csv(csv_path, usecols=read_cols).copy()
+                batch_df["_smf_batch_split"] = split_labels.to_numpy()
+                batch_cfg = replace(
+                    cfg,
+                    output_dir=str(batch_dir),
+                    input_type="dataframe",
+                    feature_batch_size=None,
+                    feature_batches=None,
+                    new_feature_cols=list(batch_features),
+                    incumbent_feature_cols=list(incumbent_features),
+                    split_col="_smf_batch_split",
+                    corr_enabled=cfg.corr_enabled and cfg.batch_corr_mode != "off",
+                    write_outputs=cfg.write_outputs and cfg.batch_keep_intermediate,
+                    write_excel=False,
+                )
+                batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
+                batch_results.append(batch_result)
+                row["n_rows"] = len(batch_df)
+            except Exception as exc:
+                row["status"] = "error"
+                row["error"] = repr(exc)
+            batch_rows.append(row)
+
+        batch_metadata = pd.DataFrame(batch_rows)
+        if not batch_results:
+            raise ValueError("All feature validation batches failed; inspect batch_metadata for errors.")
+
+        result = self._merge_batch_results(
+            batch_results=batch_results,
+            batch_metadata=batch_metadata,
+            base_splits=base_splits,
+            new_features=new_features,
+            incumbent_features=incumbent_features,
+            target_cols=target_cols,
+            n_rows=len(base_df),
+            csv_path=csv_path,
+            feature_batches=feature_batches,
+        )
+        return result
+
+    def _validate_batch_config(self, new_features: list[str]) -> None:
+        cfg = self.config
+        if cfg.feature_batch_size is not None and cfg.feature_batch_size <= 0:
+            raise ValueError("feature_batch_size must be a positive integer.")
+        if cfg.batch_corr_pair_chunk_size is not None and cfg.batch_corr_pair_chunk_size <= 0:
+            raise ValueError("batch_corr_pair_chunk_size must be a positive integer.")
+        if cfg.batch_corr_mode not in {"within_batch", "block_pairwise", "off"}:
+            raise ValueError("batch_corr_mode must be one of within_batch/block_pairwise/off")
+        method = str(cfg.corr_params.get("method", "pearson")).lower()
+        if cfg.batch_corr_mode == "block_pairwise" and method == "kendall":
+            raise ValueError("batch_corr_mode='block_pairwise' does not support corr method 'kendall'.")
+        if cfg.batch_corr_mode == "block_pairwise" and method not in {"pearson", "spearman"}:
+            raise ValueError("block_pairwise correlation supports only pearson or spearman.")
+        if cfg.feature_batches:
+            unknown = sorted(set(sum((list(batch) for batch in cfg.feature_batches), [])) - set(new_features))
+            if unknown:
+                raise ValueError(f"feature_batches contains unknown features: {unknown}")
+
+    def _resolve_csv_new_features(self, header: list[str]) -> list[str]:
+        cfg = self.config
+        header_set = set(header)
+        if cfg.new_feature_cols:
+            missing = [col for col in cfg.new_feature_cols if col not in header_set]
+            if missing:
+                raise KeyError(f"Missing new_feature_cols in CSV: {missing}")
+            return list(dict.fromkeys(cfg.new_feature_cols))
+        excluded = {cfg.id_col, cfg.apply_time_col, cfg.sample_col}
+        excluded.update(as_list(cfg.target_cols))
+        excluded.update(as_list(cfg.incumbent_feature_cols))
+        excluded.update(as_list(cfg.categorical_features))
+        excluded.update(as_list(cfg.population_dims))
+        excluded.update(as_list(cfg.time_dims))
+        excluded.update(as_list(cfg.woe_plot_groups))
+        if cfg.split_col:
+            excluded.add(cfg.split_col)
+        if cfg.oot_col:
+            excluded.add(cfg.oot_col)
+        if cfg.batch_base_cols:
+            excluded.update(cfg.batch_base_cols)
+        return [col for col in header if col not in excluded]
+
+    def _make_feature_batches(self, new_features: list[str]) -> list[list[str]]:
+        cfg = self.config
+        if cfg.feature_batches:
+            seen = set()
+            batches = []
+            for batch in cfg.feature_batches:
+                item = [col for col in dict.fromkeys(batch) if col in new_features and col not in seen]
+                seen.update(item)
+                if item:
+                    batches.append(item)
+            remaining = [col for col in new_features if col not in seen]
+            if remaining:
+                batches.append(remaining)
+            return batches
+        size = int(cfg.feature_batch_size or len(new_features))
+        return [new_features[i : i + size] for i in range(0, len(new_features), size)]
+
+    def _resolve_batch_base_cols(
+        self,
+        header: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+    ) -> list[str]:
+        cfg = self.config
+        candidates = []
+        if cfg.batch_base_cols:
+            candidates.extend(cfg.batch_base_cols)
+        candidates.extend(
+            [
+                cfg.id_col,
+                cfg.apply_time_col,
+                cfg.split_col,
+                cfg.sample_col,
+                cfg.oot_col,
+                *target_cols,
+                *cfg.time_dims,
+                *cfg.population_dims,
+                *as_list(cfg.categorical_features),
+                *as_list(cfg.woe_plot_groups),
+                *incumbent_features,
+            ]
+        )
+        header_set = set(header)
+        return self._dedupe([col for col in candidates if col and col in header_set])
+
+    def _stable_split_labels(self, base_df: pd.DataFrame, splits: dict[str, pd.DataFrame]) -> pd.Series:
+        labels = pd.Series("ins", index=base_df.index, dtype=object)
+        oos_ids = set(splits.get("oos", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
+        oot_ids = set(splits.get("oot", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
+        unique_oot_ids = oot_ids - oos_ids
+        row_ids = base_df["_smf_batch_row_id"]
+        labels.loc[row_ids.isin(oos_ids)] = "oos"
+        labels.loc[row_ids.isin(unique_oot_ids)] = "oot"
+        return labels
+
+    def _merge_batch_results(
+        self,
+        batch_results: list[FeatureValidationPipelineResult],
+        batch_metadata: pd.DataFrame,
+        base_splits: dict[str, pd.DataFrame],
+        new_features: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+        n_rows: int,
+        csv_path: Path,
+        feature_batches: list[list[str]],
+    ) -> FeatureValidationPipelineResult:
+        distribution_summary = self._merge_distribution_summaries([res.distribution_summary for res in batch_results])
+        woe_artifacts = self._merge_woe_artifacts([res.woe_artifacts for res in batch_results], batch_metadata)
+        psi_summary = self._concat_frames([res.psi_summary for res in batch_results])
+        psi_details = self._merge_psi_details(batch_results)
+        ivks_summary = self._concat_frames([res.ivks_summary for res in batch_results])
+        corr_matrix = self._merge_corr_matrices([res.corr_matrix for res in batch_results])
+        high_corr_pairs = self._concat_frames([res.high_corr_pairs for res in batch_results])
+        correlated_detail = self._concat_frames([res.correlated_detail for res in batch_results])
+        if self.config.batch_corr_mode == "block_pairwise" and self.config.corr_enabled:
+            cross_pairs = self._run_block_pairwise_correlation(csv_path, feature_batches)
+            high_corr_pairs = self._concat_frames([high_corr_pairs, cross_pairs])
+        high_corr_pairs = self._dedupe_high_corr_pairs(high_corr_pairs)
+
+        feature_sources = self._feature_source_frame(new_features, incumbent_features)
+        validation_summary = self._build_batch_validation_summary(
+            n_rows=n_rows,
+            new_features=new_features,
+            incumbent_features=incumbent_features,
+            target_cols=target_cols,
+            distribution_summary=distribution_summary,
+            psi_summary=psi_summary,
+            ivks_summary=ivks_summary,
+            high_corr_pairs=high_corr_pairs,
+            woe_artifacts=woe_artifacts,
+            batch_metadata=batch_metadata,
+        )
+        tables = self._collect_tables(
+            feature_sources,
+            distribution_summary,
+            woe_artifacts,
+            psi_summary,
+            ivks_summary,
+            corr_matrix,
+            high_corr_pairs,
+            correlated_detail,
+            validation_summary,
+        )
+        tables["batch_metadata"] = batch_metadata
+        output_paths, report_path = self._write_outputs(tables)
+        return FeatureValidationPipelineResult(
+            splits=base_splits,
+            distribution_summary=distribution_summary,
+            woe_artifacts=woe_artifacts,
+            psi_summary=psi_summary,
+            psi_details=psi_details,
+            ivks_summary=ivks_summary,
+            corr_matrix=corr_matrix,
+            high_corr_pairs=high_corr_pairs,
+            correlated_detail=correlated_detail,
+            validation_summary=validation_summary,
+            output_paths=output_paths,
+            report_path=report_path,
+            batch_metadata=batch_metadata,
+            batch_results={
+                f"batch_{idx:03d}": {
+                    "output_paths": res.output_paths,
+                    "report_path": res.report_path,
+                }
+                for idx, res in enumerate(batch_results)
+            },
+        )
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> list[str]:
+        return list(dict.fromkeys(values))
+
+    def _merge_distribution_summaries(self, summaries: list[dict[str, pd.DataFrame]]) -> dict[str, pd.DataFrame]:
+        keys = sorted({key for summary in summaries for key in summary})
+        merged: dict[str, pd.DataFrame] = {}
+        for key in keys:
+            merged[key] = self._concat_frames([summary.get(key, pd.DataFrame()) for summary in summaries])
+        return merged
+
+    def _merge_woe_artifacts(
+        self,
+        artifacts: list[dict[str, Any]],
+        batch_metadata: pd.DataFrame,
+    ) -> dict[str, Any]:
+        return {
+            "by_target": {},
+            "woe_table": self._concat_frames([item.get("woe_table", pd.DataFrame()) for item in artifacts if item]),
+            "refine_summary": self._concat_frames([item.get("refine_summary", pd.DataFrame()) for item in artifacts if item]),
+            "batch_metadata": batch_metadata,
+        }
+
+    @staticmethod
+    def _concat_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+        valid = [df for df in frames if isinstance(df, pd.DataFrame) and not df.empty]
+        return pd.concat(valid, ignore_index=True) if valid else pd.DataFrame()
+
+    @staticmethod
+    def _merge_psi_details(batch_results: list[FeatureValidationPipelineResult]) -> dict[str, Any]:
+        details: dict[str, Any] = {}
+        for idx, result in enumerate(batch_results):
+            for key, value in (result.psi_details or {}).items():
+                details[f"batch_{idx:03d}:{key}"] = value
+        return details
+
+    def _merge_corr_matrices(self, matrices: list[pd.DataFrame]) -> pd.DataFrame:
+        matrices = [matrix for matrix in matrices if isinstance(matrix, pd.DataFrame) and not matrix.empty]
+        if not matrices:
+            return pd.DataFrame()
+        all_cols = self._dedupe([col for matrix in matrices for col in matrix.columns])
+        merged = pd.DataFrame(np.nan, index=all_cols, columns=all_cols)
+        for matrix in matrices:
+            for row in matrix.index:
+                for col in matrix.columns:
+                    merged.loc[row, col] = matrix.loc[row, col]
+        return merged
+
+    def _run_block_pairwise_correlation(self, csv_path: Path, feature_batches: list[list[str]]) -> pd.DataFrame:
+        cfg = self.config
+        method = str(cfg.corr_params.get("method", "pearson")).lower()
+        threshold = float(cfg.corr_params.get("corr_cutpoint", 0.75))
+        rows = []
+        for left_idx in range(len(feature_batches)):
+            for right_idx in range(left_idx + 1, len(feature_batches)):
+                for left_cols in self._corr_subchunks(feature_batches[left_idx]):
+                    for right_cols in self._corr_subchunks(feature_batches[right_idx]):
+                        cols = self._dedupe(left_cols + right_cols)
+                        data = self._read_csv(csv_path, usecols=cols)
+                        numeric_cols = [col for col in cols if pd.api.types.is_numeric_dtype(data[col])]
+                        left_numeric = [col for col in left_cols if col in numeric_cols]
+                        right_numeric = [col for col in right_cols if col in numeric_cols]
+                        if not left_numeric or not right_numeric:
+                            continue
+                        corr = data[numeric_cols].corr(method=method)
+                        for var1 in left_numeric:
+                            for var2 in right_numeric:
+                                value = corr.loc[var1, var2]
+                                if pd.notna(value) and abs(value) > threshold:
+                                    rows.append(
+                                        {
+                                            "var1": var1,
+                                            "var2": var2,
+                                            "corr": value,
+                                            "abs_corr": abs(value),
+                                            "pair_type": "new_new_cross_batch",
+                                            "corr_method": method,
+                                            "batch_left": left_idx,
+                                            "batch_right": right_idx,
+                                        }
+                                    )
+        return pd.DataFrame(rows)
+
+    def _corr_subchunks(self, columns: list[str]) -> list[list[str]]:
+        size = self.config.batch_corr_pair_chunk_size
+        if not size:
+            return [columns]
+        return [columns[i : i + size] for i in range(0, len(columns), size)]
+
+    def _dedupe_high_corr_pairs(self, high_corr_pairs: pd.DataFrame) -> pd.DataFrame:
+        if high_corr_pairs.empty or not {"var1", "var2"}.issubset(high_corr_pairs.columns):
+            return high_corr_pairs
+        result = high_corr_pairs.copy()
+        pair_keys = result.apply(
+            lambda row: tuple(sorted([str(row.get("var1")), str(row.get("var2"))])),
+            axis=1,
+        )
+        result["_pair_key"] = pair_keys
+        result = result.sort_values("abs_corr", ascending=False, na_position="last")
+        result = result.drop_duplicates("_pair_key").drop(columns="_pair_key")
+        return result.reset_index(drop=True)
+
+    def _build_batch_validation_summary(
+        self,
+        n_rows: int,
+        new_features: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+        distribution_summary: dict[str, pd.DataFrame],
+        psi_summary: pd.DataFrame,
+        ivks_summary: pd.DataFrame,
+        high_corr_pairs: pd.DataFrame,
+        woe_artifacts: dict[str, Any],
+        batch_metadata: pd.DataFrame,
+    ) -> pd.DataFrame:
+        rows = [
+            {"metric": "n_rows", "value": n_rows},
+            {"metric": "n_new_features", "value": len(new_features)},
+            {"metric": "n_incumbent_features", "value": len(incumbent_features)},
+            {"metric": "n_targets", "value": len(target_cols)},
+            {"metric": "woe_engine", "value": self.config.woe_engine},
+            {"metric": "distribution_tables", "value": len(distribution_summary)},
+            {"metric": "psi_rows", "value": len(psi_summary)},
+            {"metric": "ivks_rows", "value": len(ivks_summary)},
+            {"metric": "high_corr_pairs", "value": len(high_corr_pairs)},
+            {"metric": "woe_targets", "value": int(woe_artifacts.get("woe_table", pd.DataFrame()).get("target", pd.Series(dtype=object)).nunique()) if woe_artifacts else 0},
+            {"metric": "n_batches", "value": len(batch_metadata)},
+            {"metric": "batch_status", "value": batch_metadata["status"].value_counts().to_dict() if "status" in batch_metadata else {}},
+        ]
+        return pd.DataFrame(rows)
 
     def _validate_input(
         self,
