@@ -2129,21 +2129,30 @@ class MonotoneWOEBinner:
                     # 整箱标签也登记一次（兜底；通常不会命中真实类别）
                     if "bin_label" in wt.columns:
                         cat_woe_map_str.setdefault(str(r["bin_label"]), woe_v)
-                nan_woe = sv_woe_map.get("__nan__", feat_missing_woe)
+                nan_woe = float(sv_woe_map.get("__nan__", feat_missing_woe))
+                missing_mask = series.isna()
+                if cat_woe_map:
+                    mapped = series.map(cat_woe_map)
+                else:
+                    mapped = pd.Series(np.nan, index=series.index, dtype=float)
 
-                def _get_cat_woe(val):
-                    if val is None or (isinstance(val, float) and math.isnan(val)):
-                        return nan_woe
-                    if val in cat_woe_map:
-                        return cat_woe_map[val]
-                    sval = str(val)
-                    if sval in cat_woe_map_str:
-                        return cat_woe_map_str[sval]
-                    # 训练时未见过的新类别 → 中性 missing_woe
-                    return feat_missing_woe
+                fallback_mask = mapped.isna() & ~missing_mask
+                if cat_woe_map_str and fallback_mask.any():
+                    mapped.loc[fallback_mask] = (
+                        series.loc[fallback_mask].astype(str).map(cat_woe_map_str)
+                    )
 
-                df[woe_col] = series.apply(_get_cat_woe).astype(float)
+                out = np.full(len(series), feat_missing_woe, dtype=float)
+                missing_arr = missing_mask.to_numpy()
+                if missing_arr.any():
+                    out[missing_arr] = nan_woe
+                hit_arr = mapped.notna().to_numpy() & ~missing_arr
+                if hit_arr.any():
+                    out[hit_arr] = mapped.to_numpy(dtype=float)[hit_arr]
+
+                df[woe_col] = out
                 continue
+
 
             # ── 数值特征：按 edges 做 bin 查找 ──
             edges  = [float(e) for e in vr["edges"]]
