@@ -155,17 +155,35 @@ class PSICalculator:
 
         detail = {}
         rows = []
-        groups = [(None, current_data)] if group_by is None else list(current_data.groupby(group_by))
+        resolved_group = group_name if group_name is not None else group_by
+        if resolved_group is None:
+            groups = [(None, current_data, {})]
+        else:
+            group_cols = [resolved_group] if isinstance(resolved_group, str) else list(resolved_group)
+            grouped_data = current_data.copy()
+            for col in group_cols:
+                if grouped_data[col].isna().sum() > 0:
+                    grouped_data[col] = grouped_data[col].fillna("__NULL__")
+            group_key = group_cols[0] if len(group_cols) == 1 else group_cols
+            groups = []
+            for grp_value, grp_df in grouped_data.groupby(group_key, dropna=False):
+                if len(group_cols) == 1:
+                    group_info = {group_cols[0]: grp_value}
+                else:
+                    value_tuple = grp_value if isinstance(grp_value, tuple) else (grp_value,)
+                    group_info = dict(zip(group_cols, value_tuple))
+                groups.append((grp_value, grp_df, group_info))
+
         for var in varlist:
             expected_bins = adapter.assign_bins(expected_df, var)
-            for grp_value, grp_df in groups:
+            for grp_value, grp_df, group_info in groups:
                 current_bins = adapter.assign_bins(grp_df, var)
                 row = {"var": var, "psi": round(_psi_from_bins(expected_bins, current_bins, self.content), self.precision)}
-                if group_by is not None:
-                    row[group_name or group_by] = grp_value
+                row.update(group_info)
                 rows.append(row)
                 if return_details:
-                    detail[var if grp_value is None else (var, grp_value)] = {
+                    detail_key = var if resolved_group is None else (var, grp_value)
+                    detail[detail_key] = {
                         "expected_bins": expected_bins.value_counts(normalize=True, dropna=False),
                         "current_bins": current_bins.value_counts(normalize=True, dropna=False),
                     }

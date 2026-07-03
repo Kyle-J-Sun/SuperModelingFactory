@@ -1121,6 +1121,12 @@ class FeatureValidationPipeline:
                     result = pd.DataFrame(result)
                     if group_col is None and "psi" not in result.columns:
                         result = pd.DataFrame({"psi": result.iloc[:, 0]})
+                    if group_col is None:
+                        result["group_value"] = "global"
+                    elif group_col in result.columns:
+                        result["group_value"] = result[group_col]
+                    else:
+                        result["group_value"] = np.nan
                     result["target"] = target_key
                     result["group_col"] = group_col or "global"
                     rows.append(result)
