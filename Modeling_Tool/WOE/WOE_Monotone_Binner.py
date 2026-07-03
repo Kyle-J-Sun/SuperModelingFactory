@@ -126,6 +126,36 @@ def _chunk_chi2_worker(args):
     return ok, err
 
 
+def _chunk_dtree_worker(args):
+    """refine_dtree() 并行 worker：对一批特征执行决策树重分箱。"""
+    binner_lite, df, chunk_feats, sv_iv_map, max_bins, min_samples_leaf, monotone, eps = args
+    ok, err = {}, {}
+    for feat in chunk_feats:
+        try:
+            df_normal, _ = binner_lite._split_special(df, feat)
+            new_edges = binner_lite._dtree_edges(
+                df_normal, feat, binner_lite.target_col, max_bins, min_samples_leaf
+            )
+            if monotone and len(new_edges) >= 1:
+                new_edges = binner_lite._monotone_merge_edges(
+                    df_normal, feat, binner_lite.target_col, new_edges, eps
+                )
+            wt, iv = binner_lite._compute_woe_table(df_normal, feat, new_edges)
+            woes = wt.sort_values("bin")["woe"].values if len(wt) > 0 else np.array([])
+            sv_iv = sv_iv_map.get(feat, 0.0)
+            ok[feat] = dict(
+                edges        = new_edges,
+                woe_table    = wt,
+                iv           = round(iv + sv_iv, 6),
+                is_monotonic = MonotoneWOEBinner._is_monotone(woes),
+                n_bins       = len(wt),
+            )
+        except Exception as exc:
+            import traceback
+            err[feat] = (exc, traceback.format_exc())
+    return ok, err
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 主类
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1240,6 +1270,9 @@ class MonotoneWOEBinner:
                 feat, ok, err = _refine_one(feat)
                 _apply_and_log(feat, ok, err)
         else:
+            # ── 多进程并行（ProcessPoolExecutor）──────────────────────────
+            # worker 必须使用模块级函数；Windows/Jupyter 的 spawn 语义无法
+            # pickle refine_dtree() 内部定义的局部函数。
             max_workers = n_jobs if n_jobs > 0 else None
             n_workers   = max_workers or os.cpu_count() or 1
             chunk_size  = max(1, math.ceil(len(target_feats) / n_workers))
@@ -1247,27 +1280,38 @@ class MonotoneWOEBinner:
                 target_feats[i : i + chunk_size]
                 for i in range(0, len(target_feats), chunk_size)
             ]
+            binner_lite = copy.copy(self)
+            binner_lite._results   = {}
+            binner_lite._is_fitted = False
+            sv_iv_map = {
+                f: float(self._results[f].get("sv_table", pd.DataFrame())["iv"].sum())
+                   if len(self._results[f].get("sv_table", pd.DataFrame())) > 0 else 0.0
+                for f in target_feats
+            }
             old_nb_map = {f: self._results[f]["n_bins"] for f in target_feats}
             feat_ok, feat_err = {}, {}
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(_refine_one, feat): feat
-                    for feat in target_feats
-                }
-                from concurrent.futures import as_completed as _asc
-                for fut in _asc(futures):
-                    feat_r, ok, err = fut.result()
-                    if err is not None:
-                        feat_err[feat_r] = err
-                    else:
-                        feat_ok[feat_r] = ok
+                futures = [
+                    executor.submit(
+                        _chunk_dtree_worker,
+                        (
+                            binner_lite, df, chunk, sv_iv_map, max_bins,
+                            min_samples_leaf, monotone, eps,
+                        ),
+                    )
+                    for chunk in chunks
+                ]
+                for fut in as_completed(futures):
+                    ok, err = fut.result()
+                    feat_ok.update(ok)
+                    feat_err.update(err)
             for feat in target_feats:
                 if feat in feat_err:
                     exc, tb = feat_err[feat]
                     logger.info(f"  ✗ {feat}: dtree 重分箱失败 — {exc}")
                     print(tb)
                 elif feat in feat_ok:
-                    old_nb, upd = feat_ok[feat]
+                    upd = feat_ok[feat]
                     self._results[feat].update(upd)
                     logger.info(
                         f"  ✓ {feat:40s} | bins: {old_nb_map[feat]} → {upd['n_bins']} "
