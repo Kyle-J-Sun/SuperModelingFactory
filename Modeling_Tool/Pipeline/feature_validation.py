@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -276,6 +277,8 @@ class FeatureValidationPipeline:
                 "output_dir": str(batch_dir),
                 "status": "ok",
             }
+            batch_df: pd.DataFrame | None = None
+            batch_result: FeatureValidationPipelineResult | None = None
             try:
                 batch_df = self._read_csv(csv_path, usecols=read_cols).copy()
                 batch_df["_smf_batch_split"] = split_labels.to_numpy()
@@ -293,11 +296,15 @@ class FeatureValidationPipeline:
                     write_excel=False,
                 )
                 batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
-                batch_results.append(batch_result)
+                batch_results.append(self._slim_batch_result(batch_result))
                 row["n_rows"] = len(batch_df)
             except Exception as exc:
                 row["status"] = "error"
                 row["error"] = repr(exc)
+            finally:
+                del batch_result
+                del batch_df
+                gc.collect()
             batch_rows.append(row)
 
         batch_metadata = pd.DataFrame(batch_rows)
@@ -316,6 +323,28 @@ class FeatureValidationPipeline:
             feature_batches=feature_batches,
         )
         return result
+
+    @staticmethod
+    def _slim_batch_result(result: FeatureValidationPipelineResult) -> FeatureValidationPipelineResult:
+        """Drop per-batch raw/WOE dataframes that are not needed for final merge."""
+        woe_artifacts = dict(result.woe_artifacts or {})
+        woe_artifacts["by_target"] = {}
+        return FeatureValidationPipelineResult(
+            splits={},
+            distribution_summary=result.distribution_summary,
+            woe_artifacts=woe_artifacts,
+            psi_summary=result.psi_summary,
+            psi_details=result.psi_details,
+            ivks_summary=result.ivks_summary,
+            corr_matrix=result.corr_matrix,
+            high_corr_pairs=result.high_corr_pairs,
+            correlated_detail=result.correlated_detail,
+            validation_summary=result.validation_summary,
+            output_paths=result.output_paths,
+            report_path=result.report_path,
+            batch_metadata=result.batch_metadata,
+            batch_results=result.batch_results,
+        )
 
     def _validate_batch_config(self, new_features: list[str]) -> None:
         cfg = self.config
