@@ -648,6 +648,7 @@ class FeatureValidationPipeline:
                     continue
                 params = dict(cfg.corr_params or {})
                 max_iterations = int(params.pop("max_iterations", 10))
+                corr_method = params.get("method", "pearson")
                 filt = CorrelationFilter(data=observed, dep=target, **params)
                 keep = filt.remove_highly_correlated(features, max_iterations=max_iterations)
                 removed = [feature for feature in features if feature not in keep]
@@ -659,6 +660,7 @@ class FeatureValidationPipeline:
                     for _, corr_row in corr.iterrows():
                         key = tuple(sorted([str(corr_row.get("VAR1")), str(corr_row.get("VAR2"))]))
                         meta = pair_meta.get(key, {})
+                        row_corr_method = meta.get("corr_method", corr_method)
                         for var in [corr_row.get("VAR1"), corr_row.get("VAR2")]:
                             metrics = metric_map.get(var, {})
                             rows.append(
@@ -673,9 +675,14 @@ class FeatureValidationPipeline:
                                     "iv": metrics.get("iv"),
                                     "ks_in_gains": metrics.get("ks_in_gains"),
                                     "lift_in_gains": metrics.get("lift_in_gains"),
+                                    **self._corr_detail_fields(
+                                        corr_row.get("VAR1"),
+                                        corr_row.get("VAR2"),
+                                        var,
+                                        row_corr_method,
+                                        "cross_batch",
+                                    ),
                                     "pair_type": "new_new_cross_batch",
-                                    "detail_scope": "cross_batch",
-                                    "corr_method": meta.get("corr_method", params.get("method", "pearson")),
                                     "batch_left": meta.get("batch_left"),
                                     "batch_right": meta.get("batch_right"),
                                 }
@@ -688,8 +695,14 @@ class FeatureValidationPipeline:
                             "corr_var1": features[0],
                             "corr_var2": features[1],
                             "recommended_action": "remove",
+                            **self._corr_detail_fields(
+                                features[0],
+                                features[1],
+                                ",".join(removed),
+                                pair.get("corr_method", params.get("method", "pearson")),
+                                "cross_batch",
+                            ),
                             "pair_type": "new_new_cross_batch",
-                            "detail_scope": "cross_batch",
                             "batch_left": pair.get("batch_left"),
                             "batch_right": pair.get("batch_right"),
                         }
@@ -1356,6 +1369,7 @@ class FeatureValidationPipeline:
                 continue
             params = dict(cfg.corr_params or {})
             max_iterations = int(params.pop("max_iterations", 10))
+            corr_method = params.get("method", "pearson")
             binner = woe_artifacts.get("by_target", {}).get(target, {}).get("engine") if cfg.corr_use_woe_bins else None
             filt = CorrelationFilter(data=data, dep=target, woe_binner=binner, **params)
             keep = filt.remove_highly_correlated(features, max_iterations=max_iterations)
@@ -1380,11 +1394,52 @@ class FeatureValidationPipeline:
                                 "iv": metrics.get("iv"),
                                 "ks_in_gains": metrics.get("ks_in_gains"),
                                 "lift_in_gains": metrics.get("lift_in_gains"),
+                                **self._corr_detail_fields(
+                                    row.get("VAR1"),
+                                    row.get("VAR2"),
+                                    var,
+                                    corr_method,
+                                    "within_batch",
+                                ),
                             }
                         )
             if not rows and removed:
-                rows.append({"target": target, "recommended_action": "remove", "var": ",".join(removed)})
+                rows.append(
+                    {
+                        "target": target,
+                        "recommended_action": "remove",
+                        "var": ",".join(removed),
+                        "metric_var": ",".join(removed),
+                        "corr_method": corr_method,
+                        "detail_scope": "within_batch",
+                    }
+                )
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _corr_detail_fields(
+        corr_var1: Any,
+        corr_var2: Any,
+        metric_var: Any,
+        corr_method: str,
+        detail_scope: str,
+    ) -> dict[str, Any]:
+        corr_var1_str = str(corr_var1) if pd.notna(corr_var1) else ""
+        corr_var2_str = str(corr_var2) if pd.notna(corr_var2) else ""
+        metric_var_str = str(metric_var) if pd.notna(metric_var) else ""
+        if metric_var_str == corr_var1_str:
+            metric_var_position = "corr_var1"
+        elif metric_var_str == corr_var2_str:
+            metric_var_position = "corr_var2"
+        else:
+            metric_var_position = np.nan
+        return {
+            "corr_pair_id": f"{corr_var1_str}||{corr_var2_str}" if corr_var1_str or corr_var2_str else np.nan,
+            "metric_var": metric_var,
+            "metric_var_position": metric_var_position,
+            "corr_method": corr_method,
+            "detail_scope": detail_scope,
+        }
 
     def _build_validation_summary(
         self,

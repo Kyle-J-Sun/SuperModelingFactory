@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class SampleAnalysisPipelineConfig:
     output_dir: str = "output/sample_analysis"
     write_outputs: bool = True
     write_excel: bool = True
+    approved_col: str | None = "is_approved"
 
 
 @dataclass
@@ -93,18 +95,28 @@ class SampleAnalysisPipeline:
     def _label_coverage(self, data: pd.DataFrame) -> pd.DataFrame:
         cfg = self.config
         rows = []
+        approved_col = cfg.approved_col
+        approved_available = approved_col is not None and approved_col in data.columns
+        if approved_col is not None and not approved_available:
+            warnings.warn(
+                f"approved_col={approved_col!r} was not found in input data; "
+                "n_approved_observed will be empty.",
+                UserWarning,
+                stacklevel=2,
+            )
         for target in cfg.target_cols:
             mature = data[data[target].notna()]
             rows.append(
                 {
                     "target_col": target,
+                    "approved_col": approved_col,
                     "n_total": len(data),
                     "n_observed": len(mature),
                     "observed_rate": len(mature) / len(data) if len(data) else np.nan,
                     "bad_rate": mature[target].mean(),
                     "apply_time_min": mature[cfg.time_col].min(),
                     "apply_time_max": mature[cfg.time_col].max(),
-                    "n_approved_observed": int(mature["is_approved"].sum()) if "is_approved" in mature else np.nan,
+                    "n_approved_observed": int(mature[approved_col].eq(1).sum()) if approved_available else np.nan,
                 }
             )
         return pd.DataFrame(rows)
