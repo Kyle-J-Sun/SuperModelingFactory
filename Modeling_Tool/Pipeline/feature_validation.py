@@ -437,6 +437,14 @@ class FeatureValidationPipeline:
             cross_pairs = self._run_block_pairwise_correlation(csv_path, feature_batches)
             high_corr_pairs = self._concat_frames([high_corr_pairs, cross_pairs])
         high_corr_pairs = self._dedupe_high_corr_pairs(high_corr_pairs)
+        if self.config.batch_corr_mode == "block_pairwise" and self.config.corr_enabled:
+            cross_pairs_for_detail = (
+                high_corr_pairs[high_corr_pairs["pair_type"].eq("new_new_cross_batch")].copy()
+                if "pair_type" in high_corr_pairs.columns
+                else pd.DataFrame()
+            )
+            cross_detail = self._cross_batch_correlated_detail(csv_path, cross_pairs_for_detail, target_cols)
+            correlated_detail = self._concat_frames([correlated_detail, cross_detail])
 
         feature_sources = self._feature_source_frame(new_features, incumbent_features)
         validation_summary = self._build_batch_validation_summary(
@@ -568,6 +576,95 @@ class FeatureValidationPipeline:
                                             "batch_right": right_idx,
                                         }
                                     )
+        return pd.DataFrame(rows)
+
+    def _cross_batch_correlated_detail(
+        self,
+        csv_path: Path,
+        cross_pairs: pd.DataFrame,
+        target_cols: list[str],
+    ) -> pd.DataFrame:
+        if cross_pairs.empty or not target_cols:
+            return pd.DataFrame()
+        required_cols = {"var1", "var2"}
+        if not required_cols.issubset(cross_pairs.columns):
+            return pd.DataFrame()
+
+        from Modeling_Tool import CorrelationFilter
+
+        cfg = self.config
+        pair_features = self._dedupe(
+            cross_pairs["var1"].dropna().astype(str).tolist()
+            + cross_pairs["var2"].dropna().astype(str).tolist()
+        )
+        read_cols = self._dedupe(pair_features + target_cols)
+        data = self._read_csv(csv_path, usecols=read_cols)
+
+        pair_meta = {}
+        for row in cross_pairs.to_dict("records"):
+            key = tuple(sorted([str(row.get("var1")), str(row.get("var2"))]))
+            pair_meta[key] = row
+
+        rows = []
+        for target in target_cols:
+            if target not in data.columns:
+                continue
+            observed = data[data[target].notna()].copy()
+            if len(observed) < cfg.min_group_size or observed[target].nunique() < 2:
+                continue
+            for _, pair in cross_pairs.iterrows():
+                features = [pair.get("var1"), pair.get("var2")]
+                features = [str(feature) for feature in features if pd.notna(feature) and str(feature) in observed.columns]
+                if len(features) < 2:
+                    continue
+                params = dict(cfg.corr_params or {})
+                max_iterations = int(params.pop("max_iterations", 10))
+                filt = CorrelationFilter(data=observed, dep=target, **params)
+                keep = filt.remove_highly_correlated(features, max_iterations=max_iterations)
+                removed = [feature for feature in features if feature not in keep]
+                for anchor, payload in getattr(filt, "correlated_dict", {}).items():
+                    corr = payload.get("corr", pd.DataFrame()).copy()
+                    gains = payload.get("gains", pd.DataFrame()).copy()
+                    metric_cols = [col for col in ["var", "iv", "ks_in_gains", "lift_in_gains"] if col in gains.columns]
+                    metric_map = gains[metric_cols].set_index("var").to_dict("index") if "var" in gains.columns else {}
+                    for _, corr_row in corr.iterrows():
+                        key = tuple(sorted([str(corr_row.get("VAR1")), str(corr_row.get("VAR2"))]))
+                        meta = pair_meta.get(key, {})
+                        for var in [corr_row.get("VAR1"), corr_row.get("VAR2")]:
+                            metrics = metric_map.get(var, {})
+                            rows.append(
+                                {
+                                    "target": target,
+                                    "anchor_var": anchor,
+                                    "var": var,
+                                    "corr_var1": corr_row.get("VAR1"),
+                                    "corr_var2": corr_row.get("VAR2"),
+                                    "corr": corr_row.get("CORR"),
+                                    "recommended_action": "keep" if var in keep else "remove",
+                                    "iv": metrics.get("iv"),
+                                    "ks_in_gains": metrics.get("ks_in_gains"),
+                                    "lift_in_gains": metrics.get("lift_in_gains"),
+                                    "pair_type": "new_new_cross_batch",
+                                    "detail_scope": "cross_batch",
+                                    "corr_method": meta.get("corr_method", params.get("method", "pearson")),
+                                    "batch_left": meta.get("batch_left"),
+                                    "batch_right": meta.get("batch_right"),
+                                }
+                            )
+                if not getattr(filt, "correlated_dict", {}) and removed:
+                    rows.append(
+                        {
+                            "target": target,
+                            "var": ",".join(removed),
+                            "corr_var1": features[0],
+                            "corr_var2": features[1],
+                            "recommended_action": "remove",
+                            "pair_type": "new_new_cross_batch",
+                            "detail_scope": "cross_batch",
+                            "batch_left": pair.get("batch_left"),
+                            "batch_right": pair.get("batch_right"),
+                        }
+                    )
         return pd.DataFrame(rows)
 
     def _corr_subchunks(self, columns: list[str]) -> list[list[str]]:
