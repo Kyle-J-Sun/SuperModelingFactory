@@ -2149,25 +2149,56 @@ class MonotoneWOEBinner:
             edges  = [float(e) for e in vr["edges"]]
             wt_map = vr["woe_table"].set_index("bin")["woe"].to_dict()
 
-            # 逐元素赋 WOE
-            def _get_woe(val):
-                # NaN
-                if val is None or (isinstance(val, float) and math.isnan(val)):
-                    if "__nan__" in sv_woe_map:
-                        return sv_woe_map["__nan__"]
-                    return feat_missing_woe
-                # 数值特殊值
-                if val in sv_woe_map:
-                    return sv_woe_map[val]
-                # 普通值：做 bin 查找
-                if not edges:
-                    return wt_map.get(0, feat_missing_woe)
-                import bisect
-                # pd.cut right=True → bin_idx = bisect_right(edges, val)
-                bin_idx = bisect.bisect_right(edges, val)
-                return wt_map.get(bin_idx, feat_missing_woe)
+            out = np.full(len(series), feat_missing_woe, dtype=float)
 
-            df[woe_col] = series.apply(_get_woe).astype(float)
+            is_missing = series.isna().to_numpy()
+            if is_missing.any():
+                out[is_missing] = float(sv_woe_map.get("__nan__", feat_missing_woe))
+
+            special_mask = np.zeros(len(series), dtype=bool)
+            for sv_val, sv_woe in sv_woe_map.items():
+                if sv_val == "__nan__":
+                    continue
+                try:
+                    mask = series.eq(sv_val).to_numpy(dtype=bool, na_value=False)
+                except TypeError:
+                    mask = series.astype(object).eq(sv_val).to_numpy(dtype=bool, na_value=False)
+                if mask.any():
+                    out[mask] = float(sv_woe)
+                    special_mask |= mask
+
+            normal_mask = ~(is_missing | special_mask)
+            if normal_mask.any():
+                if not edges:
+                    out[normal_mask] = float(wt_map.get(0, feat_missing_woe))
+                else:
+                    try:
+                        values_arr = series.to_numpy(dtype=float, copy=False, na_value=np.nan)
+                    except (TypeError, ValueError):
+                        values_arr = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+                    normal_values = values_arr[normal_mask]
+                    valid_values = ~np.isnan(normal_values)
+                    if valid_values.any():
+                        normal_pos = np.flatnonzero(normal_mask)
+                        valid_pos = normal_pos[valid_values]
+                        bin_idx = np.searchsorted(
+                            np.asarray(edges, dtype=float),
+                            normal_values[valid_values],
+                            side="right",
+                        )
+                        woe_values = np.full(len(edges) + 1, feat_missing_woe, dtype=float)
+                        for bin_key, woe_val in wt_map.items():
+                            try:
+                                bin_i = int(bin_key)
+                            except (TypeError, ValueError):
+                                continue
+                            if 0 <= bin_i < len(woe_values):
+                                woe_values[bin_i] = float(woe_val)
+                        out[valid_pos] = woe_values[bin_idx]
+
+            df[woe_col] = out.astype(float)
+            continue
+
 
         return df
 
