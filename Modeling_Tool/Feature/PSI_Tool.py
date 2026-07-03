@@ -948,6 +948,32 @@ def calculate_multivar_psi_two_sets(
     return pd.concat(multi_psi_res)
 
 
+def _coerce_psi_detail_frame(
+    detail_obj,
+    group_by: Optional[Union[str, List[str]]] = None,
+) -> Optional[pd.DataFrame]:
+    """Normalize PSI detail payloads before DataFrame-specific handling."""
+    if detail_obj is None:
+        return None
+    if isinstance(detail_obj, pd.DataFrame):
+        return detail_obj.copy()
+    if isinstance(detail_obj, dict):
+        frames = []
+        group_cols = [group_by] if isinstance(group_by, str) else list(group_by or [])
+        for key, value in detail_obj.items():
+            if value is None:
+                continue
+            frame = value.copy() if isinstance(value, pd.DataFrame) else pd.DataFrame(value)
+            if frame.empty:
+                continue
+            key_values = key if isinstance(key, tuple) else (key,)
+            for col, val in zip(group_cols, key_values):
+                frame[col] = val
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=False) if frames else pd.DataFrame()
+    return pd.DataFrame(detail_obj)
+
+
 # def calculate_multigroup_psi_two_sets(
 #     expected_df: pd.DataFrame,
 #     actual_df: pd.DataFrame,
@@ -1110,10 +1136,8 @@ def calculate_multigroup_psi_two_sets(
                     psi_records.append({group_name: group, 'var': var, 'psi': psi_val})
                     
                     # ========== 标准化 detail_df（修复后的核心代码） ==========
+                    detail_df = _coerce_psi_detail_frame(detail_df, group_by=group_by)
                     if detail_df is not None and not detail_df.empty:
-                        if not isinstance(detail_df, pd.DataFrame):
-                            detail_df = pd.DataFrame(detail_df)
-                        
                         if 'bin' not in detail_df.columns:
                             # 重置索引，原索引列可能名为 'index' 或其他
                             detail_df = detail_df.reset_index()
@@ -1158,9 +1182,8 @@ def calculate_multigroup_psi_two_sets(
                 psi_records.append({'var': var, 'psi': psi_val})
                 
                 # 标准化 detail_df
+                detail_df = _coerce_psi_detail_frame(detail_df, group_by=group_by)
                 if detail_df is not None and not detail_df.empty:
-                    if not isinstance(detail_df, pd.DataFrame):
-                        detail_df = pd.DataFrame(detail_df)
                     if 'bin' not in detail_df.columns:
                         detail_df = detail_df.reset_index()
                         index_col = detail_df.columns[0]

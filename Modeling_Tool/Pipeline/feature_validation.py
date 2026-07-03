@@ -1078,7 +1078,7 @@ class FeatureValidationPipeline:
                         reference,
                         combined,
                         features,
-                        group_by=group_col,
+                        group_by=None,
                         group_name=group_col,
                         return_details=True,
                     )
