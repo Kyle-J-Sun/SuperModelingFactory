@@ -11,6 +11,7 @@ fitting: callers fit the engine once, then reuse it downstream.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable, Optional
 
 import numpy as np
@@ -48,6 +49,32 @@ def _first_existing(df: pd.DataFrame, names: Iterable[str]) -> Optional[str]:
     return None
 
 
+_NUMERIC_BOUND_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_INF_MARKERS = ("inf", "infinity", "\u221e", "\u922d", "\ufffd")
+
+
+def _parse_interval_bound(token: str, side: str) -> float:
+    text = str(token).strip().strip("'\"")
+    compact = re.sub(r"\s+", "", text.lower())
+    if not compact or compact in {"nan", "none", "null"}:
+        return np.nan
+    if any(marker in compact for marker in _INF_MARKERS):
+        if compact.startswith("-") or side == "left":
+            return -np.inf
+        return np.inf
+    if _NUMERIC_BOUND_RE.match(compact):
+        return float(compact)
+    return np.nan
+
+
+def _parse_interval_bounds(label: Any) -> tuple[float, float]:
+    text = str(label).strip()
+    if not text.startswith("(") or "," not in text or not text.endswith(("]", ")")):
+        return np.nan, np.nan
+    left, right = text[1:-1].split(",", 1)
+    return _parse_interval_bound(left, "left"), _parse_interval_bound(right, "right")
+
+
 def _coerce_woe_frame(df: pd.DataFrame, var: Optional[str], engine: str) -> pd.DataFrame:
     """Normalize a single engine WOE table to the common column contract."""
     if df is None or len(df) == 0:
@@ -59,7 +86,7 @@ def _coerce_woe_frame(df: pd.DataFrame, var: Optional[str], engine: str) -> pd.D
     var_col = _first_existing(src, ["VAR", "VARIABLE", "FEATURE", "FEATURE_NAME", "ATTRIBUTE"])
     out["VAR"] = src[var_col] if var_col else var
 
-    bin_col = _first_existing(src, ["BIN_NUM", "BIN", "BIN_ID", "GROUP", "IDX"])
+    bin_col = _first_existing(src, ["BIN_NUM", "BIN_NO", "BIN", "BIN_ID", "GROUP", "IDX"])
     out["BIN_NUM"] = src[bin_col] if bin_col else np.arange(1, len(src) + 1)
 
     range_col = _first_existing(src, ["BIN_RANGE", "RANGE", "BIN_LABEL", "LABEL", "CATEGORY", "CATE", "VALUE"])
@@ -77,6 +104,13 @@ def _coerce_woe_frame(df: pd.DataFrame, var: Optional[str], engine: str) -> pd.D
     }.items():
         col = _first_existing(src, candidates)
         out[target] = src[col] if col else np.nan
+
+    if out["MIN"].isna().any() or out["MAX"].isna().any():
+        parsed_bounds = out["BIN_RANGE"].map(_parse_interval_bounds)
+        parsed_min = parsed_bounds.map(lambda x: x[0])
+        parsed_max = parsed_bounds.map(lambda x: x[1])
+        out["MIN"] = out["MIN"].where(out["MIN"].notna(), parsed_min)
+        out["MAX"] = out["MAX"].where(out["MAX"].notna(), parsed_max)
 
     special_col = _first_existing(src, ["IS_SPECIAL", "SPECIAL", "SPECIAL_BIN"])
     if special_col:
