@@ -30,6 +30,10 @@ class CreditModelPipelineConfig:
     write_outputs: bool = True
     write_excel: bool = True
     plot_outputs: bool = True
+    save_models: bool = False
+    model_output_dir: str | None = None
+    model_include_metadata: bool = True
+    save_woe_artifacts: bool = True
 
     split_config: dict[str, Any] = field(default_factory=lambda: {"test_size": 0.3, "stratify": True})
     feature_selection: dict[str, Any] = field(
@@ -103,6 +107,8 @@ class CreditModelPipelineResult:
     model_feature_sets: dict[str, list[str]] = field(default_factory=dict)
     selected_raw_features: list[str] = field(default_factory=list)
     selected_woe_features: list[str] = field(default_factory=list)
+    model_paths: dict[str, str] = field(default_factory=dict)
+    artifact_paths: dict[str, str] = field(default_factory=dict)
 
 
 class CreditModelPipeline:
@@ -166,9 +172,10 @@ class CreditModelPipeline:
                 output_dir / "figs" / "woe",
                 output_dir / "figs" / "mono_woe",
                 output_dir / "figs" / "perf",
-                output_dir / "models",
                 output_dir / "explain",
             )
+        if cfg.save_models:
+            make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
         splits = self._split_data(data)
         fs_summary, final_features = self._feature_selection(splits, feature_cols)
@@ -202,6 +209,19 @@ class CreditModelPipeline:
         optuna_results = self._run_optuna(model_inputs)
         perf_results = self._evaluate_models(model_inputs, models)
         explain_outputs = self._run_explainability(model_inputs, models)
+        model_paths: dict[str, str] = {}
+        artifact_paths: dict[str, str] = {}
+        model_paths_frame = None
+        if cfg.save_models:
+            model_paths, artifact_paths = self._save_models_and_artifacts(
+                models=models,
+                woe_artifacts=woe_artifacts,
+                perf_results=perf_results,
+                model_feature_sources=model_feature_sources,
+                model_feature_sets=model_feature_sets,
+            )
+            model_paths_frame = self._paths_to_frame(model_paths, artifact_paths)
+            safe_to_csv(model_paths_frame, output_dir / "model_paths.csv", index=False)
 
         if cfg.write_outputs:
             self._write_outputs(
@@ -214,6 +234,7 @@ class CreditModelPipeline:
                 lr_search_results,
                 warm_start_summary,
                 model_feature_source_summary,
+                model_paths_frame,
             )
 
         report_path = None
@@ -226,6 +247,7 @@ class CreditModelPipeline:
                 "LR_Param_Search": lr_search_results,
                 "Warm_Start": warm_start_summary,
                 "Model_Feature_Source": model_feature_source_summary,
+                "Model_Paths": model_paths_frame,
             }
             for name, perf in perf_results.items():
                 sheets[f"Perf_{name.upper()}"] = perf
@@ -248,6 +270,8 @@ class CreditModelPipeline:
             model_feature_sets=model_feature_sets,
             selected_raw_features=list(selected_raw_features),
             selected_woe_features=list(selected_woe_features),
+            model_paths=model_paths,
+            artifact_paths=artifact_paths,
         )
 
     def _resolve_feature_cols(self, data: pd.DataFrame) -> list[str]:
@@ -956,6 +980,92 @@ class CreditModelPipeline:
             },
         }
 
+    def _model_output_dir(self) -> Path:
+        cfg = self.config
+        return Path(cfg.model_output_dir) if cfg.model_output_dir else Path(cfg.output_dir) / "models"
+
+    def _save_models_and_artifacts(
+        self,
+        models: dict[str, tuple[Any, Any, list[str]]],
+        woe_artifacts: dict[str, Any],
+        perf_results: dict[str, pd.DataFrame],
+        model_feature_sources: dict[str, str],
+        model_feature_sets: dict[str, list[str]],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        from Modeling_Tool import save_model
+
+        cfg = self.config
+        model_dir = self._model_output_dir()
+        artifact_dir = Path(cfg.output_dir) / "artifacts"
+        make_dirs(model_dir)
+        model_paths: dict[str, str] = {}
+        artifact_paths: dict[str, str] = {}
+
+        woe_table_path = None
+        if cfg.save_woe_artifacts:
+            make_dirs(artifact_dir)
+            woe_table = woe_artifacts.get("woe_table")
+            if isinstance(woe_table, pd.DataFrame):
+                woe_table_path = artifact_dir / "woe_table.csv"
+                safe_to_csv(woe_table, woe_table_path, index=False)
+                artifact_paths["woe_table"] = str(woe_table_path)
+            engine = woe_artifacts.get("engine")
+            if engine is not None:
+                engine_path = artifact_dir / "woe_engine.pkl"
+                save_model(
+                    engine,
+                    engine_path,
+                    metadata={
+                        "pipeline": "CreditModelPipeline",
+                        "artifact_role": "woe_engine",
+                        "target_col": cfg.target_col,
+                        "raw_features": list(woe_artifacts.get("features") or []),
+                        "woe_features": list(woe_artifacts.get("woe_features") or []),
+                        "woe_engine": woe_artifacts.get("engine_name"),
+                        "random_state": cfg.random_state,
+                    },
+                    feature_cols=woe_artifacts.get("features"),
+                    include_metadata=cfg.model_include_metadata,
+                )
+                artifact_paths["woe_engine"] = str(engine_path)
+
+        warm_start_requested = {str(x).lower() for x in as_list(cfg.warm_start_models)}
+        for name, (wrapper, _, feature_cols) in models.items():
+            path = model_dir / f"model_{name}.pkl"
+            metadata = {
+                "pipeline": "CreditModelPipeline",
+                "model_name": name,
+                "target_col": cfg.target_col,
+                "feature_cols": list(feature_cols),
+                "feature_source": model_feature_sources.get(name),
+                "model_feature_set": model_feature_sets.get(name, list(feature_cols)),
+                "model_params": dict(cfg.model_params.get(name, {})),
+                "warm_start_enabled": bool(cfg.warm_start_enabled and name in warm_start_requested),
+                "warm_start_score_col": cfg.warm_start_score_col,
+                "random_state": cfg.random_state,
+            }
+            metrics = None
+            if isinstance(perf_results.get(name), pd.DataFrame):
+                metrics = {"perf_results": perf_results[name].to_dict("records")}
+            save_model(
+                wrapper,
+                path,
+                metadata=metadata,
+                feature_cols=feature_cols,
+                woe_mapping_path=str(woe_table_path) if woe_table_path else None,
+                metrics=metrics,
+                model_name=name,
+                include_metadata=cfg.model_include_metadata,
+            )
+            model_paths[name] = str(path)
+        return model_paths, artifact_paths
+
+    @staticmethod
+    def _paths_to_frame(model_paths: dict[str, str], artifact_paths: dict[str, str]) -> pd.DataFrame:
+        rows = [{"name": name, "path": path, "kind": "model"} for name, path in model_paths.items()]
+        rows.extend({"name": name, "path": path, "kind": "artifact"} for name, path in artifact_paths.items())
+        return pd.DataFrame(rows)
+
     def _write_outputs(
         self,
         output_dir: Path,
@@ -967,6 +1077,7 @@ class CreditModelPipeline:
         lr_search_results: pd.DataFrame | None,
         warm_start_summary: pd.DataFrame | None,
         model_feature_source_summary: pd.DataFrame | None,
+        model_paths_frame: pd.DataFrame | None,
     ) -> None:
         if isinstance(fs_summary.get("psi"), pd.DataFrame):
             safe_to_csv(fs_summary["psi"], output_dir / "psi_result.csv", index=False)
@@ -977,6 +1088,7 @@ class CreditModelPipeline:
         safe_to_csv(lr_search_results, output_dir / "lr_param_search.csv", index=False)
         safe_to_csv(warm_start_summary, output_dir / "warm_start_summary.csv", index=False)
         safe_to_csv(model_feature_source_summary, output_dir / "model_feature_sources.csv", index=False)
+        safe_to_csv(model_paths_frame, output_dir / "model_paths.csv", index=False)
         for name, df in optuna_results.items():
             safe_to_csv(df, output_dir / f"{name}_optuna_search.csv", index=False)
         for name, df in perf_results.items():

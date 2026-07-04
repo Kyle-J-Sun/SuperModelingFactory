@@ -2073,6 +2073,7 @@ class MonotoneWOEBinner:
         """
         self._check_fitted()
         df = data if inplace else data.copy()
+        woe_outputs: Dict[str, np.ndarray] = {}
 
         for feat, vr in self._results.items():
             if feat not in df.columns:
@@ -2150,7 +2151,7 @@ class MonotoneWOEBinner:
                 if hit_arr.any():
                     out[hit_arr] = mapped.to_numpy(dtype=float)[hit_arr]
 
-                df[woe_col] = out
+                woe_outputs[woe_col] = out.astype(float, copy=False)
                 continue
 
 
@@ -2205,11 +2206,19 @@ class MonotoneWOEBinner:
                                 woe_values[bin_i] = float(woe_val)
                         out[valid_pos] = woe_values[bin_idx]
 
-            df[woe_col] = out.astype(float)
+            woe_outputs[woe_col] = out.astype(float, copy=False)
             continue
 
-
-        return df
+        if not woe_outputs:
+            return df
+        woe_df = pd.DataFrame(woe_outputs, index=df.index)
+        if inplace:
+            df.loc[:, list(woe_df.columns)] = woe_df
+            return df
+        existing = [col for col in woe_df.columns if col in df.columns]
+        if existing:
+            df = df.drop(columns=existing)
+        return pd.concat([df, woe_df], axis=1)
 
     # ── 3. export_woe_report ─────────────────────────────────────────
 

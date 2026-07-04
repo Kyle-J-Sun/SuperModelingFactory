@@ -7,7 +7,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 
 from ._common import (
     add_dataset_with_optional_weight,
@@ -41,14 +41,19 @@ class RejectInferencePipelineConfig:
         default_factory=lambda: ["simple_augment", "hard_cutoff", "fuzzy_augment", "parceling"]
     )
     ri_method_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    ri_score_direction: Literal["high_bad", "high_good"] = "high_bad"
 
     train_ri_models: bool = True
     ri_model_type: str = "lgb"
     ri_model_params: dict[str, Any] = field(default_factory=dict)
     include_no_ri_benchmark: bool = True
+    ri_validation_frac: float = 0.2
     save_models: bool = False
     model_output_dir: str | None = None
     model_include_metadata: bool = True
+    write_ri_datasets: bool = True
+    ri_dataset_output_cols: list[str] | None = None
+    ri_dataset_warn_mb: float = 1024.0
     oot_data: pd.DataFrame | None = None
     oot_frac: float = 0.2
     perf_pct_bins: int = 10
@@ -188,8 +193,8 @@ class RejectInferencePipeline:
             df_ri["ri_method"] = method
             ri_datasets[method] = df_ri
             inferrers[method] = inferrer
-            if cfg.write_outputs:
-                safe_to_csv(df_ri, datasets_dir / f"ri_{method}.csv")
+            if cfg.write_outputs and cfg.write_ri_datasets:
+                self._write_ri_dataset(df_ri, datasets_dir / f"ri_{method}.csv", method)
 
         ri_summary = self._summarize_ri(ri_datasets)
         if cfg.write_outputs:
@@ -268,6 +273,10 @@ class RejectInferencePipeline:
 
     def _validate_ri_approved_config(self) -> None:
         cfg = self.config
+        if cfg.ri_score_direction not in {"high_bad", "high_good"}:
+            raise ValueError("ri_score_direction must be 'high_bad' or 'high_good'")
+        if not 0 < float(cfg.ri_validation_frac) < 1:
+            raise ValueError("ri_validation_frac must be in (0, 1)")
         if cfg.ri_approved_scope not in {"reference_only", "output_subset"}:
             raise ValueError("ri_approved_scope must be 'reference_only' or 'output_subset'")
         if cfg.ri_approved_frac is not None and cfg.ri_approved_n is not None:
@@ -291,6 +300,8 @@ class RejectInferencePipeline:
         invalid = sorted(set(raw_split.dropna().astype(str).str.strip().str.lower()) - valid)
         if invalid:
             raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
+        work = work.copy()
+        work["_smf_ri_split"] = lower
         train = work[lower.isin(["ins", "oos"])].copy()
         oot = work[lower == "oot"].copy()
         if not (lower == "ins").any() or not (lower == "oos").any():
@@ -426,7 +437,8 @@ class RejectInferencePipeline:
         bad_scores = approved.loc[approved[cfg.target_col] == 1, cfg.score_col]
         if len(bad_scores.dropna()) == 0:
             return float(approved[cfg.score_col].median())
-        return float(np.percentile(bad_scores.dropna(), 25))
+        percentile = 25 if cfg.ri_score_direction == "high_bad" else 75
+        return float(np.percentile(bad_scores.dropna(), percentile))
 
     def _build_inferrer(self, method: str, default_hard_cutoff: float) -> Any:
         from Modeling_Tool.Sample.Reject_Infer import (
@@ -438,7 +450,12 @@ class RejectInferencePipeline:
 
         cfg = self.config
         params = dict(cfg.ri_method_params.get(method, {}))
-        common = {"target_col": cfg.target_col, "score_col": cfg.score_col}
+        common = {
+            "target_col": cfg.target_col,
+            "score_col": cfg.score_col,
+            "score_direction": cfg.ri_score_direction,
+            "random_state": cfg.random_state,
+        }
         if method == "simple_augment":
             return SimpleAugmentInferrer(**common, bad_rate=params.get("bad_rate"))
         if method == "hard_cutoff":
@@ -459,16 +476,33 @@ class RejectInferencePipeline:
         rejected_inferred = df_inferred[df_inferred[cfg.approved_col] == 0].copy()
         approved_part = approved_output.copy()
         if method == "fuzzy_augment":
-            proba = approved_part[cfg.score_col]
-            approved_part["_weight"] = (
-                proba * approved_part[cfg.target_col]
-                + (1 - proba) * (1 - approved_part[cfg.target_col])
-            ) * float(cfg.ri_method_params.get(method, {}).get("weight_factor", 1.0))
+            approved_part["_weight"] = 1.0
             if "_weight" not in rejected_inferred.columns:
                 rejected_inferred["_weight"] = 1.0
         elif "_weight" in approved_part.columns and "_weight" not in rejected_inferred.columns:
             approved_part = approved_part.drop(columns=["_weight"])
         return pd.concat([approved_part, rejected_inferred], ignore_index=True, sort=False)
+
+    def _write_ri_dataset(self, df: pd.DataFrame, path: Path, method: str) -> None:
+        cfg = self.config
+        out = df
+        if cfg.ri_dataset_output_cols is not None:
+            keep = [col for col in cfg.ri_dataset_output_cols if col in out.columns]
+            missing = [col for col in cfg.ri_dataset_output_cols if col not in out.columns]
+            if missing:
+                warnings.warn(
+                    f"ri_dataset_output_cols for {method} contains missing columns: {missing}",
+                    UserWarning,
+                )
+            out = out.loc[:, keep].copy()
+        size_mb = float(out.memory_usage(index=True, deep=True).sum()) / (1024.0 * 1024.0)
+        if size_mb >= float(cfg.ri_dataset_warn_mb):
+            warnings.warn(
+                f"RI dataset {method!r} is estimated at {size_mb:.1f} MB before CSV serialization. "
+                "Consider write_ri_datasets=False or ri_dataset_output_cols for wide full-scale runs.",
+                UserWarning,
+            )
+        safe_to_csv(out, path, index=False)
 
     def _summarize_ri(self, datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         cfg = self.config
@@ -508,25 +542,34 @@ class RejectInferencePipeline:
 
         cfg = self.config
         rng = np.random.default_rng(cfg.random_state)
-        use_random_oot = False
+        exclude_train_ids: set[Any] = set()
+        exclude_train_split = None
         if cfg.oot_data is not None:
             oot, oot_summary = self._prepare_external_oot_data(feature_cols)
-            val = approved.copy()
+            val_ids = self._sample_validation_ids(approved, rng, exclude_ids=set())
+            exclude_train_ids.update(val_ids)
+            val = approved[approved["_smf_ri_row_id"].isin(val_ids)].copy()
         elif split_oot_data is not None and len(split_oot_data):
             oot, oot_summary = self._prepare_observed_oot_data(
                 split_oot_data,
                 feature_cols=feature_cols,
                 source="split_col",
             )
-            val = approved.copy()
+            if "_smf_ri_split" in approved.columns and (approved["_smf_ri_split"] == "oos").any():
+                val = approved[approved["_smf_ri_split"] == "oos"].copy()
+                exclude_train_split = "oos"
+            else:
+                val_ids = self._sample_validation_ids(approved, rng, exclude_ids=set())
+                exclude_train_ids.update(val_ids)
+                val = approved[approved["_smf_ri_row_id"].isin(val_ids)].copy()
         else:
-            use_random_oot = True
             n_oot = max(1, int(len(approved) * cfg.oot_frac))
             oot_ids = set(rng.choice(approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
             oot = approved[approved["_smf_ri_row_id"].isin(oot_ids)].copy()
-            val = approved[~approved["_smf_ri_row_id"].isin(oot_ids)].copy()
-            if len(val) == 0:
-                val = approved.copy()
+            exclude_train_ids.update(oot_ids)
+            val_ids = self._sample_validation_ids(approved, rng, exclude_ids=oot_ids)
+            exclude_train_ids.update(val_ids)
+            val = approved[approved["_smf_ri_row_id"].isin(val_ids)].copy()
             oot_summary = self._summarize_oot_data(
                 source="approved_random_split",
                 raw_n=len(oot),
@@ -548,8 +591,14 @@ class RejectInferencePipeline:
 
         for method, df_ri in training_datasets.items():
             train = df_ri.copy()
-            if "_smf_ri_row_id" in train.columns and use_random_oot:
-                train = train[~train["_smf_ri_row_id"].isin(oot_ids)]
+            if "_smf_ri_row_id" in train.columns and exclude_train_ids:
+                train = train[~train["_smf_ri_row_id"].isin(exclude_train_ids)]
+            if exclude_train_split and "_smf_ri_split" in train.columns:
+                train = train[train["_smf_ri_split"] != exclude_train_split]
+            if len(train) == 0:
+                raise ValueError(f"No training rows remain for RI method {method!r} after OOT/validation exclusion")
+            if len(val) == 0:
+                raise ValueError("RI validation sample is empty after splitting")
 
             params = merge_dict(self._DEFAULT_RI_MODEL_PARAMS, cfg.ri_model_params)
             params.setdefault("random_state", cfg.random_state)
@@ -569,7 +618,6 @@ class RejectInferencePipeline:
             eval_sets = {"train": train_eval, "validation": val.copy(), "oot": oot.copy()}
             for ds in eval_sets.values():
                 ds["pred_prob"] = predict_positive(model, ds, feature_cols)
-                ds["_smf_weight"] = ds["_weight"] if "_weight" in ds.columns else 1.0
 
             evaluator = PerformanceEvaluator(
                 tgt_name=cfg.target_col,
@@ -579,22 +627,41 @@ class RejectInferencePipeline:
                 equal_freq=True,
             )
             for name, ds in eval_sets.items():
-                add_dataset_with_optional_weight(evaluator, name, ds, "_smf_weight")
-            perf = evaluator.evaluate(
-                to_show=False,
-                display=False,
-                fig_save_path=str(report_dir / "perf_figs" / f"perf_{method}.png") if cfg.write_outputs else None,
-                rpt_save_path=str(report_dir / f"perf_{method}.csv") if cfg.write_outputs else None,
-            )
-
+                add_dataset_with_optional_weight(evaluator, name, ds, "_weight" if "_weight" in ds.columns else None)
             row = {"ri_method": method, "train_N": len(train), "oot_N": len(oot), "weighted_train": "_weight" in train.columns}
+            for ds_name in ["train", "validation", "oot"]:
+                metrics = self._binary_eval_metrics(eval_sets[ds_name])
+                for metric_name, metric_value in metrics.items():
+                    row[f"{ds_name}_{metric_name}"] = metric_value
+            try:
+                perf = evaluator.evaluate(
+                    to_show=False,
+                    display=False,
+                    fig_save_path=str(report_dir / "perf_figs" / f"perf_{method}.png") if cfg.write_outputs else None,
+                    rpt_save_path=str(report_dir / f"perf_{method}.csv") if cfg.write_outputs else None,
+                )
+            except Exception as exc:
+                perf = pd.DataFrame()
+                row["perf_eval_error"] = repr(exc)
+                warnings.warn(
+                    f"PerformanceEvaluator failed for RI method {method!r}; "
+                    "ri_model_perf keeps internally computed AUC/KS/Gini. "
+                    f"Original error: {exc!r}",
+                    UserWarning,
+                )
             if isinstance(perf, pd.DataFrame):
                 for ds_name in ["train", "validation", "oot"]:
                     subset = perf[perf["dataset"] == ds_name] if "dataset" in perf.columns else pd.DataFrame()
                     if len(subset):
-                        for col in ["AUC", "KS", "Gini"]:
-                            if col in subset.columns:
-                                row[f"{ds_name}_{col}"] = float(subset.iloc[0][col])
+                        for output_col, candidates in {
+                            "AUC": ["AUC", "auc"],
+                            "KS": ["KS", "ks"],
+                            "Gini": ["Gini", "gini"],
+                        }.items():
+                            for col in candidates:
+                                if col in subset.columns:
+                                    row[f"{ds_name}_{output_col}"] = float(subset.iloc[0][col])
+                                    break
             rows.append(row)
             if cfg.save_models:
                 model_paths[method] = self._save_pipeline_model(
@@ -612,6 +679,51 @@ class RejectInferencePipeline:
         if sort_col:
             perf_df = perf_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
         return perf_df, models, model_paths, oot_summary
+
+    def _binary_eval_metrics(self, data: pd.DataFrame) -> dict[str, float]:
+        cfg = self.config
+        y = pd.to_numeric(data[cfg.target_col], errors="coerce")
+        score = pd.to_numeric(data["pred_prob"], errors="coerce")
+        valid = y.notna() & score.notna()
+        if valid.sum() == 0 or y[valid].nunique() < 2:
+            return {"AUC": np.nan, "KS": np.nan, "Gini": np.nan}
+        weight = None
+        if "_weight" in data.columns:
+            weight = pd.to_numeric(data.loc[valid, "_weight"], errors="coerce").fillna(0).to_numpy(dtype=float)
+        y_arr = y[valid].astype(int).to_numpy()
+        score_arr = score[valid].to_numpy(dtype=float)
+        auc = float(roc_auc_score(y_arr, score_arr, sample_weight=weight))
+        fpr, tpr, _ = roc_curve(y_arr, score_arr, sample_weight=weight)
+        ks = float(np.max(tpr - fpr)) if len(tpr) else np.nan
+        return {"AUC": auc, "KS": ks, "Gini": float(2 * auc - 1)}
+
+    def _sample_validation_ids(
+        self,
+        approved: pd.DataFrame,
+        rng: np.random.Generator,
+        exclude_ids: set[Any],
+    ) -> set[Any]:
+        cfg = self.config
+        if "_smf_ri_row_id" not in approved.columns:
+            return set()
+        pool = approved[~approved["_smf_ri_row_id"].isin(exclude_ids)].copy()
+        if len(pool) == 0:
+            pool = approved.copy()
+        n_val = max(1, int(round(len(pool) * float(cfg.ri_validation_frac))))
+        if n_val >= len(pool) and len(pool) > 1:
+            n_val = max(1, len(pool) // 5)
+        if pool[cfg.target_col].nunique(dropna=True) > 1 and n_val >= 2:
+            sampled_parts = []
+            for _, grp in pool.groupby(cfg.target_col):
+                grp_n = max(1, int(round(len(grp) * float(cfg.ri_validation_frac))))
+                grp_n = min(grp_n, len(grp))
+                sampled_parts.append(grp.sample(n=grp_n, random_state=cfg.random_state))
+            sampled = pd.concat(sampled_parts, ignore_index=False)
+            if len(sampled) > n_val:
+                sampled = sampled.sample(n=n_val, random_state=cfg.random_state)
+        else:
+            sampled = pool.sample(n=n_val, random_state=cfg.random_state)
+        return set(sampled["_smf_ri_row_id"].tolist())
 
     def _prepare_external_oot_data(self, feature_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
         return self._prepare_observed_oot_data(

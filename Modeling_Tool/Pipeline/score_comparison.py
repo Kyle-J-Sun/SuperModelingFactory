@@ -30,6 +30,8 @@ class ScoreComparisonPipelineConfig:
     include_missing: bool = False
     fillna: Any = -999999
     positive_score_only: bool = True
+    group_missing_values: list[Any] = field(default_factory=lambda: ["", " ", "NA", "NULL", "nan"])
+    drop_missing_group_values: bool = True
 
     time_dims: list[str] = field(default_factory=lambda: ["apply_month"])
     population_dims: list[str] = field(default_factory=lambda: ["channel"])
@@ -92,6 +94,7 @@ class ScoreComparisonPipeline:
         score_cols = self._resolve_scores(work)
         base_score = cfg.base_score or score_cols[0]
         comp_scores = list(cfg.comp_scores or [s for s in score_cols if s != base_score])
+        self._normalize_group_values(work)
         self._validate_input(work, score_cols, base_score, comp_scores)
 
         report_dir = Path(cfg.output_dir) / "report"
@@ -117,7 +120,9 @@ class ScoreComparisonPipeline:
             gains_display_metric_list=cfg.gains_display_metric_list,
         )
 
-        global_perf = met.model_perf_compare(pct_bins=cfg.nbins, min_data_size=cfg.min_data_size)
+        global_perf = self._normalize_global_perf(
+            met.model_perf_compare(pct_bins=cfg.nbins, min_data_size=cfg.min_data_size)
+        )
         gains = met.get_gains_summary(
             grp_name=None,
             disp=False,
@@ -186,6 +191,42 @@ class ScoreComparisonPipeline:
             pairwise_cross=pairwise_cross,
             report_path=report_path,
         )
+
+    def _normalize_global_perf(self, global_perf: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(global_perf, pd.DataFrame):
+            return global_perf
+        result = global_perf.copy()
+        if "index" in result.columns:
+            result["index"] = result["index"].replace({"oot": "global", "OOT": "global"})
+        if "sample_scope" not in result.columns:
+            result.insert(0, "sample_scope", "global")
+        return result
+
+    def _normalize_group_values(self, data: pd.DataFrame) -> None:
+        cfg = self.config
+        cols: list[str] = []
+        cols.extend(str(col) for col in as_list(cfg.time_dims))
+        cols.extend(str(col) for col in as_list(cfg.population_dims))
+        if cfg.split_col:
+            cols.append(cfg.split_col)
+        for spec in as_list(cfg.group_specs):
+            if isinstance(spec, dict):
+                cols.extend(str(col) for col in as_list(spec.get("columns", [])))
+        missing_tokens = {str(x).strip() for x in as_list(cfg.group_missing_values)}
+        for col in dict.fromkeys(cols):
+            if col not in data.columns:
+                continue
+            series = data[col]
+            if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+                continue
+            stripped = series.astype("string").str.strip()
+            missing_mask = stripped.isin(missing_tokens)
+            data[col] = stripped
+            if missing_mask.any():
+                if cfg.drop_missing_group_values:
+                    data.loc[missing_mask, col] = pd.NA
+                elif cfg.include_missing:
+                    data.loc[missing_mask, col] = "[Missing]"
 
     def _resolve_scores(self, data: pd.DataFrame) -> list[str]:
         cfg = self.config

@@ -153,7 +153,9 @@ def _normalize_catboost_params(params_dict):
     ``eval_metric`` defaults to ``'AUC'`` when neither ``eval_metric`` nor
     ``metric`` is supplied. Common lower-case aliases (e.g. ``'auc'``,
     ``'logloss'``) are normalized to the case-sensitive names CatBoost expects;
-    any other string is left untouched.
+    any other string is left untouched. CatBoost writes ``catboost_info`` under
+    the current working directory by default, so SMF disables file output unless
+    the caller explicitly passes ``allow_writing_files`` or ``train_dir``.
 
     Returns
     -------
@@ -174,6 +176,8 @@ def _normalize_catboost_params(params_dict):
 
     params.setdefault('loss_function', 'Logloss')
     params.setdefault('verbose', False)
+    if 'allow_writing_files' not in params and 'train_dir' not in params:
+        params['allow_writing_files'] = False
 
     # eval_metric must be passed to the CatBoostClassifier constructor, not fit().
     if eval_metric is None:
