@@ -26,6 +26,7 @@ class CreditModelPipelineConfig:
     split_col: str | None = None
     sample_col: str = "sample_ind"
     oot_col: str | None = "oot_flag"
+    weight_col: str | None = None
     random_state: int = 42
     write_outputs: bool = True
     write_excel: bool = True
@@ -283,6 +284,8 @@ class CreditModelPipeline:
             excluded.add(cfg.split_col)
         if cfg.oot_col:
             excluded.add(cfg.oot_col)
+        if cfg.weight_col:
+            excluded.add(cfg.weight_col)
         numeric_cols = data.select_dtypes(include=[np.number]).columns
         return [col for col in numeric_cols if col not in excluded]
 
@@ -292,6 +295,12 @@ class CreditModelPipeline:
         missing = [col for col in missing if col not in data.columns]
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
+        if cfg.weight_col:
+            if cfg.weight_col not in data.columns:
+                raise KeyError(f"Missing weight_col {cfg.weight_col!r}")
+            from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
+            resolve_sample_weight(data=data, weight_col=cfg.weight_col, expected_len=len(data))
         if cfg.warm_start_enabled:
             if not cfg.warm_start_score_col:
                 raise ValueError("warm_start_score_col is required when warm_start_enabled=True")
@@ -301,6 +310,21 @@ class CreditModelPipeline:
                 raise ValueError("warm_start_score_type must be 'probability' or 'log_odds'")
             if cfg.warm_start_on_unsupported not in {"skip", "raise"}:
                 raise ValueError("warm_start_on_unsupported must be 'skip' or 'raise'")
+
+    def _gbm_weight_kwargs(self, train: pd.DataFrame, val: pd.DataFrame) -> dict[str, Any]:
+        cfg = self.config
+        if not cfg.weight_col:
+            return {}
+        from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
+        kwargs: dict[str, Any] = {}
+        train_sw = resolve_sample_weight(data=train, weight_col=cfg.weight_col, expected_len=len(train))
+        if train_sw is not None:
+            kwargs["sample_weight"] = train_sw
+        eval_sw = resolve_sample_weight(data=val, weight_col=cfg.weight_col, expected_len=len(val))
+        if eval_sw is not None:
+            kwargs["eval_sample_weight"] = eval_sw
+        return kwargs
 
     def _validate_gbm_feature_source_config(self) -> None:
         source_cfg = self.config.gbm_feature_source
@@ -614,6 +638,7 @@ class CreditModelPipeline:
                     val_data=val,
                     val_varlist=feature_cols,
                     val_tgt_name=cfg.target_col,
+                    weight_col=cfg.weight_col,
                 )
                 models[name] = (lr, getattr(lr, "model", lr), list(feature_cols))
             elif name in {"lgb", "xgb", "cat"}:
@@ -629,6 +654,7 @@ class CreditModelPipeline:
                     valx=val[feature_cols],
                     valy=val[cfg.target_col].astype(int),
                     init_score=init_score,
+                    **self._gbm_weight_kwargs(train, val),
                 )
                 raw = gbm._model.model if hasattr(gbm, "_model") else gbm
                 models[name] = (gbm, raw, list(feature_cols))
@@ -651,6 +677,8 @@ class CreditModelPipeline:
                     "model_type": f"{cfg.backward_model}m" if cfg.backward_model == "lgb" else cfg.backward_model,
                     "validation_data": splits["oos"],
                     "test_data_dict": {"oot": splits["oot"]},
+                    "weight_col": cfg.weight_col,
+                    "validation_weight_col": cfg.weight_col,
                 },
                 cfg.backward_params.get("init", {}),
             )
@@ -711,6 +739,8 @@ class CreditModelPipeline:
             tgt_name=cfg.target_col,
             eval_sets={"oos": splits["oos"], "oot": splits["oot"]},
             param_grid=cfg.lr_search_param_grid,
+            weight_col=cfg.weight_col,
+            eval_weight_col=cfg.weight_col,
             **params,
         )
         self._lr_best_params = dict(getattr(lr, "best_params_", {}) or {})
@@ -831,6 +861,8 @@ class CreditModelPipeline:
                     data=splits["ins"],
                     search_space=search_spaces[name],
                     fit_kwargs=fit_kwargs or None,
+                    weight_col=cfg.weight_col,
+                    eval_weight_col=cfg.weight_col,
                     **common,
                 )
             except Exception as exc:
@@ -858,7 +890,7 @@ class CreditModelPipeline:
             for ds_name, df in splits.items():
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
-                add_dataset_with_optional_weight(evaluator, ds_name, scored)
+                add_dataset_with_optional_weight(evaluator, ds_name, scored, weight_col=cfg.weight_col)
             fig_save_path = None
             if cfg.write_outputs and cfg.plot_outputs:
                 fig_save_path = str(Path(cfg.output_dir) / "figs" / "perf" / f"perf_{name}.png")
