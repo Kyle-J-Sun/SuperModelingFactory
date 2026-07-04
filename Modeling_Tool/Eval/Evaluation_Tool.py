@@ -597,6 +597,7 @@ class Model_Evaluation_Tool:
         min_bin_prop: Optional[float] = None,
         include_missing: Optional[bool] = None,
         equal_freq: Optional[bool] = None,
+        sample_name: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Compare model performance across different scores.
@@ -626,7 +627,12 @@ class Model_Evaluation_Tool:
             Defaults to ``False`` for performance comparison.
         equal_freq : bool, optional
             Use equal-frequency binning. Defaults to the instance setting.
-            
+        sample_name : str, optional
+            Label applied to the evaluated dataset and emitted in the result's
+            ``index`` column. Defaults to ``'all'`` (the whole ``data`` treated as
+            a single sample). Callers evaluating a specific slice can pass e.g.
+            ``'global'`` or a split name.
+
         Returns
         -------
         pandas.DataFrame
@@ -636,7 +642,10 @@ class Model_Evaluation_Tool:
         score_list = self.comp_scrlist
         dep = self.dep
         base_score = self.base_score
-        sample_name = 'oot'
+        # Label for the single (unsplit) dataset being evaluated; surfaces as the
+        # 'index' column of the result. Defaults to a neutral 'all' rather than the
+        # historical (and misleading) 'oot', which implied an out-of-time sample.
+        sample_name = sample_name if sample_name is not None else 'all'
 
         if base_score is None:
             return pd.DataFrame()

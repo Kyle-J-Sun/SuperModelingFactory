@@ -523,6 +523,44 @@ class LRMaster:
         self._data = data
         return self
 
+    def __getstate__(self):
+        """
+        Exclude the reference training frame from pickling.
+
+        ``self._data`` holds the full training set (row-level customer records)
+        only as a convenience fallback for
+        ``get_statsmodel_summary``/``get_aic``/``get_bic``. Serializing it bloats
+        saved models (tens to hundreds of MB) and leaks raw data alongside the
+        model artifact. Prediction never depends on it, so it is dropped on
+        pickle; pass ``data=`` explicitly to the diagnostic methods on a loaded
+        model.
+        """
+        state = self.__dict__.copy()
+        state["_data"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__dict__.setdefault("_data", None)
+
+    def _require_data(self, data):
+        """
+        Resolve evaluation data, falling back to the stored training frame.
+
+        Raises a clear error when neither an explicit ``data`` argument nor a
+        stored ``self._data`` is available -- e.g. on a model loaded from disk,
+        where ``_data`` is intentionally dropped during pickling.
+        """
+        if data is None:
+            data = self._data
+        if data is None:
+            raise ValueError(
+                "No data available: this model was loaded without its training "
+                "frame (_data is dropped on save). Pass data=... to "
+                "get_statsmodel_summary/get_aic/get_bic."
+            )
+        return data
+
     def fit(self, data, varlist, tgt_name, val_data=None, val_varlist=None, val_tgt_name=None, weight_col=None):
         """
         Train the logistic regression model.
@@ -796,8 +834,7 @@ class LRMaster:
         When standardization is enabled the summary is computed on the
         standardized feature space, consistent with how the model was trained.
         """
-        if data is None:
-            data = self._data
+        data = self._require_data(data)
         if varlist is None:
             varlist = self.varlist
         if tgt_name is None:
@@ -824,8 +861,7 @@ class LRMaster:
         -------
         float
         """
-        if data is None:
-            data = self._data
+        data = self._require_data(data)
         if varlist is None:
             varlist = self.varlist
         if tgt_name is None:
@@ -851,8 +887,7 @@ class LRMaster:
         -------
         float
         """
-        if data is None:
-            data = self._data
+        data = self._require_data(data)
         if varlist is None:
             varlist = self.varlist
         if tgt_name is None:

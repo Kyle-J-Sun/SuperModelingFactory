@@ -121,7 +121,9 @@ class ScoreComparisonPipeline:
         )
 
         global_perf = self._normalize_global_perf(
-            met.model_perf_compare(pct_bins=cfg.nbins, min_data_size=cfg.min_data_size)
+            met.model_perf_compare(
+                pct_bins=cfg.nbins, min_data_size=cfg.min_data_size, sample_name="global"
+            )
         )
         gains = met.get_gains_summary(
             grp_name=None,
@@ -196,8 +198,8 @@ class ScoreComparisonPipeline:
         if not isinstance(global_perf, pd.DataFrame):
             return global_perf
         result = global_perf.copy()
-        if "index" in result.columns:
-            result["index"] = result["index"].replace({"oot": "global", "OOT": "global"})
+        # The 'index' label is set at the source via model_perf_compare(sample_name=...),
+        # so no oot->global remap is needed here anymore.
         if "sample_scope" not in result.columns:
             result.insert(0, "sample_scope", "global")
         return result
@@ -300,12 +302,13 @@ class ScoreComparisonPipeline:
                     group_eval_func=met.model_perf_compare,
                     min_subset_size=min_size,
                     pct_bins=cfg.nbins,
+                    sample_name="global",
                 )
             else:
                 pipeline = evaluation_pipeline_cls(met)
                 for col in columns:
                     pipeline = pipeline.group_by(col, min_size=min_size, group_var_name=col)
-                output = pipeline.apply(met.model_perf_compare, pct_bins=cfg.nbins)
+                output = pipeline.apply(met.model_perf_compare, pct_bins=cfg.nbins, sample_name="global")
                 if isinstance(output, pd.DataFrame):
                     results[name] = output
         return results
