@@ -506,6 +506,23 @@ class RejectInferencePipeline:
 
     def _summarize_ri(self, datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         cfg = self.config
+
+        def _target_mean(data: pd.DataFrame) -> float:
+            if data.empty:
+                return np.nan
+            y = pd.to_numeric(data[cfg.target_col], errors="coerce")
+            if "_weight" not in data.columns:
+                return float(y.mean())
+
+            weight = pd.to_numeric(data["_weight"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            valid = y.notna() & weight.notna() & (weight >= 0)
+            if not bool(valid.any()):
+                return np.nan
+            weight_sum = float(weight.loc[valid].sum())
+            if weight_sum <= 0:
+                return np.nan
+            return float(np.average(y.loc[valid], weights=weight.loc[valid]))
+
         rows = []
         for method, df in datasets.items():
             appr = df[cfg.approved_col] == 1
@@ -520,9 +537,9 @@ class RejectInferencePipeline:
                     "N_total": len(df),
                     "N_approved": int(appr.sum()),
                     "N_rejected": int(rej.sum()),
-                    "bad_rate_appr": float(df.loc[appr, cfg.target_col].mean()),
-                    "bad_rate_rej": float(df.loc[rej, cfg.target_col].mean()),
-                    "bad_rate_total": float(df[cfg.target_col].mean()),
+                    "bad_rate_appr": _target_mean(df.loc[appr]),
+                    "bad_rate_rej": _target_mean(df.loc[rej]),
+                    "bad_rate_total": _target_mean(df),
                     "has_weight_col": "_weight" in df.columns,
                     "prescore_AUC": auc,
                 }
