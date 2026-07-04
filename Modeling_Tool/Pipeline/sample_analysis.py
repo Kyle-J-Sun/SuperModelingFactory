@@ -109,7 +109,7 @@ class SampleAnalysisPipeline:
             rows.append(
                 {
                     "target_col": target,
-                    "approved_col": approved_col,
+                    "approved_col": approved_col if approved_available else None,
                     "n_total": len(data),
                     "n_observed": len(mature),
                     "observed_rate": len(mature) / len(data) if len(data) else np.nan,
