@@ -1,7 +1,7 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.3.10"
+__version__ = "0.3.11"
 
 # Core module - base data structures
 from .Core import (

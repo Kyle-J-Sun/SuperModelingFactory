@@ -97,6 +97,11 @@ class CreditModelPipelineConfig:
     perf_pct_bins: int = 10
     perf_min_bin_prop: float = 0.03
 
+    screening_artifact: Any | None = None
+    feature_validation_result: Any | None = None
+    feature_selection_mode: Literal["run", "from_artifact", "skip"] = "run"
+    reuse_screening_woe: bool = True
+
 
 @dataclass
 class CreditModelPipelineResult:
@@ -190,8 +195,12 @@ class CreditModelPipeline:
             make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
         splits = self._split_data(data)
-        fs_summary, final_features = self._feature_selection(splits, feature_cols)
-        woe_artifacts = self._fit_woe(splits, final_features)
+        fs_summary, final_features, screening_artifact = self._resolve_feature_selection(
+            splits,
+            feature_cols,
+        )
+        prefit_woe = screening_artifact.woe_artifacts if screening_artifact and cfg.reuse_screening_woe else None
+        woe_artifacts = self._fit_woe(splits, final_features, prefit_woe_artifacts=prefit_woe)
         woe_features = woe_artifacts["woe_features"]
         woe_splits = woe_artifacts["splits"]
         woe_suffix = woe_artifacts.get("woe_suffix", cfg.woe_params.get("woe_suffix", "_woe"))
@@ -424,6 +433,48 @@ class CreditModelPipeline:
             oot = oos.copy()
         return {"ins": ins.copy(), "oos": oos.copy(), "oot": oot.copy()}
 
+    def _resolve_screening_artifact(self) -> Any | None:
+        cfg = self.config
+        if cfg.screening_artifact is not None:
+            return cfg.screening_artifact
+        if cfg.feature_validation_result is not None:
+            from .screening_artifact import FeatureScreeningArtifact
+
+            return FeatureScreeningArtifact.from_fvp_result(
+                cfg.feature_validation_result,
+                target_col=cfg.target_col,
+            )
+        return None
+
+    def _resolve_feature_selection(
+        self,
+        splits: dict[str, pd.DataFrame],
+        feature_cols: list[str],
+    ) -> tuple[dict[str, Any], list[str], Any | None]:
+        cfg = self.config
+        artifact = self._resolve_screening_artifact()
+        mode = cfg.feature_selection_mode
+        if artifact is not None:
+            mode = "from_artifact"
+        if mode == "from_artifact":
+            if artifact is None:
+                raise ValueError("feature_selection_mode='from_artifact' requires screening_artifact.")
+            artifact.validate_for_cm(target_col=cfg.target_col, weight_col=cfg.weight_col)
+            summary = dict(artifact.selection_summary or {})
+            summary["from_artifact"] = True
+            summary["artifact_source"] = artifact.source
+            selected = list(artifact.selected_features) or list(feature_cols)
+            return summary, selected, artifact
+        if mode == "skip":
+            summary = {
+                "skipped": True,
+                "initial_features": list(feature_cols),
+                "final_features": list(feature_cols),
+            }
+            return summary, list(feature_cols), None
+        summary, selected = self._feature_selection(splits, feature_cols)
+        return summary, selected, None
+
     def _feature_selection(
         self,
         splits: dict[str, pd.DataFrame],
@@ -509,12 +560,80 @@ class CreditModelPipeline:
                 transformed[name] = transform_fn(df)
         return transformed
 
-    def _fit_woe(self, splits: dict[str, pd.DataFrame], feature_cols: list[str]) -> dict[str, Any]:
+    def _reuse_screening_woe(
+        self,
+        splits: dict[str, pd.DataFrame],
+        feature_cols: list[str],
+        prefit_woe_artifacts: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+        cfg = self.config
+        by_target = prefit_woe_artifacts.get("by_target", {}) if prefit_woe_artifacts else {}
+        item = by_target.get(cfg.target_col)
+        if not item:
+            return None
+
+        adapter = item.get("adapter")
+        if adapter is None and item.get("engine") is not None:
+            woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
+            adapter = as_woe_engine(item["engine"], woe_suffix=woe_suffix)
+        if adapter is None:
+            return None
+
+        fitted = set(item.get("features") or [])
+        usable = [col for col in feature_cols if col in fitted]
+        if not usable:
+            return None
+
+        woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
+        woe_features = [f"{col}{woe_suffix}" for col in usable]
+        woe_splits = {
+            name: adapter.transform(df, varlist=usable, suffix=woe_suffix)
+            for name, df in splits.items()
+        }
+        extra_eval = self._transform_extra_eval_datasets(
+            adapter.transform,
+            usable,
+            woe_suffix=woe_suffix,
+        )
+        if cfg.warm_start_enabled and cfg.warm_start_score_col:
+            for name, df in woe_splits.items():
+                if cfg.warm_start_score_col not in df.columns and cfg.warm_start_score_col in splits[name].columns:
+                    df[cfg.warm_start_score_col] = splits[name][cfg.warm_start_score_col].to_numpy()
+            for name, df in extra_eval.items():
+                if cfg.warm_start_score_col not in df.columns and cfg.warm_start_score_col in cfg.extra_eval_datasets[name].columns:
+                    df[cfg.warm_start_score_col] = cfg.extra_eval_datasets[name][cfg.warm_start_score_col].to_numpy()
+
+        return {
+            "engine": adapter,
+            "engine_name": adapter.get_engine_name() if hasattr(adapter, "get_engine_name") else cfg.woe_engine,
+            "features": list(usable),
+            "woe_features": woe_features,
+            "woe_suffix": woe_suffix,
+            "splits": woe_splits,
+            "extra_eval": extra_eval,
+            "woe_table": adapter.get_woe_table(varlist=usable),
+            "reused_from_screening": True,
+        }
+
+    def _fit_woe(
+        self,
+        splits: dict[str, pd.DataFrame],
+        feature_cols: list[str],
+        *,
+        prefit_woe_artifacts: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         from Modeling_Tool import MonotoneWOEBinner, WOE_Master
         from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
         from Modeling_Tool.WOE.WOE_Master import get_overall_woe_table
 
         cfg = self.config
+        if prefit_woe_artifacts and cfg.reuse_screening_woe:
+            reused = self._reuse_screening_woe(splits, feature_cols, prefit_woe_artifacts)
+            if reused is not None:
+                return reused
+
         woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
         graph_dir = str(Path(cfg.output_dir) / "figs" / "woe")
         woe_features = [f"{col}{woe_suffix}" for col in feature_cols]
