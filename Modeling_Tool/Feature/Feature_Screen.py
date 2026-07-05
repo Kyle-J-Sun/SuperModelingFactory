@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,11 +9,18 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
+from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
 from .Weighted_Screen import (
     WeightedScreenResult,
+    _corr_dedup_weighted,
     _legacy_unweighted_screen,
+    _psi_from_distributions,
     _resolve_splits,
     _summary_row,
+    _weighted_bin_distribution,
+    _weighted_iv_from_assigned_bins,
+    _weighted_pearson_corr_matrix,
     _weighted_screen_impl,
 )
 
@@ -289,6 +295,128 @@ def _woe_bins_unweighted_screen(
     )
 
 
+def _bins_to_numpy(bins: Any) -> np.ndarray:
+    if isinstance(bins, pd.Series):
+        return bins.to_numpy(dtype=object)
+    return np.asarray(bins, dtype=object)
+
+
+def _weighted_woe_bins_screen(
+    splits: dict[str, pd.DataFrame],
+    feature_cols: list[str],
+    target_col: str,
+    weight_col: str,
+    config: FeatureScreenConfig,
+    *,
+    prefit_woe_engine: Any | None = None,
+) -> FeatureScreenResult:
+    from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+    ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
+    w_ins = resolve_sample_weight(data=ins, weight_col=weight_col, expected_len=len(ins))
+    y_ins = ins[target_col].astype(float).to_numpy()
+    current = list(feature_cols)
+    summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
+
+    binner = prefit_woe_engine
+    if binner is None:
+        binner = fit_screening_woe_engine(
+            ins,
+            feature_cols,
+            target_col,
+            woe_engine=config.woe_engine,
+            woe_fit_query=config.woe_fit_query,
+            woe_params=config.woe_params,
+            monotone_woe_params=config.monotone_woe_params,
+            categorical_features=config.categorical_features,
+        )
+    adapter = as_woe_engine(binner)
+
+    psi_records: list[dict] = []
+    if config.psi_enabled:
+        for var in feature_cols:
+            if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
+                continue
+            bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
+            exp_dist = _weighted_bin_distribution(bins_ins, w_ins, config.content)
+            row: dict[str, Any] = {"var": var, "psi_ins_oos": np.nan, "psi_ins_oot": np.nan}
+            if "oos" in config.psi_compare_splits and len(oos) > 0:
+                w_oos = resolve_sample_weight(data=oos, weight_col=weight_col, expected_len=len(oos))
+                bins_oos = _bins_to_numpy(adapter.assign_bins(oos, var))
+                act = _weighted_bin_distribution(bins_oos, w_oos, config.content)
+                row["psi_ins_oos"] = _psi_from_distributions(exp_dist, act, config.content)
+            if "oot" in config.psi_compare_splits and len(oot) > 0:
+                w_oot = resolve_sample_weight(data=oot, weight_col=weight_col, expected_len=len(oot))
+                bins_oot = _bins_to_numpy(adapter.assign_bins(oot, var))
+                act = _weighted_bin_distribution(bins_oot, w_oot, config.content)
+                row["psi_ins_oot"] = _psi_from_distributions(exp_dist, act, config.content)
+            psi_records.append(row)
+
+        psi_table = pd.DataFrame(psi_records) if psi_records else pd.DataFrame(
+            columns=["var", "psi_ins_oos", "psi_ins_oot"],
+        )
+        if not psi_table.empty:
+            compare_cols = [c for c in ("psi_ins_oos", "psi_ins_oot") if c in psi_table.columns]
+            psi_table["psi_max"] = psi_table[compare_cols].max(axis=1, skipna=True)
+            keep = psi_table.loc[psi_table["psi_max"] < config.psi_threshold, "var"].tolist()
+            n_before = len(current)
+            current = [v for v in current if v in keep] or current
+            summary_rows.append(_summary_row("psi", n_before, len(current), config.psi_threshold, weight_col))
+        else:
+            psi_table["psi_max"] = pd.Series(dtype=float)
+    else:
+        psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
+
+    iv_records: list[dict] = []
+    if config.iv_enabled:
+        for var in current:
+            if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
+                continue
+            bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
+            x_ins = ins[var].to_numpy(dtype=float)
+            iv_val, n_b, miss = _weighted_iv_from_assigned_bins(y_ins, w_ins, bins_ins, x_ins)
+            iv_records.append({
+                "var": var,
+                "iv_weighted": iv_val,
+                "n_bins": n_b,
+                "missing_rate": miss,
+            })
+        iv_table = pd.DataFrame(iv_records) if iv_records else pd.DataFrame(
+            columns=["var", "iv_weighted", "n_bins", "missing_rate"],
+        )
+        if not iv_table.empty:
+            keep = iv_table.loc[iv_table["iv_weighted"] >= config.iv_threshold, "var"].tolist()
+            n_before = len(current)
+            current = [v for v in current if v in keep] or current
+            summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, weight_col))
+    else:
+        iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
+
+    corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
+    if config.corr_enabled and len(current) > 1:
+        X = ins[current].astype(float).to_numpy()
+        corr = _weighted_pearson_corr_matrix(X, w_ins)
+        iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+        n_before = len(current)
+        current, corr_dropped = _corr_dedup_weighted(
+            current,
+            corr,
+            iv_map,
+            config.corr_threshold,
+            config.corr_max_iterations,
+        )
+        summary_rows.append(_summary_row("corr", n_before, len(current), config.corr_threshold, weight_col))
+
+    summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, weight_col))
+    return FeatureScreenResult(
+        selected_features=list(current),
+        iv_table=iv_table,
+        psi_table=psi_table,
+        corr_dropped=corr_dropped,
+        summary=pd.DataFrame(summary_rows),
+    )
+
+
 def feature_screen(
     splits: dict[str, pd.DataFrame],
     feature_cols: list[str],
@@ -303,11 +431,14 @@ def feature_screen(
     use_woe_bins = _needs_woe_bins(cfg)
 
     if weight_col is not None:
-        if use_woe_bins:
-            warnings.warn(
-                "Weighted feature screening with psi/iv/corr_use_woe_bins is not fully "
-                "supported yet; falling back to weighted equal-frequency bins.",
-                stacklevel=2,
+        if use_woe_bins or prefit_woe_engine is not None:
+            return _weighted_woe_bins_screen(
+                splits,
+                feature_cols,
+                target_col,
+                weight_col,
+                cfg,
+                prefit_woe_engine=prefit_woe_engine,
             )
         return _weighted_screen_impl(
             splits,

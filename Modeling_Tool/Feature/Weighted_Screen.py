@@ -119,6 +119,37 @@ def _psi_from_distributions(expected: pd.Series, actual: pd.Series, content: flo
     return float(((a - e) * np.log(a / e)).sum())
 
 
+def _weighted_iv_from_assigned_bins(
+    y: np.ndarray,
+    w: np.ndarray,
+    bins: np.ndarray,
+    x: np.ndarray,
+) -> tuple[float, int, float]:
+    total_bad = float(np.sum(w * y))
+    total_good = float(np.sum(w * (1.0 - y)))
+    if total_bad <= 0 or total_good <= 0:
+        missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
+        return 0.0, 0, missing_rate
+
+    rows = []
+    for b in pd.unique(bins):
+        m = bins == b
+        bad_w = float(np.sum(w[m] * y[m]))
+        good_w = float(np.sum(w[m] * (1.0 - y[m])))
+        rows.append({
+            "bad_pct": bad_w / total_bad,
+            "good_pct": good_w / total_good,
+        })
+    if not rows:
+        missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
+        return 0.0, 0, missing_rate
+
+    stats = pd.DataFrame(rows)
+    iv = float(calc_iv(stats, "bad_pct", "good_pct").sum())
+    missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
+    return iv, len(rows), missing_rate
+
+
 def _weighted_iv_for_var(
     x: np.ndarray,
     y: np.ndarray,
