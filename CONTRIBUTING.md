@@ -1,6 +1,6 @@
 # Contributing to SuperModelingFactory
 
-Thanks for taking the time to look at SMF. The package is now public on PyPI
+Thanks for taking the time to look at SMF. The package is public on PyPI
 (`pip install supermodelingfactory`) under [BSL 1.1](LICENSE). This guide is
 for **anyone who wants to file an issue, send a PR, or build / release SMF
 from source**.
@@ -10,73 +10,69 @@ from source**.
 
 ---
 
-## TL;DR — daily edit / build loop
+## TL;DR — daily edit / test loop
 
 ```bash
 # 1. Fork + clone
 git clone git@github.com:<your-fork>/SuperModelingFactory.git
 cd SuperModelingFactory
 
-# 2. Editable install (compiles .so / .pyd in place via Cython)
+# 2. Editable install
 make install
+# Windows: python tasks.py install
 
 # 3. Edit any module
-vim Modeling_Tool/WOE/WOE_Master.py
+vim Modeling_Tool/Pipeline/credit_model.py
 
-# 4. Recompile + light smoke test
-make compile && make test
+# 4. Smoke import + packaging check
+make test && make verify
 
-# 5. Run protection invariants (must pass before PR)
-make verify
+# 5. Run pytest (clone SuperModelingFactory_pytest separately)
+export PYTHONPATH="$(pwd):${PYTHONPATH}"
+pytest /path/to/SuperModelingFactory_pytest -q
 
 # 6. Send a PR
 git checkout -b fix/<topic>
-git commit -am "fix(WOE): ..."
+git commit -am "fix(Pipeline): ..."
 git push origin fix/<topic>
 # open a PR against main on GitHub
 ```
 
-CI runs `tests` + `verify protection` on every PR. Wheel builds only run on
-PRs that touch packaging files (`setup.py`, `pyproject.toml`, `MANIFEST.in`,
-etc.) and on tag pushes — see [.github/workflows/build.yml](.github/workflows/build.yml).
+CI runs `tests` and `Verify source package` on every PR. Wheel builds run on
+tag pushes — see [.github/workflows/build.yml](.github/workflows/build.yml).
 
 ---
 
-## 1. Repository layout & what is closed-source
+## 1. Repository layout
 
-SMF is open-source but **the modeling algorithms are shipped as compiled
-extensions** (`.so` / `.pyd`) rather than as plain `.py`. The original `.py`
-sources of those modules live in this repo (so you can read and modify them
-locally), but the **published wheel and sdist do not contain those `.py`
-files** — only the compiled binaries.
+SMF ships as a **Python source package**. All modeling code under
+`Modeling_Tool/`, `ExcelMaster/`, and `Report/` is readable `.py` source in
+both the repository and the published wheel / sdist.
 
-| Location | In wheel | Notes |
-|---|---|---|
-| `Modeling_Tool/WOE/*.py` | as `.so` / `.pyd` | WOE binning, monotone constraints |
-| `Modeling_Tool/Feature/*.py` | as `.so` / `.pyd` | Feature engineering |
-| `Modeling_Tool/Model/*.py` | as `.so` / `.pyd` | LR / LGB / XGB / GBM wrappers |
-| `Modeling_Tool/Eval/*.py` | as `.so` / `.pyd` | KS / AUC / PSI / Gini |
-| `Modeling_Tool/Sample/*.py` | as `.so` / `.pyd` | Sampling utilities |
-| `Modeling_Tool/Core/{Binning_Tool,kDataFrame,XOR_Encryptor,Slope_Tool}.py` | as `.so` / `.pyd` | Core algorithms |
-| `Modeling_Tool/Core/{ODPS_Tool,Json_Data_Converter,utils,Check_DuckDB_Compatibility}.py` | plain `.py` | Pure-Python plumbing |
-| `Modeling_Tool/UAT/`, `ExcelMaster/`, `Report/` | plain `.py` | Reporting / QA tooling |
-| `Modeling_Tool/**/backup/` | excluded | Never compiled, never shipped |
+| Location | Notes |
+|---|---|
+| `Modeling_Tool/Core/` | Binning, ODPS helpers, utilities |
+| `Modeling_Tool/WOE/` | WOE binning, monotone constraints, plotting |
+| `Modeling_Tool/Feature/` | PSI, IV, correlation, distribution |
+| `Modeling_Tool/Model/` | LR / LGB / XGB / CatBoost wrappers |
+| `Modeling_Tool/Eval/` | KS / AUC / PSI / Gini, performance tables |
+| `Modeling_Tool/Sample/` | Splitting, reject inference, adaptation |
+| `Modeling_Tool/Explainability/` | SHAP, LIME, PDP, ICE, ALE, Owen |
+| `Modeling_Tool/Pipeline/` | High-level one-click pipelines |
+| `Modeling_Tool/UAT/` | Online/offline score consistency checks |
+| `ExcelMaster/`, `Report/` | Excel reporting templates |
+| `Modeling_Tool/**/backup/` | Archived snapshots — not part of the public API |
 
-**The canonical source of truth for the closed-source list is**
-`setup.py :: CLOSED_SOURCE_MODULES`. Two other files mirror it and **must
-stay in sync**:
-
-- `gen_stubs.py :: MODULES` — drives `.pyi` generation
-- `MANIFEST.in` — `exclude` lines drop the `.py` from the sdist
-
-`scripts/verify_protection.py` enforces this invariant; CI runs it on every
-PR via the `Verify protection` workflow.
+Test cases live in the separate
+[`SuperModelingFactory_pytest`](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest)
+repository. The main repo's GitHub Actions workflow clones that repo with
+`secrets.PYTEST_REPO_TOKEN`.
 
 ---
 
 ## 2. Filing an issue
 
-- **Bug report**: please include SMF version (`pip show supermodelingfactory`),
+- **Bug report**: include SMF version (`pip show supermodelingfactory`),
   Python version, OS, a minimal reproduction snippet, and the full traceback.
 - **Feature request**: describe the use case first (what credit-risk modeling
   problem are you trying to solve?), then the proposed API.
@@ -90,87 +86,50 @@ PR via the `Verify protection` workflow.
 Branch names: `feat/<topic>`, `fix/<topic>`, `chore/<topic>`, `docs/<topic>`.
 
 Commit messages: [Conventional Commits](https://www.conventionalcommits.org/),
-e.g. `feat(Model): add CatBoost wrapper`, `fix(WOE): correct monotone
+e.g. `feat(Pipeline): add extra_eval_datasets`, `fix(WOE): correct monotone
 constraint when bin has all NaN`.
 
-Required checks (all auto-run on the PR):
+Required checks (auto-run on the PR):
 
-- `tests` — pytest suite on Py3.11 + Py3.12 across `legacy` / `modern` /
-  `bleeding` dependency matrices (6 combinations total)
-- `Verify protection` — runs `scripts/verify_protection.py`
-- `Build wheels` — only triggered when the PR touches build-relevant files
+- `tests` — pytest on Py3.11 + Py3.12 across `legacy` / `modern` dependency
+  matrices (4 combinations)
+- `Verify source package` — `compileall` + `python -m build`
+- `Build wheels` — triggered on tag pushes and packaging-file changes
 
-PRs need at least one passing `tests` matrix + green `verify protection`
-to be considered for merge.
+PRs need a green `tests` matrix and `Verify source package` before merge.
 
 ---
 
-## 4. The four common change scenarios
+## 4. Common change scenarios
 
-### 4.1  Modify an existing closed-source module
+### 4.1  Modify an existing module
 
-Edit the `.py`, re-compile, test, commit.
+Edit the `.py`, run smoke import + pytest, commit.
 
 ```bash
 vim Modeling_Tool/WOE/WOE_Master.py
-make compile-one M=Modeling_Tool/WOE/WOE_Master.py   # fast — single module
-make test                                            # imports + light smoke
-make verify                                          # invariants still hold
+make test
+pytest /path/to/SuperModelingFactory_pytest/test_woe.py -q
 git commit -am "fix(WOE): correct monotone constraint when bin has all NaN"
 ```
 
-If the public API (class / function signatures) changed, regenerate the stub
-so IDE users see the new signature:
+### 4.2  Add a new public API
 
-```bash
-make stub
-git add Modeling_Tool/WOE/WOE_Master.pyi
-```
+1. Implement the module under the appropriate `Modeling_Tool/<Subpkg>/` folder.
+2. Export it from that subpackage's `__init__.py` if it should be part of the
+   public surface.
+3. Add or extend tests in `SuperModelingFactory_pytest`.
+4. Update docs in [`SuperModelingFactory_doc`](https://github.com/Kyle-J-Sun/SuperModelingFactory_doc)
+   when the API is user-facing.
 
-### 4.2  Add a NEW closed-source module
+### 4.3  Pipeline changes
 
-The only scenario that touches configuration files. Steps **in order**:
+`Modeling_Tool/Pipeline/` hosts the high-level business pipelines. Shared
+helpers live in `_common.py`. When adding config fields:
 
-1. Create `Modeling_Tool/<Subpkg>/<New_Tool>.py` and write the code.
-2. Add an entry to `setup.py :: CLOSED_SOURCE_MODULES` (keep grouped by subpkg).
-3. Add the **same** entry to `gen_stubs.py :: MODULES`.
-4. Add an `exclude` line in `MANIFEST.in`.
-5. Run `make stub` — generates the `.pyi` with a fresh fingerprint.
-6. Run `make compile && make test && make verify` — all three must pass.
-7. Commit:
-   ```bash
-   git add Modeling_Tool/<Subpkg>/<New_Tool>.py \
-           Modeling_Tool/<Subpkg>/<New_Tool>.pyi \
-           setup.py gen_stubs.py MANIFEST.in
-   git commit -m "feat(<Subpkg>): add <New_Tool>"
-   ```
-
-> If you forget any of steps 2–4, `make verify` (also in CI) will flag it.
-
-### 4.3  Modify a pure-Python module
-
-No special handling. Edit, test, commit.
-
-```bash
-vim ExcelMaster/Template.py
-git commit -am "feat(ExcelMaster): add PVA template variant"
-```
-
-### 4.4  Move a module between compiled and pure-Python
-
-**Compiled → pure-Python** (you decide it doesn't need compilation):
-
-1. Remove its entry from `setup.py :: CLOSED_SOURCE_MODULES`
-2. Remove its entry from `gen_stubs.py :: MODULES`
-3. Remove its `exclude` line from `MANIFEST.in`
-4. Delete the `.pyi` (otherwise it shadows the `.py` for IDEs)
-5. `make verify`
-
-**Pure-Python → compiled** (you decide it needs compilation):
-
-1. Add to all three files (as in 4.2 step 2–4)
-2. `make stub`
-3. `make verify`
+- Keep defaults `None` / `False` for backward compatibility.
+- Validate inputs in `_validate_input()` before expensive work.
+- Add pytest coverage in `SuperModelingFactory_pytest/test_pipeline_api.py`.
 
 ---
 
@@ -180,36 +139,35 @@ SMF uses **semantic versioning**: `MAJOR.MINOR.PATCH`.
 
 | Change | Bump |
 |---|---|
-| Bug fix, no API change | patch (`0.1.1 → 0.1.2`) |
-| New feature, backward compatible | minor (`0.1.2 → 0.2.0`) |
-| Breaking API change | major (`0.2.0 → 1.0.0`) |
+| Bug fix, no API change | patch (`0.3.5 → 0.3.6`) |
+| New feature, backward compatible | minor (`0.3.6 → 0.4.0`) |
+| Breaking API change | major (`0.4.0 → 1.0.0`) |
 
 ### Release procedure
+
+Bump version in **all four** places (they must agree):
+
+- `pyproject.toml :: version`
+- `setup.py :: SMF_VERSION` default
+- `Modeling_Tool/__init__.py :: __version__`
+- `README.md` and `Modeling_Tool/README.md` version footers
 
 ```bash
 # On main, working tree clean, all CI green
 git checkout main && git pull
 
-# Bump version in BOTH files (these must agree):
-#   pyproject.toml :: version
-#   setup.py       :: os.environ.get("SMF_VERSION", "<version>") default
-vim pyproject.toml setup.py
-git commit -am "chore: bump version to 0.1.2"
-git push origin main
+make release VERSION=0.3.6
+# bumps pyproject.toml, runs verify, commits, tags
 
-# Wait for tests + verify to go green, then tag
-git tag v0.1.2
-git push origin v0.1.2
+git push origin main
+git push origin v0.3.6
 ```
 
-The tag push triggers `.github/workflows/build.yml` which:
+Recommended commit order across repos: **pytest → main → doc → tag**.
 
-1. Builds wheels for Linux x86_64 / macOS arm64 / Windows × Py3.10 / 3.11 /
-   3.12 / 3.13 (skipping known-broken combinations — see `pyproject.toml ::
-   tool.cibuildwheel`)
-2. Builds an sdist
-3. Creates a GitHub Release `v0.1.2` and attaches all artifacts
-4. Publishes to PyPI via OIDC trusted publisher (no token needed)
+The tag push triggers `.github/workflows/build.yml` which builds wheels, an
+sdist, creates a GitHub Release, and publishes to PyPI via OIDC trusted
+publisher.
 
 ### What users receive
 
@@ -217,53 +175,29 @@ The tag push triggers `.github/workflows/build.yml` which:
 pip install --upgrade supermodelingfactory
 ```
 
-PyPI serves wheels for all supported platforms; users do **not** need
-Cython, a C compiler, or anything else.
+Users do **not** need a C compiler or any compile step.
 
 ---
 
-## 6. The seven invariants CI checks
+## 6. Troubleshooting
 
-`scripts/verify_protection.py` (also invoked by `make verify`) enforces:
+**`pip install -e .` succeeds but `import Modeling_Tool` fails**
+Check that `PYTHONPATH` is not shadowing the editable install with an old
+checkout. Run `python -c "import Modeling_Tool; print(Modeling_Tool.__file__)"`.
 
-| # | Invariant | Failure mode if violated |
-|---|---|---|
-| 1 | `setup.py :: CLOSED_SOURCE_MODULES` == `gen_stubs.py :: MODULES` | Stubs drift from compiled set |
-| 2 | Every closed-source `.py` has a sibling `.pyi` | IDE users lose autocomplete |
-| 3 | Every closed-source `.py` is `exclude`-ed in `MANIFEST.in` | sdist leaks source |
-| 4 | No closed-source `.py` exists in any built wheel | wheel leaks source |
-| 5 | Each closed-source dotted module has a `.so` / `.pyd` in the wheel | import fails for users |
-| 6 | (manual review) `.pyi` carries a `FINGERPRINT:` marker | plagiarism evidence lost |
-| 7 | (manual review) `LICENSE` is BSL 1.1 and the Change Date is in the future | legal layer broken |
+**`make verify` fails locally**
+Run `python -m compileall -q Modeling_Tool ExcelMaster Report` to see which
+file has a syntax error, then `python -m build --sdist --wheel` for packaging
+issues.
 
----
-
-## 7. Troubleshooting
-
-**`make compile` fails with `undeclared name not builtin: foo`**
-The `.py` is missing an `import`. Cython is stricter than Python — fix the
-import; pure-Python execution would have hit `NameError` at runtime anyway.
-
-**Stub file doesn't show new method in IDE**
-You probably forgot `make stub` after changing a class signature. Stubs are
-regenerated from current `.py` AST.
-
-**`pip install -e .` builds, but `import` finds the old `.so`**
-Run `make clean && make install` — stale `.so` from a previous Python version
-is being picked up.
-
-**Wheel verification fails in CI but local `make verify` passes**
-`make verify` without a wheel only runs invariants 1–3. CI also runs 4–5 on
-the actually-built wheel. Run `make build && make verify` locally to reproduce.
-
-**`tests` workflow fails on a fresh PR for no obvious reason**
-Check whether you're hitting a known dependency-matrix issue. The `bleeding`
-matrix sometimes catches upstream regressions; verify against `modern` and
-`legacy` first.
+**`tests` workflow fails on a fresh PR**
+Check whether you're hitting a known dependency-matrix issue. Compare against
+`modern` and `legacy` matrices in
+[.github/workflows/tests.yml](.github/workflows/tests.yml).
 
 ---
 
-## 8. License & contact
+## 7. License & contact
 
 - **License**: [BSL 1.1](LICENSE). Production use within a company is permitted;
   redistribution / SaaS / commercial competing offerings require a separate

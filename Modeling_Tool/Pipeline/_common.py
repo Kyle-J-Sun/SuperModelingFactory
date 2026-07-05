@@ -1,12 +1,43 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
+
+_QUERY_COLUMN_RE = re.compile(r"(?<!['\"])\b([A-Za-z_][\w]*)\b(?![\'\"])")
+_QUERY_RESERVED = frozenset(
+    {
+        "and",
+        "or",
+        "not",
+        "True",
+        "False",
+        "None",
+        "in",
+        "is",
+        "where",
+        "if",
+        "else",
+        "lambda",
+        "abs",
+        "all",
+        "any",
+        "max",
+        "min",
+        "sum",
+        "len",
+        "round",
+        "float",
+        "int",
+        "str",
+        "bool",
+    }
+)
 
 
 def make_dirs(*paths: str | os.PathLike | None) -> None:
@@ -27,6 +58,83 @@ def merge_dict(base: Mapping[str, Any] | None, override: Mapping[str, Any] | Non
     merged = dict(base or {})
     merged.update(dict(override or {}))
     return merged
+
+
+def query_referenced_columns(expr: str) -> set[str]:
+    """Return identifier-like column names referenced in a pandas query expression."""
+    if not expr or not str(expr).strip():
+        return set()
+    return {
+        match.group(1)
+        for match in _QUERY_COLUMN_RE.finditer(str(expr))
+        if match.group(1) not in _QUERY_RESERVED
+    }
+
+
+def validate_woe_fit_query_syntax(data: pd.DataFrame, query: str) -> None:
+    """Raise ValueError when a woe_fit_query expression is syntactically invalid."""
+    if not query:
+        return
+    sample = data.head(min(100, len(data)))
+    if sample.empty:
+        raise ValueError("woe_fit_query cannot be validated on an empty dataset.")
+    try:
+        sample.query(query, engine="python")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid woe_fit_query syntax: {query!r}") from exc
+    except Exception as exc:
+        raise ValueError(f"woe_fit_query failed on sample data: {query!r} ({exc})") from exc
+
+
+def validate_woe_fit_query_columns(
+    query: str,
+    available_cols: Iterable[str],
+    *,
+    context: str = "dataset",
+) -> None:
+    """Raise KeyError when query references columns missing from available_cols."""
+    if not query:
+        return
+    available = set(available_cols)
+    missing = sorted(query_referenced_columns(query) - available)
+    if missing:
+        raise KeyError(
+            f"woe_fit_query references missing columns in {context}: {missing}. "
+            "Add them to the input data, batch_base_cols, or population_dims."
+        )
+
+
+def apply_woe_fit_query(
+    train: pd.DataFrame,
+    query: str | None,
+    *,
+    target: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any] | None]:
+    """Filter WOE fit rows via pandas query and return an audit row for refine_summary."""
+    if not query:
+        return train, None
+    n_before = len(train)
+    try:
+        filtered = train.query(query, engine="python").copy()
+    except Exception as exc:
+        audit = {
+            "target": target,
+            "step": "fit_filter",
+            "status": "error",
+            "query": query,
+            "n_before": n_before,
+            "error": repr(exc),
+        }
+        return train, audit
+    audit = {
+        "target": target,
+        "step": "fit_filter",
+        "status": "ok",
+        "query": query,
+        "n_before": n_before,
+        "n_after": len(filtered),
+    }
+    return filtered, audit
 
 
 def dataclass_to_dict(obj: Any) -> dict[str, Any]:

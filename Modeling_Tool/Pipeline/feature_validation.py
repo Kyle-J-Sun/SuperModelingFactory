@@ -8,7 +8,14 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from ._common import as_list, make_dirs, safe_to_csv
+from ._common import (
+    apply_woe_fit_query,
+    as_list,
+    make_dirs,
+    safe_to_csv,
+    validate_woe_fit_query_columns,
+    validate_woe_fit_query_syntax,
+)
 
 
 @dataclass
@@ -47,6 +54,7 @@ class FeatureValidationPipelineConfig:
     )
 
     woe_enabled: bool = True
+    woe_fit_query: str | None = None
     woe_engine: str = "monotone"
     woe_params: dict[str, Any] = field(
         default_factory=lambda: {"nbins": 10, "equal_freq": True, "min_bin_prop": 0.05}
@@ -257,6 +265,8 @@ class FeatureValidationPipeline:
         self._validate_batch_config(new_features)
         feature_batches = self._make_feature_batches(new_features)
         base_cols = self._resolve_batch_base_cols(header, incumbent_features, target_cols)
+        if cfg.woe_fit_query:
+            validate_woe_fit_query_columns(cfg.woe_fit_query, base_cols, context="CSV batch base columns")
 
         base_df = self._read_csv(csv_path, usecols=base_cols).copy()
         base_df["_smf_batch_row_id"] = np.arange(len(base_df))
@@ -777,6 +787,9 @@ class FeatureValidationPipeline:
             raise ValueError("psi_reference_dataset must be one of ins/oos/oot/external")
         if cfg.psi_reference_dataset == "external" and cfg.psi_reference_data is None:
             raise ValueError("psi_reference_data is required when psi_reference_dataset='external'")
+        if cfg.woe_fit_query:
+            validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
+            validate_woe_fit_query_syntax(data, cfg.woe_fit_query)
 
     def _resolve_new_features(self, data: pd.DataFrame) -> list[str]:
         cfg = self.config
@@ -979,6 +992,9 @@ class FeatureValidationPipeline:
         refine_rows = []
         for target in target_cols:
             train = splits["ins"][splits["ins"][target].notna()].copy()
+            train, fit_filter_row = apply_woe_fit_query(train, cfg.woe_fit_query, target=target)
+            if fit_filter_row is not None:
+                refine_rows.append(fit_filter_row)
             if len(train) < max(10, cfg.min_group_size):
                 refine_rows.append({"target": target, "step": "fit", "status": "skipped_min_group_size", "n": len(train)})
                 continue

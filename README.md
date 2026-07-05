@@ -57,7 +57,10 @@ SuperModelingFactory/
 │   ├── Feature/            #   特征分析：分布偏移、PSI、相关性过滤
 │   ├── Model/              #   模型训练：LR、LightGBM、XGBoost、变量选择
 │   ├── Eval/               #   模型评估：Gains 表、ROC/KS、性能汇总
-│   └── Sample/             #   样本管理：切分、分层、拒绝推断、分布适配
+│   ├── Sample/             #   样本管理：切分、分层、拒绝推断、分布适配
+│   ├── Explainability/     #   模型解释：SHAP、LIME、PDP、ICE、ALE、Owen
+│   ├── Pipeline/           #   一键流水线：特征验收、信用建模、拒绝推断等
+│   └── UAT/                #   线上线下分数一致性校验
 ├── ExcelMaster/            # Excel 报告引擎
 │   ├── ExcelFormatTool.py  #   格式定义（50+ 预设单元格格式）
 │   ├── ExcelMaster.py      #   核心引擎（光标流式写入、图表、条件格式）
@@ -205,9 +208,9 @@ em.close_workbook()
 
 ## 版本
 
-- **Version**: 0.3.5
+- **Version**: 0.3.6
 - **Author**: Jingkai Sun
 
 ## 许可证
 
-内部项目，仅供团队使用。
+本项目采用 **Business Source License 1.1**（Change Date **2030-06-24**）。详见文首 [许可证](#许可证) 一节与 [LICENSE](LICENSE) 全文。

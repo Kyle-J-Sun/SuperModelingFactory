@@ -9,11 +9,14 @@ import pandas as pd
 
 from ._common import (
     add_dataset_with_optional_weight,
+    apply_woe_fit_query,
     as_list,
     make_dirs,
     merge_dict,
     predict_positive,
     safe_to_csv,
+    validate_woe_fit_query_columns,
+    validate_woe_fit_query_syntax,
     write_basic_excel,
 )
 
@@ -48,6 +51,8 @@ class CreditModelPipelineConfig:
         }
     )
     woe_engine: str = "equal_freq"
+    woe_fit_query: str | None = None
+    extra_eval_datasets: dict[str, pd.DataFrame] | None = None
     woe_params: dict[str, Any] = field(
         default_factory=lambda: {"nbins": 10, "equal_freq": True, "min_bin_prop": 0.05}
     )
@@ -208,7 +213,11 @@ class CreditModelPipeline:
         models = self._train_models(model_inputs)
 
         optuna_results = self._run_optuna(model_inputs)
-        perf_results = self._evaluate_models(model_inputs, models)
+        perf_results = self._evaluate_models(
+            model_inputs,
+            models,
+            woe_artifacts.get("extra_eval"),
+        )
         explain_outputs = self._run_explainability(model_inputs, models)
         model_paths: dict[str, str] = {}
         artifact_paths: dict[str, str] = {}
@@ -310,6 +319,23 @@ class CreditModelPipeline:
                 raise ValueError("warm_start_score_type must be 'probability' or 'log_odds'")
             if cfg.warm_start_on_unsupported not in {"skip", "raise"}:
                 raise ValueError("warm_start_on_unsupported must be 'skip' or 'raise'")
+        if cfg.woe_fit_query:
+            validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
+            validate_woe_fit_query_syntax(data, cfg.woe_fit_query)
+        if cfg.extra_eval_datasets:
+            reserved = {"ins", "oos", "oot"}
+            conflicts = sorted(set(cfg.extra_eval_datasets) & reserved)
+            if conflicts:
+                raise ValueError(
+                    f"extra_eval_datasets names cannot conflict with split names {sorted(reserved)}: {conflicts}"
+                )
+            for name, extra_df in cfg.extra_eval_datasets.items():
+                if cfg.target_col not in extra_df.columns:
+                    raise KeyError(f"extra_eval_datasets[{name!r}] missing target_col {cfg.target_col!r}")
+                if cfg.warm_start_enabled and cfg.warm_start_score_col and cfg.warm_start_score_col not in extra_df.columns:
+                    raise KeyError(
+                        f"extra_eval_datasets[{name!r}] missing warm_start_score_col {cfg.warm_start_score_col!r}"
+                    )
 
     def _gbm_weight_kwargs(self, train: pd.DataFrame, val: pd.DataFrame) -> dict[str, Any]:
         cfg = self.config
@@ -466,6 +492,24 @@ class CreditModelPipeline:
         summary["final_features"] = list(current)
         return summary, list(current)
 
+    def _transform_extra_eval_datasets(
+        self,
+        transform_fn: Any,
+        feature_cols: list[str],
+        *,
+        woe_suffix: str | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        cfg = self.config
+        if not cfg.extra_eval_datasets:
+            return {}
+        transformed: dict[str, pd.DataFrame] = {}
+        for name, df in cfg.extra_eval_datasets.items():
+            if woe_suffix is not None:
+                transformed[name] = transform_fn(df, varlist=feature_cols, suffix=woe_suffix)
+            else:
+                transformed[name] = transform_fn(df)
+        return transformed
+
     def _fit_woe(self, splits: dict[str, pd.DataFrame], feature_cols: list[str]) -> dict[str, Any]:
         from Modeling_Tool import MonotoneWOEBinner, WOE_Master
         from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
@@ -475,6 +519,11 @@ class CreditModelPipeline:
         woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
         graph_dir = str(Path(cfg.output_dir) / "figs" / "woe")
         woe_features = [f"{col}{woe_suffix}" for col in feature_cols]
+        fit_ins, _ = apply_woe_fit_query(
+            splits["ins"],
+            cfg.woe_fit_query,
+            target=cfg.target_col,
+        )
 
         if cfg.woe_engine.lower() == "monotone":
             params = merge_dict(
@@ -486,7 +535,7 @@ class CreditModelPipeline:
                 cfg.monotone_woe_params,
             )
             binner = MonotoneWOEBinner(**params)
-            binner.fit(splits["ins"], chi2_binning=bool(cfg.monotone_woe_params.get("chi2_binning", False)))
+            binner.fit(fit_ins, chi2_binning=bool(cfg.monotone_woe_params.get("chi2_binning", False)))
             if cfg.write_outputs and cfg.plot_outputs:
                 binner.plot_woe_graph(graph_path=str(Path(cfg.output_dir) / "figs" / "mono_woe"))
             adapter = as_woe_engine(binner, woe_suffix=woe_suffix)
@@ -496,9 +545,14 @@ class CreditModelPipeline:
             }
             woe_table = adapter.get_woe_table(varlist=feature_cols)
             engine = adapter
+            extra_eval = self._transform_extra_eval_datasets(
+                adapter.transform,
+                feature_cols,
+                woe_suffix=woe_suffix,
+            )
         else:
             master = WOE_Master(
-                train_data=splits["ins"],
+                train_data=fit_ins,
                 varlist=feature_cols,
                 dep=cfg.target_col,
                 graph_save_dir=graph_dir,
@@ -518,13 +572,18 @@ class CreditModelPipeline:
                     dirname="overall",
                     varlist=feature_cols,
                 )
-            woe_table = get_overall_woe_table(master, splits["ins"], varlist=feature_cols)
+            woe_table = get_overall_woe_table(master, fit_ins, varlist=feature_cols)
             engine = master
+            extra_eval = self._transform_extra_eval_datasets(master.transform, feature_cols)
 
         if cfg.warm_start_enabled and cfg.warm_start_score_col:
             for name, df in woe_splits.items():
                 if cfg.warm_start_score_col not in df.columns:
                     df[cfg.warm_start_score_col] = splits[name][cfg.warm_start_score_col].to_numpy()
+            for name, df in extra_eval.items():
+                if cfg.warm_start_score_col not in df.columns:
+                    source = cfg.extra_eval_datasets[name]
+                    df[cfg.warm_start_score_col] = source[cfg.warm_start_score_col].to_numpy()
 
         return {
             "engine": engine,
@@ -533,6 +592,7 @@ class CreditModelPipeline:
             "woe_features": woe_features,
             "woe_suffix": woe_suffix,
             "splits": woe_splits,
+            "extra_eval": extra_eval,
             "woe_table": woe_table,
         }
 
@@ -873,13 +933,20 @@ class CreditModelPipeline:
         self,
         model_inputs: dict[str, dict[str, Any]],
         models: dict[str, tuple[Any, Any, list[str]]],
+        extra_eval_splits: dict[str, pd.DataFrame] | None = None,
     ) -> dict[str, pd.DataFrame]:
         from Modeling_Tool import PerformanceEvaluator
 
         cfg = self.config
         results = {}
+        extra_eval_splits = extra_eval_splits or {}
         for name, (wrapper, _, feature_cols) in models.items():
             splits = model_inputs[name]["splits"]
+            source = str(model_inputs[name].get("source", "woe")).lower()
+            if source == "raw" and cfg.extra_eval_datasets:
+                model_extra = {key: df.copy() for key, df in cfg.extra_eval_datasets.items()}
+            else:
+                model_extra = extra_eval_splits
             evaluator = PerformanceEvaluator(
                 tgt_name=cfg.target_col,
                 scr_name=f"pred_{name}",
@@ -887,7 +954,8 @@ class CreditModelPipeline:
                 min_bin_prop=cfg.perf_min_bin_prop,
                 equal_freq=True,
             )
-            for ds_name, df in splits.items():
+            eval_splits = {**splits, **model_extra}
+            for ds_name, df in eval_splits.items():
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
                 add_dataset_with_optional_weight(evaluator, ds_name, scored, weight_col=cfg.weight_col)
