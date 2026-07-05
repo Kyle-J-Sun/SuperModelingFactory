@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import numpy as np
 import pandas as pd
@@ -13,14 +13,15 @@ from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 
 from .Weighted_Screen import (
     WeightedScreenResult,
+    _apply_stage_keep,
     _corr_dedup_weighted,
     _legacy_unweighted_screen,
     _psi_from_distributions,
     _resolve_splits,
     _summary_row,
     _weighted_bin_distribution,
+    _weighted_corr_for_screen,
     _weighted_iv_from_assigned_bins,
-    _weighted_pearson_corr_matrix,
     _weighted_screen_impl,
 )
 
@@ -55,6 +56,8 @@ class FeatureScreenConfig:
     corr_threshold: float = 0.75
     corr_max_iterations: int = 10
     corr_use_woe_bins: bool = False
+    corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise"
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn"
     woe_engine: str = "equal_freq"
     woe_fit_query: str | None = None
     woe_params: dict[str, Any] = field(
@@ -100,6 +103,8 @@ def screen_config_from_mapping(
         corr_threshold=float(cfg.get("corr_threshold", 0.75)),
         corr_max_iterations=int(cfg.get("corr_max_iterations", 10)),
         corr_use_woe_bins=bool(cfg.get("corr_use_woe_bins", False)),
+        corr_nan_policy=str(cfg.get("corr_nan_policy", "pairwise")),  # type: ignore[arg-type]
+        on_empty_stage=str(cfg.get("on_empty_stage", "keep_all_warn")),  # type: ignore[arg-type]
         woe_engine=str(woe_engine or cfg.get("woe_engine", "equal_freq")),
         woe_fit_query=woe_fit_query if woe_fit_query is not None else cfg.get("woe_fit_query"),
         woe_params=dict(FeatureScreenConfig().woe_params | dict(woe_params or cfg.get("woe_params") or {})),
@@ -236,7 +241,10 @@ def _woe_bins_unweighted_screen(
             psi_table["psi_max"] = psi_table[compare_cols].max(axis=1, skipna=True)
             keep = psi_table.loc[psi_table["psi_max"] < config.psi_threshold, "var"].tolist()
             n_before = len(current)
-            current = keep or current
+            current = _apply_stage_keep(
+                current, keep, "psi", summary_rows,
+                on_empty_stage=config.on_empty_stage, threshold=config.psi_threshold,
+            )
             summary_rows.append(_summary_row("psi", n_before, len(current), config.psi_threshold, None))
 
     iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
@@ -268,7 +276,10 @@ def _woe_bins_unweighted_screen(
             iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
             keep = iv.loc[iv["iv"] >= config.iv_threshold, "var"].tolist()
             n_before = len(current)
-            current = keep or current
+            current = _apply_stage_keep(
+                current, keep, "iv", summary_rows,
+                on_empty_stage=config.on_empty_stage, threshold=config.iv_threshold,
+            )
             summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, None))
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
@@ -360,7 +371,11 @@ def _weighted_woe_bins_screen(
             psi_table["psi_max"] = psi_table[compare_cols].max(axis=1, skipna=True)
             keep = psi_table.loc[psi_table["psi_max"] < config.psi_threshold, "var"].tolist()
             n_before = len(current)
-            current = [v for v in current if v in keep] or current
+            current = _apply_stage_keep(
+                current, keep, "psi", summary_rows,
+                on_empty_stage=config.on_empty_stage, weight_col=weight_col,
+                threshold=config.psi_threshold, intersect=True,
+            )
             summary_rows.append(_summary_row("psi", n_before, len(current), config.psi_threshold, weight_col))
         else:
             psi_table["psi_max"] = pd.Series(dtype=float)
@@ -387,15 +402,24 @@ def _weighted_woe_bins_screen(
         if not iv_table.empty:
             keep = iv_table.loc[iv_table["iv_weighted"] >= config.iv_threshold, "var"].tolist()
             n_before = len(current)
-            current = [v for v in current if v in keep] or current
+            current = _apply_stage_keep(
+                current, keep, "iv", summary_rows,
+                on_empty_stage=config.on_empty_stage, weight_col=weight_col,
+                threshold=config.iv_threshold, intersect=True,
+            )
             summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, weight_col))
     else:
         iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
     if config.corr_enabled and len(current) > 1:
-        X = ins[current].astype(float).to_numpy()
-        corr = _weighted_pearson_corr_matrix(X, w_ins)
+        corr = _weighted_corr_for_screen(
+            ins, current, w_ins,
+            corr_use_woe_bins=config.corr_use_woe_bins,
+            corr_nan_policy=config.corr_nan_policy,
+            adapter=adapter,
+            binner=binner,
+        )
         iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
         n_before = len(current)
         current, corr_dropped = _corr_dedup_weighted(
@@ -457,6 +481,10 @@ def feature_screen(
             corr_max_iterations=cfg.corr_max_iterations,
             content=cfg.content,
             precision=cfg.precision,
+            corr_use_woe_bins=cfg.corr_use_woe_bins,
+            corr_nan_policy=cfg.corr_nan_policy,
+            on_empty_stage=cfg.on_empty_stage,
+            prefit_woe_engine=prefit_woe_engine,
         )
 
     if use_woe_bins or prefit_woe_engine is not None:
@@ -486,6 +514,7 @@ def feature_screen(
         plot_path=cfg.plot_path,
         plot_outputs=cfg.plot_outputs,
         iv_equal_freq=cfg.iv_equal_freq,
+        on_empty_stage=cfg.on_empty_stage,
     )
 
 

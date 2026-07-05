@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -185,21 +186,178 @@ def _weighted_iv_for_var(
     return iv, len(rows), missing_rate
 
 
-def _weighted_pearson_corr_matrix(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+def _weighted_median(x: np.ndarray, w: np.ndarray) -> float:
+    mask = np.isfinite(x)
+    if not mask.any():
+        return np.nan
+    xv = x[mask].astype(float)
+    wv = w[mask].astype(float)
+    order = np.argsort(xv)
+    xv = xv[order]
+    wv = wv[order]
+    cumw = np.cumsum(wv)
+    total = float(cumw[-1])
+    if total <= 0:
+        return float(np.median(xv))
+    idx = min(int(np.searchsorted(cumw, total / 2.0, side="right")), len(xv) - 1)
+    return float(xv[idx])
+
+
+def _weighted_corr_pair(xi: np.ndarray, xj: np.ndarray, w: np.ndarray) -> float:
+    mask = np.isfinite(xi) & np.isfinite(xj)
+    if mask.sum() < 2:
+        return 0.0
+    wi = w[mask].astype(float)
+    xi = xi[mask].astype(float)
+    xj = xj[mask].astype(float)
+    w_sum = wi.sum()
+    if w_sum <= 0:
+        c = np.corrcoef(xi, xj)
+        return float(c[0, 1]) if np.isfinite(c[0, 1]) else 0.0
+    w_norm = wi / w_sum
+    mi = np.average(xi, weights=w_norm)
+    mj = np.average(xj, weights=w_norm)
+    di = xi - mi
+    dj = xj - mj
+    cov = np.average(di * dj, weights=w_norm)
+    si = np.sqrt(np.average(di * di, weights=w_norm))
+    sj = np.sqrt(np.average(dj * dj, weights=w_norm))
+    if si == 0 or sj == 0:
+        return 0.0
+    return float(cov / (si * sj))
+
+
+def _weighted_pearson_corr_matrix(
+    X: np.ndarray,
+    w: np.ndarray,
+    *,
+    nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+) -> np.ndarray:
     if X.shape[1] == 0:
         return np.empty((0, 0))
     w = np.asarray(w, dtype=float)
+    k = X.shape[1]
+
+    if nan_policy == "raise" and np.any(~np.isfinite(X)):
+        raise ValueError(
+            "weighted correlation input contains NaN; set corr_nan_policy to "
+            "'pairwise' or 'median_fill' to proceed"
+        )
+
+    nan_mask = ~np.isfinite(X)
+    nan_fraction = float(nan_mask.sum()) / float(X.size) if X.size else 0.0
+
+    if nan_policy == "pairwise":
+        corr = np.eye(k, dtype=float)
+        insufficient_pairs = 0
+        total_pairs = k * (k - 1) // 2
+        for i in range(k):
+            for j in range(i + 1, k):
+                c = _weighted_corr_pair(X[:, i], X[:, j], w)
+                corr[i, j] = c
+                corr[j, i] = c
+                overlap = int((np.isfinite(X[:, i]) & np.isfinite(X[:, j])).sum())
+                if overlap < 2:
+                    insufficient_pairs += 1
+        if total_pairs > 0 and insufficient_pairs / total_pairs > 0.01:
+            warnings.warn(
+                f"[feature_screen] weighted corr: >1% of feature pairs have insufficient "
+                f"overlapping observations ({insufficient_pairs}/{total_pairs})",
+                stacklevel=3,
+            )
+        return corr
+
+    X_use = X.astype(float).copy()
+    if nan_policy == "median_fill":
+        for j in range(k):
+            col = X_use[:, j]
+            bad = ~np.isfinite(col)
+            if bad.any():
+                fill = _weighted_median(col, w)
+                if np.isfinite(fill):
+                    col[bad] = fill
+                X_use[:, j] = col
+
     w_sum = w.sum()
     if w_sum <= 0:
-        return np.corrcoef(X, rowvar=False)
-    w_norm = w / w_sum
-    mean = np.average(X, axis=0, weights=w_norm)
-    Xc = X - mean
-    cov = np.cov(Xc, rowvar=False, aweights=w, ddof=0)
-    std = np.sqrt(np.diag(cov))
-    std[std == 0] = np.nan
-    corr = cov / np.outer(std, std)
-    return np.nan_to_num(corr, nan=0.0)
+        out = np.corrcoef(X_use, rowvar=False)
+        out = np.nan_to_num(out, nan=0.0)
+    else:
+        w_norm = w / w_sum
+        mean = np.average(X_use, axis=0, weights=w_norm)
+        Xc = X_use - mean
+        cov = np.cov(Xc, rowvar=False, aweights=w, ddof=0)
+        std = np.sqrt(np.diag(cov))
+        std[std == 0] = np.nan
+        out = cov / np.outer(std, std)
+        out = np.nan_to_num(out, nan=0.0)
+
+    if nan_fraction > 0.01:
+        warnings.warn(
+            f"[feature_screen] weighted corr: {nan_fraction:.1%} of matrix entries were NaN "
+            f"before computation (policy={nan_policy!r})",
+            stacklevel=3,
+        )
+    return out
+
+
+def _weighted_corr_for_screen(
+    ins: pd.DataFrame,
+    current: list[str],
+    w_ins: np.ndarray,
+    *,
+    corr_use_woe_bins: bool,
+    corr_nan_policy: Literal["pairwise", "median_fill", "raise"],
+    adapter: Any | None = None,
+    binner: Any | None = None,
+) -> np.ndarray:
+    """Build weighted correlation matrix for screening (WOE or raw-value path)."""
+    from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+    if corr_use_woe_bins:
+        eng = adapter if adapter is not None else (as_woe_engine(binner) if binner is not None else None)
+        if eng is not None:
+            suffix = getattr(eng, "woe_suffix", "_woe")
+            woe_ins = eng.transform(ins, varlist=current)
+            cols = [f"{v}{suffix}" for v in current if f"{v}{suffix}" in woe_ins.columns]
+            if cols:
+                X = woe_ins[cols].to_numpy(dtype=float)
+                return _weighted_pearson_corr_matrix(X, w_ins, nan_policy="pairwise")
+    X = ins[current].astype(float).to_numpy()
+    return _weighted_pearson_corr_matrix(X, w_ins, nan_policy=corr_nan_policy)
+
+
+def _apply_stage_keep(
+    current: list[str],
+    keep: list[str],
+    stage: str,
+    summary_rows: list[dict],
+    *,
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+    weight_col: str | None = None,
+    threshold: Any = None,
+    intersect: bool = False,
+) -> list[str]:
+    if intersect:
+        keep_set = set(keep)
+        new_current = [v for v in current if v in keep_set]
+    else:
+        new_current = list(keep) if keep else []
+    if new_current:
+        return new_current
+    if on_empty_stage == "raise":
+        raise ValueError(
+            f"feature screen stage {stage!r} eliminated all {len(current)} variables; "
+            f"on_empty_stage='raise'"
+        )
+    warnings.warn(
+        f"[feature_screen] stage {stage!r} 全军覆没, 按 keep_all_warn 保留全部 {len(current)} 个",
+        stacklevel=3,
+    )
+    summary_rows.append(
+        _summary_row(f"{stage}_fallback", len(current), len(current), threshold, weight_col)
+    )
+    return current
 
 
 def _high_corr_pairs(varlist: list[str], corr: np.ndarray, threshold: float) -> pd.DataFrame:
@@ -280,6 +438,7 @@ def _legacy_unweighted_screen(
     plot_path: str | None,
     plot_outputs: bool,
     iv_equal_freq: bool = True,
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
 ) -> WeightedScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
@@ -314,7 +473,10 @@ def _legacy_unweighted_screen(
             psi_table["psi_max"] = psi_table[compare_cols].max(axis=1, skipna=True)
             keep = psi_table.loc[psi_table["psi_max"] < psi_threshold, "var"].tolist()
             n_before = len(current)
-            current = keep or current
+            current = _apply_stage_keep(
+                current, keep, "psi", summary_rows,
+                on_empty_stage=on_empty_stage, threshold=psi_threshold,
+            )
             summary_rows.append(_summary_row("psi", n_before, len(current), psi_threshold, None))
 
     iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
@@ -342,7 +504,10 @@ def _legacy_unweighted_screen(
         iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
         keep = iv.loc[iv["iv"] >= iv_threshold, "var"].tolist()
         n_before = len(current)
-        current = keep or current
+        current = _apply_stage_keep(
+            current, keep, "iv", summary_rows,
+            on_empty_stage=on_empty_stage, threshold=iv_threshold,
+        )
         summary_rows.append(_summary_row("iv", n_before, len(current), iv_threshold, None))
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
@@ -384,6 +549,10 @@ def _weighted_screen_impl(
     corr_max_iterations: int,
     content: float,
     precision: int,
+    corr_use_woe_bins: bool = False,
+    corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+    prefit_woe_engine: Any | None = None,
 ) -> WeightedScreenResult:
     ins = splits["ins"]
     oos = splits["oos"]
@@ -432,7 +601,11 @@ def _weighted_screen_impl(
             psi_table["psi_max"] = psi_table[compare_cols].max(axis=1, skipna=True)
             keep = psi_table.loc[psi_table["psi_max"] < psi_threshold, "var"].tolist()
             n_before = len(current)
-            current = [v for v in current if v in keep] or current
+            current = _apply_stage_keep(
+                current, keep, "psi", summary_rows,
+                on_empty_stage=on_empty_stage, weight_col=weight_col,
+                threshold=psi_threshold, intersect=True,
+            )
             summary_rows.append(_summary_row("psi", n_before, len(current), psi_threshold, weight_col))
         else:
             psi_table["psi_max"] = pd.Series(dtype=float)
@@ -464,15 +637,23 @@ def _weighted_screen_impl(
         if not iv_table.empty:
             keep = iv_table.loc[iv_table["iv_weighted"] >= iv_threshold, "var"].tolist()
             n_before = len(current)
-            current = [v for v in current if v in keep] or current
+            current = _apply_stage_keep(
+                current, keep, "iv", summary_rows,
+                on_empty_stage=on_empty_stage, weight_col=weight_col,
+                threshold=iv_threshold, intersect=True,
+            )
             summary_rows.append(_summary_row("iv", n_before, len(current), iv_threshold, weight_col))
     else:
         iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
     if corr_enabled and len(current) > 1:
-        X = ins[current].astype(float).to_numpy()
-        corr = _weighted_pearson_corr_matrix(X, w_ins)
+        corr = _weighted_corr_for_screen(
+            ins, current, w_ins,
+            corr_use_woe_bins=corr_use_woe_bins,
+            corr_nan_policy=corr_nan_policy,
+            binner=prefit_woe_engine,
+        )
         iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
         n_before = len(current)
         current, corr_dropped = _corr_dedup_weighted(
@@ -521,6 +702,8 @@ def weighted_feature_screen(
     woe_params: dict[str, Any] | None = None,
     monotone_woe_params: dict[str, Any] | None = None,
     prefit_woe_engine: Any | None = None,
+    corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
 ) -> WeightedScreenResult:
     """Run PSI -> IV -> correlation screening with optional sample weights.
 
@@ -563,6 +746,8 @@ def weighted_feature_screen(
         content=content,
         precision=precision,
         min_bin_prop=min_bin_prop,
+        corr_nan_policy=corr_nan_policy,
+        on_empty_stage=on_empty_stage,
     )
     return feature_screen_from_dataframe(
         data,
