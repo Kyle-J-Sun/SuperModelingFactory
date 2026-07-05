@@ -429,17 +429,10 @@ class CreditModelPipeline:
         splits: dict[str, pd.DataFrame],
         feature_cols: list[str],
     ) -> tuple[dict[str, Any], list[str]]:
-        from Modeling_Tool.Feature.Weighted_Screen import weighted_feature_screen
+        from Modeling_Tool.Feature.Feature_Screen import feature_screen, screen_config_from_mapping
 
         cfg = self.config
         fs_cfg = cfg.feature_selection
-        split_col = "_smf_split"
-        screen_frames = []
-        for name, df in splits.items():
-            part = df.copy()
-            part[split_col] = name
-            screen_frames.append(part)
-        screen_data = pd.concat(screen_frames, ignore_index=True)
 
         plot_path = None
         if fs_cfg.get("iv_enabled", True):
@@ -447,28 +440,24 @@ class CreditModelPipeline:
             if cfg.write_outputs and cfg.plot_outputs:
                 make_dirs(plot_path, Path(plot_path) / "overall")
 
+        screen_config = screen_config_from_mapping(
+            fs_cfg,
+            woe_engine=cfg.woe_engine,
+            woe_fit_query=cfg.woe_fit_query,
+            woe_params=cfg.woe_params,
+            monotone_woe_params=cfg.monotone_woe_params,
+            plot_path=plot_path,
+            plot_outputs=bool(cfg.write_outputs and cfg.plot_outputs),
+        )
+
         summary: dict[str, Any] = {"initial_features": list(feature_cols)}
         try:
-            result = weighted_feature_screen(
-                data=screen_data,
-                feature_cols=feature_cols,
-                target_col=cfg.target_col,
-                split_col=split_col,
+            result = feature_screen(
+                splits,
+                feature_cols,
+                cfg.target_col,
                 weight_col=cfg.weight_col,
-                psi_enabled=bool(fs_cfg.get("psi_enabled", True)),
-                psi_threshold=float(fs_cfg.get("psi_threshold", 0.2)),
-                psi_compare_splits=list(fs_cfg.get("psi_compare_splits", ["oos"])),
-                iv_enabled=bool(fs_cfg.get("iv_enabled", True)),
-                iv_threshold=float(fs_cfg.get("iv_threshold", 0.02)),
-                corr_enabled=bool(fs_cfg.get("corr_enabled", True)),
-                corr_threshold=float(fs_cfg.get("corr_threshold", 0.75)),
-                iv_bins=int(fs_cfg.get("iv_nbins", 10)),
-                iv_min_bin_prop=float(fs_cfg.get("iv_min_bin_prop", 0.05)),
-                corr_max_iterations=int(fs_cfg.get("corr_max_iterations", 10)),
-                psi_buckets=int(fs_cfg.get("psi_buckets", fs_cfg.get("iv_nbins", 10))),
-                plot_path=plot_path,
-                plot_outputs=bool(cfg.write_outputs and cfg.plot_outputs),
-                iv_equal_freq=bool(fs_cfg.get("iv_equal_freq", True)),
+                config=screen_config,
             )
             summary = self._screen_result_to_summary(result, feature_cols)
             return summary, list(result.selected_features)

@@ -108,8 +108,9 @@ def _association_matrix(frame: pd.DataFrame, corr_method: str = "spearman") -> p
         assoc = frame.corr(method=corr_method).abs()
         assoc = assoc.reindex(index=frame.columns, columns=frame.columns).fillna(0.0)
     assoc = assoc.clip(lower=0.0, upper=1.0)
-    np.fill_diagonal(assoc.values, 1.0)
-    return assoc
+    arr = assoc.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(arr, 1.0)
+    return pd.DataFrame(arr, index=assoc.index, columns=assoc.columns)
 
 
 def _as_numeric_frame(X: pd.DataFrame) -> pd.DataFrame:
@@ -136,8 +137,9 @@ def _correlation_distance(X: pd.DataFrame, corr_method: str = "spearman") -> pd.
     frame = _as_numeric_frame(X)
     assoc = _association_matrix(frame, corr_method=corr_method)
     dist = 1.0 - assoc
-    np.fill_diagonal(dist.values, 0.0)
-    return dist
+    arr = dist.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(arr, 0.0)
+    return pd.DataFrame(arr, index=dist.index, columns=dist.columns)
 
 
 def compute_correlation_linkage(

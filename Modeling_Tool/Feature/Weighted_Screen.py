@@ -482,6 +482,14 @@ def weighted_feature_screen(
     plot_path: str | None = None,
     plot_outputs: bool = False,
     iv_equal_freq: bool = True,
+    psi_use_woe_bins: bool = False,
+    iv_use_woe_bins: bool = False,
+    corr_use_woe_bins: bool = False,
+    woe_engine: str = "equal_freq",
+    woe_fit_query: str | None = None,
+    woe_params: dict[str, Any] | None = None,
+    monotone_woe_params: dict[str, Any] | None = None,
+    prefit_woe_engine: Any | None = None,
 ) -> WeightedScreenResult:
     """Run PSI -> IV -> correlation screening with optional sample weights.
 
@@ -490,6 +498,8 @@ def weighted_feature_screen(
     ``CreditModelPipeline`` (IV uses tree binning via ``VarExtractionInsights``).
     Weighted screening uses equal-frequency bins on weighted quantiles.
     """
+    from .Feature_Screen import FeatureScreenConfig, feature_screen_from_dataframe
+
     if iv_min_bin_prop is None:
         iv_min_bin_prop = min_bin_prop
     if psi_buckets is None:
@@ -497,52 +507,38 @@ def weighted_feature_screen(
     if psi_compare_splits is None:
         psi_compare_splits = ["oos", "oot"]
 
-    exclude = {target_col, split_col}
-    if weight_col:
-        exclude.add(weight_col)
-    features = [c for c in feature_cols if c not in exclude and c in data.columns]
-
-    splits = _resolve_splits(data, split_col)
-
-    if weight_col is None:
-        return _legacy_unweighted_screen(
-            splits,
-            features,
-            target_col,
-            psi_enabled=psi_enabled,
-            psi_threshold=psi_threshold,
-            psi_compare_splits=list(psi_compare_splits),
-            iv_enabled=iv_enabled,
-            iv_threshold=iv_threshold,
-            iv_bins=iv_bins,
-            iv_min_bin_prop=iv_min_bin_prop,
-            corr_enabled=corr_enabled,
-            corr_threshold=corr_threshold,
-            corr_max_iterations=corr_max_iterations,
-            psi_buckets=psi_buckets,
-            plot_path=plot_path,
-            plot_outputs=plot_outputs,
-            iv_equal_freq=iv_equal_freq,
-        )
-
-    if weight_col not in data.columns:
-        raise KeyError(f"Missing weight_col {weight_col!r}")
-
-    return _weighted_screen_impl(
-        splits,
-        features,
-        target_col,
-        weight_col,
+    config = FeatureScreenConfig(
         psi_enabled=psi_enabled,
         psi_threshold=psi_threshold,
         psi_compare_splits=list(psi_compare_splits),
+        psi_buckets=psi_buckets,
+        psi_use_woe_bins=psi_use_woe_bins,
         iv_enabled=iv_enabled,
         iv_threshold=iv_threshold,
         iv_bins=iv_bins,
-        min_bin_prop=min_bin_prop,
+        iv_min_bin_prop=iv_min_bin_prop,
+        iv_equal_freq=iv_equal_freq,
+        iv_use_woe_bins=iv_use_woe_bins,
         corr_enabled=corr_enabled,
         corr_threshold=corr_threshold,
         corr_max_iterations=corr_max_iterations,
+        corr_use_woe_bins=corr_use_woe_bins,
+        woe_engine=woe_engine,
+        woe_fit_query=woe_fit_query,
+        woe_params=dict(woe_params or {}),
+        monotone_woe_params=dict(monotone_woe_params or {}),
+        plot_path=plot_path,
+        plot_outputs=plot_outputs,
         content=content,
         precision=precision,
+        min_bin_prop=min_bin_prop,
+    )
+    return feature_screen_from_dataframe(
+        data,
+        feature_cols,
+        target_col,
+        split_col,
+        weight_col=weight_col,
+        config=config,
+        prefit_woe_engine=prefit_woe_engine,
     )

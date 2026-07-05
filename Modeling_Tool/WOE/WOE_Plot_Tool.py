@@ -421,8 +421,7 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
     tbl = pd.DataFrame()
     for i in range(n):
         g = gs[i]
-        tbl.loc[:, g] = woe_grp_df.loc[woe_grp_df[grp_name] == g, "woe"]
-        tbl.loc[:, g] = [f"{x:.3f}" for x in tbl[g]]
+        tbl[g] = [f"{x:.3f}" for x in woe_grp_df.loc[woe_grp_df[grp_name] == g, "woe"]]
 
     # 绘制表格
     rowls = xticks_list

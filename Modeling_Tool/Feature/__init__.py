@@ -25,6 +25,14 @@ from .WOE_Engine_Feature_Patch import (
     CorrelationFilter,
 )
 
+from .Feature_Screen import (
+    FeatureScreenConfig,
+    FeatureScreenResult,
+    feature_screen,
+    feature_screen_from_dataframe,
+    fit_screening_woe_engine,
+    screen_config_from_mapping,
+)
 from .Weighted_Screen import (
     WeightedScreenResult,
     weighted_feature_screen,
@@ -42,6 +50,10 @@ __all__ = [
     # PSI_Tool
     'PSICalculator', 'calculate_psi', 'calculate_within_psi',
     'calculate_psi_within_dataset', 'calculate_multivar_psi_two_sets',
+
+    # Feature_Screen
+    'FeatureScreenConfig', 'FeatureScreenResult', 'feature_screen',
+    'feature_screen_from_dataframe', 'fit_screening_woe_engine', 'screen_config_from_mapping',
 
     # Weighted_Screen
     'WeightedScreenResult', 'weighted_feature_screen',

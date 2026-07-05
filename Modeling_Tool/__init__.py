@@ -1,7 +1,7 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.3.8"
+__version__ = "0.3.9"
 
 # Core module - base data structures
 from .Core import (
@@ -87,6 +87,12 @@ from .Feature import (
     CorrelationFilter,
     PSICalculator,
     calculate_psi_within_dataset,
+    FeatureScreenConfig,
+    FeatureScreenResult,
+    feature_screen,
+    feature_screen_from_dataframe,
+    fit_screening_woe_engine,
+    screen_config_from_mapping,
     WeightedScreenResult,
     weighted_feature_screen,
 )
@@ -230,6 +236,12 @@ __all__ = [
     'CorrelationFilter',
     'PSICalculator',
     'calculate_psi_within_dataset',
+    'FeatureScreenConfig',
+    'FeatureScreenResult',
+    'feature_screen',
+    'feature_screen_from_dataframe',
+    'fit_screening_woe_engine',
+    'screen_config_from_mapping',
     'WeightedScreenResult',
     'weighted_feature_screen',
 ]
