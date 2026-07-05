@@ -87,6 +87,8 @@ from .Feature import (
     CorrelationFilter,
     PSICalculator,
     calculate_psi_within_dataset,
+    WeightedScreenResult,
+    weighted_feature_screen,
 )
 
 _MODEL_EXPORTS = frozenset({
@@ -228,4 +230,6 @@ __all__ = [
     'CorrelationFilter',
     'PSICalculator',
     'calculate_psi_within_dataset',
+    'WeightedScreenResult',
+    'weighted_feature_screen',
 ]

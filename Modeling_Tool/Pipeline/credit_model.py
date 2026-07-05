@@ -45,10 +45,12 @@ class CreditModelPipelineConfig:
         default_factory=lambda: {
             "psi_enabled": True,
             "psi_threshold": 0.2,
+            "psi_compare_splits": ["oos"],
             "iv_enabled": True,
             "iv_threshold": 0.02,
             "corr_enabled": True,
             "corr_threshold": 0.75,
+            "corr_max_iterations": 10,
         }
     )
     woe_engine: str = "equal_freq"
@@ -427,79 +429,78 @@ class CreditModelPipeline:
         splits: dict[str, pd.DataFrame],
         feature_cols: list[str],
     ) -> tuple[dict[str, Any], list[str]]:
-        from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
+        from Modeling_Tool.Feature.Weighted_Screen import weighted_feature_screen
 
         cfg = self.config
         fs_cfg = cfg.feature_selection
-        ins, oos = splits["ins"], splits["oos"]
-        current = list(feature_cols)
-        summary: dict[str, Any] = {"initial_features": list(feature_cols)}
+        split_col = "_smf_split"
+        screen_frames = []
+        for name, df in splits.items():
+            part = df.copy()
+            part[split_col] = name
+            screen_frames.append(part)
+        screen_data = pd.concat(screen_frames, ignore_index=True)
 
-        if fs_cfg.get("psi_enabled", True):
-            try:
-                psi = PSICalculator(buckets=int(fs_cfg.get("psi_buckets", 10))).calculate(
-                    expected_df=ins,
-                    current_data=oos,
-                    varlist=current,
-                )
-                keep = psi.loc[psi["psi"] < float(fs_cfg.get("psi_threshold", 0.2)), "var"].tolist()
-                current = keep or current
-                summary["psi"] = psi
-            except Exception as exc:
-                summary["psi_error"] = repr(exc)
-
+        plot_path = None
         if fs_cfg.get("iv_enabled", True):
-            try:
-                plot_path = str(Path(cfg.output_dir) / "figs" / "var_analysis")
-                make_dirs(plot_path)
-                vi = VarExtractionInsights(
-                    data=ins,
-                    dep=cfg.target_col,
-                    plot_path=plot_path,
-                    nbins=int(fs_cfg.get("iv_nbins", 10)),
-                    equal_freq=bool(fs_cfg.get("iv_equal_freq", True)),
-                    min_bin_prop=float(fs_cfg.get("iv_min_bin_prop", 0.05)),
-                )
-                iv = vi.get_var_analysis_report(
-                    data=ins,
-                    varlist=current,
-                    dep=cfg.target_col,
-                    iv_cut=0.0,
-                )
-                if cfg.write_outputs and cfg.plot_outputs and current:
-                    make_dirs(Path(plot_path) / "overall")
-                    plot_data = ins.copy()
-                    plot_data["_smf_plot_group"] = "overall"
-                    vi.plot_woe(
-                        data=plot_data,
-                        varlist=current,
-                        plot_group="_smf_plot_group",
-                        plot_dirname="overall",
-                        plot_path=plot_path,
-                    )
-                keep = iv.loc[iv["iv"] >= float(fs_cfg.get("iv_threshold", 0.02)), "var"].tolist()
-                current = keep or current
-                summary["iv"] = iv
-            except Exception as exc:
-                summary["iv_error"] = repr(exc)
+            plot_path = str(Path(cfg.output_dir) / "figs" / "var_analysis")
+            if cfg.write_outputs and cfg.plot_outputs:
+                make_dirs(plot_path, Path(plot_path) / "overall")
 
-        if fs_cfg.get("corr_enabled", True) and len(current) > 1:
-            try:
-                corr = CorrelationFilter(
-                    data=ins[current + [cfg.target_col]],
-                    dep=cfg.target_col,
-                    corr_cutpoint=float(fs_cfg.get("corr_threshold", 0.75)),
-                )
-                current = corr.remove_highly_correlated(
-                    current,
-                    max_iterations=int(fs_cfg.get("corr_max_iterations", 10)),
-                )
-                summary["corr_features"] = list(current)
-            except Exception as exc:
-                summary["corr_error"] = repr(exc)
+        summary: dict[str, Any] = {"initial_features": list(feature_cols)}
+        try:
+            result = weighted_feature_screen(
+                data=screen_data,
+                feature_cols=feature_cols,
+                target_col=cfg.target_col,
+                split_col=split_col,
+                weight_col=cfg.weight_col,
+                psi_enabled=bool(fs_cfg.get("psi_enabled", True)),
+                psi_threshold=float(fs_cfg.get("psi_threshold", 0.2)),
+                psi_compare_splits=list(fs_cfg.get("psi_compare_splits", ["oos"])),
+                iv_enabled=bool(fs_cfg.get("iv_enabled", True)),
+                iv_threshold=float(fs_cfg.get("iv_threshold", 0.02)),
+                corr_enabled=bool(fs_cfg.get("corr_enabled", True)),
+                corr_threshold=float(fs_cfg.get("corr_threshold", 0.75)),
+                iv_bins=int(fs_cfg.get("iv_nbins", 10)),
+                iv_min_bin_prop=float(fs_cfg.get("iv_min_bin_prop", 0.05)),
+                corr_max_iterations=int(fs_cfg.get("corr_max_iterations", 10)),
+                psi_buckets=int(fs_cfg.get("psi_buckets", fs_cfg.get("iv_nbins", 10))),
+                plot_path=plot_path,
+                plot_outputs=bool(cfg.write_outputs and cfg.plot_outputs),
+                iv_equal_freq=bool(fs_cfg.get("iv_equal_freq", True)),
+            )
+            summary = self._screen_result_to_summary(result, feature_cols)
+            return summary, list(result.selected_features)
+        except Exception as exc:
+            summary["error"] = repr(exc)
+            summary["final_features"] = list(feature_cols)
+            return summary, list(feature_cols)
 
-        summary["final_features"] = list(current)
-        return summary, list(current)
+    def _screen_result_to_summary(
+        self,
+        result: Any,
+        initial_features: list[str],
+    ) -> dict[str, Any]:
+        summary: dict[str, Any] = {"initial_features": list(initial_features)}
+        if not result.psi_table.empty:
+            psi = result.psi_table.copy()
+            if "psi_ins_oos" in psi.columns:
+                psi["psi"] = psi["psi_ins_oos"]
+            elif "psi_max" in psi.columns:
+                psi["psi"] = psi["psi_max"]
+            summary["psi"] = psi
+        if not result.iv_table.empty:
+            iv = result.iv_table.copy()
+            if "iv_weighted" in iv.columns:
+                iv = iv.rename(columns={"iv_weighted": "iv"})
+            summary["iv"] = iv
+        if not result.corr_dropped.empty:
+            summary["corr_dropped"] = result.corr_dropped
+        summary["corr_features"] = list(result.selected_features)
+        summary["screen_summary"] = result.summary
+        summary["final_features"] = list(result.selected_features)
+        return summary
 
     def _transform_extra_eval_datasets(
         self,
