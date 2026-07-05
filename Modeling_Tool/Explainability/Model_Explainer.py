@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import importlib.metadata
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -848,6 +849,125 @@ class ModelExplainer:
     # ------------------------------------------------------------------ #
     # LIME
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _lime_missing_mask(frame: pd.DataFrame) -> pd.Series:
+        numeric = frame.select_dtypes(include=[np.number])
+        if numeric.empty:
+            return pd.Series(False, index=frame.index)
+        return numeric.isna().any(axis=1)
+
+    @classmethod
+    def _warn_lime_missing(
+        cls,
+        frame: pd.DataFrame,
+        *,
+        role: str,
+        missing_strategy: str,
+        n_before: int,
+        n_after: int,
+        fill_values: dict[str, float] | None = None,
+    ) -> None:
+        numeric = frame.select_dtypes(include=[np.number])
+        if numeric.empty:
+            return
+        null_cols = [col for col in numeric.columns if numeric[col].isna().any()]
+        if not null_cols:
+            return
+        details = []
+        for col in null_cols:
+            count = int(numeric[col].isna().sum())
+            pct = 100.0 * count / len(frame) if len(frame) else 0.0
+            detail = f"{col}: {count}/{len(frame)} ({pct:.1f}%)"
+            if fill_values and col in fill_values:
+                detail += f", median_fill={fill_values[col]:.6g}"
+            details.append(detail)
+        msg = (
+            f"LIME missing_strategy={missing_strategy!r} on {role}: "
+            f"null columns={null_cols}; " + "; ".join(details)
+        )
+        if missing_strategy == "drop":
+            msg += f"; rows {n_before} -> {n_after}"
+        warnings.warn(msg, UserWarning, stacklevel=3)
+
+    @classmethod
+    def _prepare_lime_data(
+        cls,
+        train: pd.DataFrame,
+        rows: pd.DataFrame | None = None,
+        *,
+        train_role: str = "X_train",
+        rows_role: str = "x_row",
+        missing_strategy: str = "median",
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+        if missing_strategy not in {"median", "drop"}:
+            raise ValueError("missing_strategy must be 'median' or 'drop'")
+
+        train_clean = train.copy()
+        rows_clean = rows.copy() if rows is not None else None
+        numeric_cols = list(train_clean.select_dtypes(include=[np.number]).columns)
+
+        if missing_strategy == "median":
+            fill_values: dict[str, float] = {}
+            for col in numeric_cols:
+                if train_clean[col].isna().any() or (
+                    rows_clean is not None and rows_clean[col].isna().any()
+                ):
+                    median_val = float(train_clean[col].median())
+                    fill_values[col] = median_val
+                    train_clean[col] = train_clean[col].fillna(median_val)
+                    if rows_clean is not None:
+                        rows_clean[col] = rows_clean[col].fillna(median_val)
+            cls._warn_lime_missing(
+                train,
+                role=train_role,
+                missing_strategy=missing_strategy,
+                n_before=len(train),
+                n_after=len(train_clean),
+                fill_values=fill_values or None,
+            )
+            if rows_clean is not None:
+                cls._warn_lime_missing(
+                    rows,
+                    role=rows_role,
+                    missing_strategy=missing_strategy,
+                    n_before=len(rows),
+                    n_after=len(rows_clean),
+                    fill_values=fill_values or None,
+                )
+            return train_clean, rows_clean
+
+        n_train_before = len(train_clean)
+        train_clean = train_clean.loc[~cls._lime_missing_mask(train_clean)].copy()
+        cls._warn_lime_missing(
+            train,
+            role=train_role,
+            missing_strategy=missing_strategy,
+            n_before=n_train_before,
+            n_after=len(train_clean),
+        )
+        if train_clean.empty:
+            raise ValueError(
+                f"LIME missing_strategy='drop' removed all rows from {train_role} "
+                f"({n_train_before} -> 0). Provide complete training data or use missing_strategy='median'."
+            )
+
+        if rows_clean is not None:
+            n_rows_before = len(rows_clean)
+            rows_clean = rows_clean.loc[~cls._lime_missing_mask(rows_clean)].copy()
+            cls._warn_lime_missing(
+                rows,
+                role=rows_role,
+                missing_strategy=missing_strategy,
+                n_before=n_rows_before,
+                n_after=len(rows_clean),
+            )
+            if rows_clean.empty:
+                raise ValueError(
+                    f"LIME missing_strategy='drop' removed all rows from {rows_role} "
+                    f"({n_rows_before} -> 0). Impute missing values or use missing_strategy='median'."
+                )
+        return train_clean, rows_clean
+
     def _build_lime_explainer(self, X_train, num_features=None, random_state=None, **lime_kwargs):
         LimeTabularExplainer = _lazy_lime()
         train = self._as_frame(X_train if X_train is not None else self.background_data)
@@ -864,7 +984,16 @@ class ModelExplainer:
             **lime_kwargs,
         )
 
-    def lime_explain_instance(self, x_row, X_train=None, num_features=10, num_samples=5000, random_state=None, **lime_kwargs):
+    def lime_explain_instance(
+        self,
+        x_row,
+        X_train=None,
+        num_features=10,
+        num_samples=5000,
+        random_state=None,
+        missing_strategy="median",
+        **lime_kwargs,
+    ):
         """Explain one sample with LIME."""
         if isinstance(x_row, pd.Series):
             x_row = x_row.to_frame().T
@@ -874,7 +1003,14 @@ class ModelExplainer:
         if frame.shape[0] != 1:
             frame = frame.iloc[[0]]
 
-        train = X_train if X_train is not None else self.background_data
+        train_raw = self._as_frame(X_train if X_train is not None else self.background_data)
+        train, frame = self._prepare_lime_data(
+            train_raw,
+            frame,
+            train_role="X_train",
+            rows_role="x_row",
+            missing_strategy=missing_strategy,
+        )
         explainer = self._build_lime_explainer(train, num_features, random_state, **lime_kwargs)
         explanation = explainer.explain_instance(
             data_row=np.asarray(frame.iloc[0]),
@@ -896,17 +1032,36 @@ class ModelExplainer:
         out.attrs["score"] = explanation.score
         return out
 
-    def lime_global_importance(self, X, X_train=None, num_features=10, num_samples=2000, sample_size=100, random_state=None, **lime_kwargs):
+    def lime_global_importance(
+        self,
+        X,
+        X_train=None,
+        num_features=10,
+        num_samples=2000,
+        sample_size=100,
+        random_state=None,
+        missing_strategy="median",
+        **lime_kwargs,
+    ):
         """Aggregate LIME local weights across a sample as global importance."""
+        train_raw = self._as_frame(X_train if X_train is not None else self.background_data)
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
+        train, frame = self._prepare_lime_data(
+            train_raw,
+            frame,
+            train_role="X_train",
+            rows_role="X",
+            missing_strategy=missing_strategy,
+        )
         rows = []
         for _, row in frame.iterrows():
             local = self.lime_explain_instance(
                 row,
-                X_train=X_train,
+                X_train=train,
                 num_features=num_features,
                 num_samples=num_samples,
                 random_state=random_state,
+                missing_strategy="median",
                 **lime_kwargs,
             )
             rows.append(local)

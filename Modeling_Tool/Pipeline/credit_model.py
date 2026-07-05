@@ -13,6 +13,7 @@ from ._common import (
     as_list,
     make_dirs,
     merge_dict,
+    persist_explain_outputs,
     predict_positive,
     safe_to_csv,
     validate_woe_fit_query_columns,
@@ -106,6 +107,7 @@ class CreditModelPipelineResult:
     optuna_results: dict[str, pd.DataFrame] = field(default_factory=dict)
     perf_results: dict[str, pd.DataFrame] = field(default_factory=dict)
     explain_outputs: dict[str, Any] = field(default_factory=dict)
+    explain_paths: dict[str, dict[str, str]] = field(default_factory=dict)
     report_path: str | None = None
     lr_search_results: pd.DataFrame | None = None
     warm_start_summary: pd.DataFrame | None = None
@@ -173,13 +175,15 @@ class CreditModelPipeline:
 
         output_dir = Path(cfg.output_dir)
         if cfg.write_outputs or cfg.write_excel:
-            make_dirs(
+            dirs = [
                 output_dir,
                 output_dir / "figs" / "woe",
                 output_dir / "figs" / "mono_woe",
                 output_dir / "figs" / "perf",
-                output_dir / "explain",
-            )
+            ]
+            if cfg.write_outputs and self._will_run_explainability():
+                dirs.append(output_dir / "explain")
+            make_dirs(*dirs)
         if cfg.save_models:
             make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
@@ -219,6 +223,9 @@ class CreditModelPipeline:
             woe_artifacts.get("extra_eval"),
         )
         explain_outputs = self._run_explainability(model_inputs, models)
+        explain_paths: dict[str, dict[str, str]] = {}
+        if cfg.write_outputs and explain_outputs:
+            explain_paths = persist_explain_outputs(explain_outputs, output_dir / "explain")
         model_paths: dict[str, str] = {}
         artifact_paths: dict[str, str] = {}
         model_paths_frame = None
@@ -261,6 +268,7 @@ class CreditModelPipeline:
             }
             for name, perf in perf_results.items():
                 sheets[f"Perf_{name.upper()}"] = perf
+            sheets.update(self._explain_excel_sheets(explain_outputs))
             write_basic_excel(report_path, sheets, title="SuperModelingFactory Credit Model Pipeline Report")
 
         return CreditModelPipelineResult(
@@ -273,6 +281,7 @@ class CreditModelPipeline:
             optuna_results=optuna_results,
             perf_results=perf_results,
             explain_outputs=explain_outputs,
+            explain_paths=explain_paths,
             report_path=report_path,
             lr_search_results=lr_search_results,
             warm_start_summary=warm_start_summary,
@@ -977,6 +986,28 @@ class CreditModelPipeline:
             return wrapper.predict_with_base_margin(data[feature_cols], init_score, return_prob=True)
         return predict_positive(wrapper, data, feature_cols)
 
+    def _will_run_explainability(self) -> bool:
+        cfg = self.config
+        return bool(as_list(cfg.explain_models)) or bool(cfg.owen_enabled)
+
+    def _explain_excel_sheets(self, explain_outputs: dict[str, Any]) -> dict[str, pd.DataFrame]:
+        sheets: dict[str, pd.DataFrame] = {}
+        for model_name, payload in explain_outputs.items():
+            if model_name == "import_error" or not isinstance(payload, dict):
+                continue
+            fi = payload.get("feature_importance")
+            if isinstance(fi, pd.DataFrame) and not fi.empty:
+                sheets[f"Explain_{str(model_name).upper()}_FI"] = fi
+            owen = payload.get("owen")
+            if isinstance(owen, dict):
+                owen_fi = owen.get("feature_importance")
+                if isinstance(owen_fi, pd.DataFrame) and not owen_fi.empty:
+                    sheets[f"Explain_{str(model_name).upper()}_Owen_FI"] = owen_fi
+                owen_grp = owen.get("group_importance")
+                if isinstance(owen_grp, pd.DataFrame) and not owen_grp.empty:
+                    sheets[f"Explain_{str(model_name).upper()}_Owen_Group"] = owen_grp
+        return sheets
+
     def _run_explainability(
         self,
         model_inputs: dict[str, dict[str, Any]],
@@ -987,6 +1018,7 @@ class CreditModelPipeline:
         if not explain_models and not cfg.owen_enabled:
             return {}
         outputs: dict[str, Any] = {}
+        explain_dir = Path(cfg.output_dir) / "explain"
         try:
             from Modeling_Tool import ModelExplainer
         except Exception as exc:
@@ -1005,6 +1037,14 @@ class CreditModelPipeline:
                 item: dict[str, Any] = {}
                 if name in explain_models:
                     item["feature_importance"] = exp.feature_importance(X=eval_x, normalize=True)
+                    if cfg.write_outputs and cfg.plot_outputs:
+                        plot_path = explain_dir / name / "shap_summary.png"
+                        plot_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            exp.summary_plot(X=eval_x, show=False, save_path=str(plot_path))
+                            item["shap_summary"] = str(plot_path)
+                        except Exception as plot_exc:
+                            item["plot_error"] = repr(plot_exc)
                 if cfg.owen_enabled and name != "xgb":
                     item["owen"] = self._run_owen(exp, eval_x, feature_cols)
                 outputs[name] = item

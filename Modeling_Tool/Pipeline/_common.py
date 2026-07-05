@@ -150,6 +150,132 @@ def safe_to_csv(df: pd.DataFrame | None, path: str | os.PathLike, index: bool = 
     df.to_csv(path, index=index)
 
 
+def persist_explain_outputs(
+    outputs: Mapping[str, Any],
+    explain_dir: str | os.PathLike,
+) -> dict[str, dict[str, str]]:
+    """Write explain_outputs tables to ``explain_dir`` and return path index."""
+    explain_root = Path(explain_dir)
+    explain_root.mkdir(parents=True, exist_ok=True)
+    manifest_rows: list[dict[str, str]] = []
+    explain_paths: dict[str, dict[str, str]] = {}
+
+    if "import_error" in outputs:
+        err_path = explain_root / "import_error.txt"
+        err_path.write_text(str(outputs["import_error"]), encoding="utf-8")
+        manifest_rows.append(
+            {"model": "_global", "artifact": "import_error", "path": str(err_path), "status": "error"}
+        )
+
+    for model_name, payload in outputs.items():
+        if model_name == "import_error":
+            continue
+        if not isinstance(payload, dict):
+            continue
+        model_dir = explain_root / str(model_name)
+        paths: dict[str, str] = {}
+
+        if payload.get("error") and "feature_importance" not in payload:
+            err_path = model_dir / "error.txt"
+            model_dir.mkdir(parents=True, exist_ok=True)
+            err_path.write_text(str(payload["error"]), encoding="utf-8")
+            paths["error"] = str(err_path)
+            manifest_rows.append(
+                {
+                    "model": str(model_name),
+                    "artifact": "error",
+                    "path": str(err_path),
+                    "status": "error",
+                }
+            )
+            explain_paths[str(model_name)] = paths
+            continue
+
+        fi = payload.get("feature_importance")
+        if isinstance(fi, pd.DataFrame) and not fi.empty:
+            fi_path = model_dir / "feature_importance.csv"
+            safe_to_csv(fi, fi_path)
+            paths["feature_importance"] = str(fi_path)
+            manifest_rows.append(
+                {
+                    "model": str(model_name),
+                    "artifact": "feature_importance",
+                    "path": str(fi_path),
+                    "status": "ok",
+                }
+            )
+
+        owen = payload.get("owen")
+        if isinstance(owen, dict):
+            if owen.get("error"):
+                err_path = model_dir / "owen_error.txt"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                err_path.write_text(str(owen["error"]), encoding="utf-8")
+                paths["owen_error"] = str(err_path)
+                manifest_rows.append(
+                    {
+                        "model": str(model_name),
+                        "artifact": "owen_error",
+                        "path": str(err_path),
+                        "status": "error",
+                    }
+                )
+            for artifact, filename in (
+                ("feature_importance", "owen_feature_importance.csv"),
+                ("group_importance", "owen_group_importance.csv"),
+            ):
+                table = owen.get(artifact)
+                if isinstance(table, pd.DataFrame) and not table.empty:
+                    table_path = model_dir / filename
+                    safe_to_csv(table, table_path)
+                    key = f"owen_{artifact}"
+                    paths[key] = str(table_path)
+                    manifest_rows.append(
+                        {
+                            "model": str(model_name),
+                            "artifact": key,
+                            "path": str(table_path),
+                            "status": "ok",
+                        }
+                    )
+
+        for artifact_key in ("shap_summary", "plot_error"):
+            plot_path = payload.get(artifact_key)
+            if plot_path and artifact_key == "shap_summary":
+                paths["shap_summary"] = str(plot_path)
+                manifest_rows.append(
+                    {
+                        "model": str(model_name),
+                        "artifact": "shap_summary",
+                        "path": str(plot_path),
+                        "status": "ok",
+                    }
+                )
+            elif plot_path and artifact_key == "plot_error":
+                err_path = model_dir / "plot_error.txt"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                err_path.write_text(str(plot_path), encoding="utf-8")
+                paths["plot_error"] = str(err_path)
+                manifest_rows.append(
+                    {
+                        "model": str(model_name),
+                        "artifact": "plot_error",
+                        "path": str(err_path),
+                        "status": "plot_error",
+                    }
+                )
+
+        if paths:
+            explain_paths[str(model_name)] = paths
+
+    if manifest_rows:
+        manifest_df = pd.DataFrame(manifest_rows)
+        safe_to_csv(manifest_df, explain_root / "explain_manifest.csv", index=False)
+        explain_paths.setdefault("_manifest", {})["explain_manifest"] = str(explain_root / "explain_manifest.csv")
+
+    return explain_paths
+
+
 def get_raw_model(model: Any) -> Any:
     if hasattr(model, "_model") and hasattr(model._model, "model"):
         return model._model.model
