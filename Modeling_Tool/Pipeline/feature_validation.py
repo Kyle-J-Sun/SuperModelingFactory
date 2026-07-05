@@ -97,6 +97,10 @@ class FeatureValidationPipelineConfig:
         }
     )
 
+    selection_enabled: bool = False
+    selection_params: dict[str, Any] = field(default_factory=dict)
+    weight_col: str | None = None
+
     write_outputs: bool = True
     write_excel: bool = True
 
@@ -117,6 +121,9 @@ class FeatureValidationPipelineResult:
     report_path: str | None = None
     batch_metadata: pd.DataFrame | None = None
     batch_results: dict[str, Any] = field(default_factory=dict)
+    selected_features: list[str] = field(default_factory=list)
+    selection_summary: dict[str, Any] = field(default_factory=dict)
+    screening_artifact: Any | None = None
 
 
 class FeatureValidationPipeline:
@@ -190,6 +197,17 @@ class FeatureValidationPipeline:
             if cfg.corr_enabled
             else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
         )
+        selected_features: list[str] = []
+        selection_summary: dict[str, Any] = {}
+        screening_artifact = None
+        if cfg.selection_enabled and target_cols:
+            selected_features, selection_summary, screening_artifact = self._run_selection(
+                splits=splits,
+                new_features=new_features,
+                incumbent_features=incumbent_features,
+                target_cols=target_cols,
+                woe_artifacts=woe_artifacts,
+            )
         validation_summary = self._build_validation_summary(
             data=combined,
             new_features=new_features,
@@ -201,6 +219,7 @@ class FeatureValidationPipeline:
             ivks_summary=ivks_summary,
             high_corr_pairs=high_corr_pairs,
             woe_artifacts=woe_artifacts,
+            selected_features=selected_features,
         )
 
         tables = self._collect_tables(
@@ -213,6 +232,8 @@ class FeatureValidationPipeline:
             high_corr_pairs,
             correlated_detail,
             validation_summary,
+            selected_features=selected_features,
+            selection_summary=selection_summary,
         )
         output_paths, report_path = self._write_outputs(tables)
 
@@ -229,6 +250,9 @@ class FeatureValidationPipeline:
             validation_summary=validation_summary,
             output_paths=output_paths,
             report_path=report_path,
+            selected_features=selected_features,
+            selection_summary=selection_summary,
+            screening_artifact=screening_artifact,
         )
 
     def _resolve_input_type(self, data: pd.DataFrame | str | Path) -> str:
@@ -354,6 +378,9 @@ class FeatureValidationPipeline:
             report_path=result.report_path,
             batch_metadata=result.batch_metadata,
             batch_results=result.batch_results,
+            selected_features=list(result.selected_features),
+            selection_summary=dict(result.selection_summary or {}),
+            screening_artifact=result.screening_artifact,
         )
 
     def _validate_batch_config(self, new_features: list[str]) -> None:
@@ -498,6 +525,35 @@ class FeatureValidationPipeline:
             woe_artifacts=woe_artifacts,
             batch_metadata=batch_metadata,
         )
+        selected_features = self._dedupe(
+            [feat for res in batch_results for feat in as_list(res.selected_features)]
+        )
+        selection_summary: dict[str, Any] = {}
+        screening_artifact = None
+        if self.config.selection_enabled and target_cols:
+            selection_summary = {
+                "initial_features": list(new_features),
+                "final_features": selected_features,
+                "target_col": target_cols[0],
+                "config_snapshot": {
+                    "selection_enabled": True,
+                    "selection_params": dict(self.config.selection_params or {}),
+                    "weight_col": self.config.weight_col,
+                    "batch_mode": True,
+                },
+            }
+            if selected_features:
+                from .screening_artifact import FeatureScreeningArtifact
+
+                screening_artifact = FeatureScreeningArtifact(
+                    selected_features=selected_features,
+                    selection_summary=selection_summary,
+                    woe_artifacts=woe_artifacts,
+                    source="fvp",
+                    target_col=target_cols[0],
+                    weight_col=self.config.weight_col,
+                    config_snapshot=selection_summary["config_snapshot"],
+                )
         tables = self._collect_tables(
             feature_sources,
             distribution_summary,
@@ -508,6 +564,8 @@ class FeatureValidationPipeline:
             high_corr_pairs,
             correlated_detail,
             validation_summary,
+            selected_features=selected_features,
+            selection_summary=selection_summary,
         )
         tables["batch_metadata"] = batch_metadata
         output_paths, report_path = self._write_outputs(tables)
@@ -532,6 +590,9 @@ class FeatureValidationPipeline:
                 }
                 for idx, res in enumerate(batch_results)
             },
+            selected_features=selected_features,
+            selection_summary=selection_summary,
+            screening_artifact=screening_artifact,
         )
 
     @staticmethod
@@ -1106,6 +1167,102 @@ class FeatureValidationPipeline:
         except Exception:
             return
 
+    def _build_selection_config(self) -> Any:
+        from Modeling_Tool.Feature.Feature_Screen import screen_config_from_mapping
+
+        cfg = self.config
+        params = dict(cfg.selection_params or {})
+        corr_params = dict(cfg.corr_params or {})
+        psi_params = dict(cfg.psi_params or {})
+        mapping = {
+            "psi_enabled": params.get("psi_enabled", cfg.psi_enabled),
+            "psi_threshold": params.get("psi_threshold", 0.2),
+            "psi_compare_splits": params.get("psi_compare_splits", ["oos"]),
+            "psi_buckets": params.get("psi_buckets", psi_params.get("buckets", 10)),
+            "psi_use_woe_bins": params.get("psi_use_woe_bins", cfg.psi_use_woe_bins),
+            "iv_enabled": params.get("iv_enabled", cfg.ivks_enabled),
+            "iv_threshold": params.get("iv_threshold", 0.02),
+            "iv_nbins": params.get("iv_nbins", psi_params.get("buckets", 10)),
+            "iv_min_bin_prop": params.get("iv_min_bin_prop", psi_params.get("min_bin_prop", 0.05)),
+            "iv_equal_freq": params.get("iv_equal_freq", psi_params.get("equal_freq", True)),
+            "iv_use_woe_bins": params.get("iv_use_woe_bins", cfg.ivks_use_woe_bins),
+            "corr_enabled": params.get("corr_enabled", cfg.corr_enabled),
+            "corr_threshold": params.get(
+                "corr_threshold",
+                params.get("corr_cutpoint", corr_params.get("corr_cutpoint", 0.75)),
+            ),
+            "corr_max_iterations": params.get(
+                "corr_max_iterations",
+                corr_params.get("max_iterations", 10),
+            ),
+            "corr_use_woe_bins": params.get("corr_use_woe_bins", cfg.corr_use_woe_bins),
+        }
+        return screen_config_from_mapping(
+            mapping,
+            woe_engine=cfg.woe_engine,
+            woe_fit_query=cfg.woe_fit_query,
+            woe_params=cfg.woe_params,
+            monotone_woe_params=cfg.monotone_woe_params,
+        )
+
+    def _run_selection(
+        self,
+        splits: dict[str, pd.DataFrame],
+        new_features: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+        woe_artifacts: dict[str, Any],
+    ) -> tuple[list[str], dict[str, Any], Any | None]:
+        from Modeling_Tool.Feature.Feature_Screen import feature_screen
+        from .screening_artifact import FeatureScreeningArtifact, screen_result_to_summary
+
+        cfg = self.config
+        target = target_cols[0]
+        screen_cfg = self._build_selection_config()
+        engine = None
+        if woe_artifacts:
+            engine = woe_artifacts.get("by_target", {}).get(target, {}).get("engine")
+
+        screen_features = list(new_features)
+        if cfg.weight_col and cfg.weight_col not in splits["ins"].columns:
+            raise KeyError(f"Missing weight_col {cfg.weight_col!r} for weighted selection.")
+
+        result = feature_screen(
+            splits,
+            screen_features,
+            target,
+            weight_col=cfg.weight_col,
+            config=screen_cfg,
+            prefit_woe_engine=engine,
+        )
+        config_snapshot = {
+            "selection_enabled": True,
+            "selection_params": dict(cfg.selection_params or {}),
+            "weight_col": cfg.weight_col,
+            "psi_use_woe_bins": screen_cfg.psi_use_woe_bins,
+            "iv_use_woe_bins": screen_cfg.iv_use_woe_bins,
+            "corr_use_woe_bins": screen_cfg.corr_use_woe_bins,
+            "n_incumbent_features": len(incumbent_features),
+        }
+        selection_summary = {
+            "initial_features": list(new_features),
+            "final_features": list(result.selected_features),
+            "target_col": target,
+            "config_snapshot": config_snapshot,
+        }
+        selection_summary.update(screen_result_to_summary(result, new_features))
+        selection_summary["config_snapshot"] = config_snapshot
+        artifact = FeatureScreeningArtifact.from_screen_result(
+            result,
+            initial_features=list(new_features),
+            target_col=target,
+            weight_col=cfg.weight_col,
+            woe_artifacts=woe_artifacts,
+            source="fvp",
+            config_snapshot=config_snapshot,
+        )
+        return list(result.selected_features), selection_summary, artifact
+
     def _run_psi(
         self,
         combined: pd.DataFrame,
@@ -1469,6 +1626,7 @@ class FeatureValidationPipeline:
         ivks_summary: pd.DataFrame,
         high_corr_pairs: pd.DataFrame,
         woe_artifacts: dict[str, Any],
+        selected_features: list[str] | None = None,
     ) -> pd.DataFrame:
         rows = [
             {"metric": "n_rows", "value": len(data)},
@@ -1483,6 +1641,9 @@ class FeatureValidationPipeline:
             {"metric": "woe_targets", "value": len(woe_artifacts.get("by_target", {})) if woe_artifacts else 0},
             {"metric": "feature_sources", "value": feature_sources["feature_source"].value_counts().to_dict()},
         ]
+        if self.config.selection_enabled:
+            rows.append({"metric": "selection_enabled", "value": True})
+            rows.append({"metric": "n_selected_features", "value": len(selected_features or [])})
         return pd.DataFrame(rows)
 
     def _collect_tables(
@@ -1496,6 +1657,8 @@ class FeatureValidationPipeline:
         high_corr_pairs: pd.DataFrame,
         correlated_detail: pd.DataFrame,
         validation_summary: pd.DataFrame,
+        selected_features: list[str] | None = None,
+        selection_summary: dict[str, Any] | None = None,
     ) -> dict[str, pd.DataFrame]:
         tables = {
             "validation_summary": validation_summary,
@@ -1508,6 +1671,11 @@ class FeatureValidationPipeline:
             "high_corr_pairs": high_corr_pairs,
             "correlated_detail": correlated_detail,
         }
+        if selected_features:
+            tables["selected_features"] = pd.DataFrame({"feature": selected_features})
+        screen_summary = (selection_summary or {}).get("screen_summary")
+        if isinstance(screen_summary, pd.DataFrame) and not screen_summary.empty:
+            tables["selection_screen_summary"] = screen_summary
         for name, df in distribution_summary.items():
             tables[f"distribution_{name}"] = df
         return tables

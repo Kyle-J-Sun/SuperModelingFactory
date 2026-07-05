@@ -1,7 +1,7 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 
 # Core module - base data structures
 from .Core import (
@@ -116,6 +116,7 @@ _PIPELINE_EXPORTS = frozenset({
     'SampleAnalysisPipeline', 'SampleAnalysisPipelineConfig', 'SampleAnalysisPipelineResult',
     'MockSamplePipeline', 'MockSamplePipelineConfig', 'MockSamplePipelineResult',
     'FeatureValidationPipeline', 'FeatureValidationPipelineConfig', 'FeatureValidationPipelineResult',
+    'FeatureScreeningArtifact', 'screen_result_to_summary',
 })
 
 def __getattr__(name):

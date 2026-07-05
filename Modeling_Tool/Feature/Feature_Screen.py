@@ -10,8 +10,6 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from Modeling_Tool.Pipeline._common import apply_woe_fit_query, as_list
-
 from .Weighted_Screen import (
     WeightedScreenResult,
     _legacy_unweighted_screen,
@@ -123,6 +121,8 @@ def fit_screening_woe_engine(
     categorical_features: list[str] | None = None,
 ) -> Any:
     """Fit a WOE engine on INS for screening steps that reuse bin boundaries."""
+    from Modeling_Tool.Pipeline._common import apply_woe_fit_query
+
     fit_ins, _ = apply_woe_fit_query(train, woe_fit_query, target=target_col)
     if woe_engine.lower() == "monotone":
         from Modeling_Tool import MonotoneWOEBinner
@@ -130,6 +130,8 @@ def fit_screening_woe_engine(
         params = dict(monotone_woe_params or {})
         init_params = {k: v for k, v in params.items() if k in _MONOTONE_INIT_KEYS}
         fit_params = {k: v for k, v in params.items() if k in _MONOTONE_FIT_KEYS}
+        from Modeling_Tool.Pipeline._common import as_list
+
         categorical = [col for col in as_list(categorical_features) if col in features]
         numeric = [col for col in features if col not in set(categorical)]
         binner = MonotoneWOEBinner(
