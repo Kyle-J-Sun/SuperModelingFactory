@@ -29,6 +29,7 @@ from .feature_validation import (
     FeatureValidationPipelineConfig,
     FeatureValidationPipelineResult,
 )
+from .orchestrator import run_modeling_from_validation
 from .screening_artifact import FeatureScreeningArtifact, screen_result_to_summary
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "FeatureValidationPipelineResult",
     "FeatureScreeningArtifact",
     "screen_result_to_summary",
+    "run_modeling_from_validation",
 ]
