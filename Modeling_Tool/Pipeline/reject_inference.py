@@ -152,6 +152,15 @@ class RejectInferencePipeline:
         prescore_model = None
         model_paths: dict[str, str] = {}
         if cfg.train_prescore or cfg.score_col not in work.columns:
+            if cfg.train_prescore and cfg.score_col in work.columns:
+                warnings.warn(
+                    f"train_prescore=True will overwrite existing column "
+                    f"{cfg.score_col!r} in input data. Set train_prescore=False "
+                    f"to reuse the supplied scores, or rename cfg.score_col to "
+                    f"a fresh column name to avoid this overwrite.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             work, prescore_model = self._fit_prescore(work, feature_cols)
             if cfg.save_models:
                 model_paths["prescore"] = self._save_pipeline_model(
@@ -435,6 +444,16 @@ class RejectInferencePipeline:
 
         cfg = self.config
         approved = data[(data[cfg.approved_col] == 1) & data[cfg.target_col].notna()].copy()
+        if len(approved) == 0:
+            n_approved = int((data[cfg.approved_col] == 1).sum())
+            n_target_obs = int(data[cfg.target_col].notna().sum())
+            raise ValueError(
+                f"Cannot train pre-score model: no rows satisfy "
+                f"({cfg.approved_col!r}==1 & {cfg.target_col!r} not null). "
+                f"Diagnostics: approved={n_approved}, target-observed={n_target_obs}, "
+                f"total={len(data)}. Check approved_col/target_col semantics or "
+                f"supply a pre-computed score_col and set train_prescore=False."
+            )
         splitter = SampleSplitter(
             test_size=cfg.prescore_test_size,
             random_state=cfg.random_state,
