@@ -1,0 +1,49 @@
+name: Version consistency
+
+# Guards against the class of bug shipped by PR#49 and fixed by PR#50:
+# Modeling_Tool/__init__.py, setup.py, and pyproject.toml can silently
+# drift. Since PEP 621 metadata in pyproject.toml overrides setup.py during
+# `python -m build`, a drift means the built wheel/sdist is tagged with
+# the wrong version even though every other source of truth looks right.
+#
+# This workflow asserts all three sources agree, on every PR and on every
+# push to main. Runs the same script (scripts/check_version_consistency.py)
+# that developers can invoke locally.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Modeling_Tool/__init__.py'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'scripts/check_version_consistency.py'
+      - '.github/workflows/version-consistency.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Modeling_Tool/__init__.py'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'scripts/check_version_consistency.py'
+      - '.github/workflows/version-consistency.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: version-consistency-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Assert three-source version agreement
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run version consistency check
+        run: python scripts/check_version_consistency.py
