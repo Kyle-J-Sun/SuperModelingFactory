@@ -16,6 +16,7 @@ from ._common import (
     persist_explain_outputs,
     predict_positive,
     safe_to_csv,
+    split_oot_by_flag,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
     write_basic_excel,
@@ -417,8 +418,7 @@ class CreditModelPipeline:
                 raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
 
         if cfg.oot_col and cfg.oot_col in work.columns:
-            ins_oos = work[work[cfg.oot_col] == 0].copy()
-            oot = work[work[cfg.oot_col] != 0].copy()
+            ins_oos, oot = split_oot_by_flag(work, cfg.oot_col)
         else:
             ins_oos = work
             oot = pd.DataFrame(columns=work.columns)
@@ -808,7 +808,9 @@ class CreditModelPipeline:
             if name == "lr" and cfg.use_lr_search_params and hasattr(self, "_lr_best_params"):
                 params = merge_dict(params, getattr(self, "_lr_best_params", {}))
             if name == "lr":
-                lr = LRMaster(params=params or None, standardize=bool(params.pop("standardize", False)) if params else False)
+                lr_params = dict(params) if params else {}
+                standardize = bool(lr_params.pop("standardize", False))
+                lr = LRMaster(params=lr_params or None, standardize=standardize)
                 lr.fit(
                     data=train,
                     varlist=feature_cols,
