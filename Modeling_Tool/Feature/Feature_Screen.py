@@ -13,6 +13,7 @@ from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 
 from .Weighted_Screen import (
     WeightedScreenResult,
+    _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
     _legacy_unweighted_screen,
@@ -58,6 +59,8 @@ class FeatureScreenConfig:
     corr_use_woe_bins: bool = False
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise"
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn"
+    missing_rate_threshold: float | None = None
+    missing_rate_ref: float | int = -999999
     woe_engine: str = "equal_freq"
     woe_fit_query: str | None = None
     woe_params: dict[str, Any] = field(
@@ -105,6 +108,8 @@ def screen_config_from_mapping(
         corr_use_woe_bins=bool(cfg.get("corr_use_woe_bins", False)),
         corr_nan_policy=str(cfg.get("corr_nan_policy", "pairwise")),  # type: ignore[arg-type]
         on_empty_stage=str(cfg.get("on_empty_stage", "keep_all_warn")),  # type: ignore[arg-type]
+        missing_rate_threshold=cfg.get("missing_rate_threshold"),
+        missing_rate_ref=cfg.get("missing_rate_ref", -999999),
         woe_engine=str(woe_engine or cfg.get("woe_engine", "equal_freq")),
         woe_fit_query=woe_fit_query if woe_fit_query is not None else cfg.get("woe_fit_query"),
         woe_params=dict(FeatureScreenConfig().woe_params | dict(woe_params or cfg.get("woe_params") or {})),
@@ -211,6 +216,14 @@ def _woe_bins_unweighted_screen(
     ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, None)]
+    current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
+        ins,
+        current,
+        summary_rows,
+        missing_rate_threshold=config.missing_rate_threshold,
+        missing_rate_ref=config.missing_rate_ref,
+        on_empty_stage=config.on_empty_stage,
+    )
     binner = _resolve_screening_binner(splits, feature_cols, target_col, config, prefit_woe_engine)
 
     psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
@@ -303,6 +316,8 @@ def _woe_bins_unweighted_screen(
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),
+        missing_rate_table=missing_rate_table,
+        missing_rate_dropped=missing_rate_dropped,
     )
 
 
@@ -328,6 +343,15 @@ def _weighted_woe_bins_screen(
     y_ins = ins[target_col].astype(float).to_numpy()
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
+    current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
+        ins,
+        current,
+        summary_rows,
+        missing_rate_threshold=config.missing_rate_threshold,
+        missing_rate_ref=config.missing_rate_ref,
+        weight_col=weight_col,
+        on_empty_stage=config.on_empty_stage,
+    )
 
     binner = prefit_woe_engine
     if binner is None:
@@ -438,6 +462,8 @@ def _weighted_woe_bins_screen(
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),
+        missing_rate_table=missing_rate_table,
+        missing_rate_dropped=missing_rate_dropped,
     )
 
 
@@ -485,6 +511,8 @@ def feature_screen(
             corr_nan_policy=cfg.corr_nan_policy,
             on_empty_stage=cfg.on_empty_stage,
             prefit_woe_engine=prefit_woe_engine,
+            missing_rate_threshold=cfg.missing_rate_threshold,
+            missing_rate_ref=cfg.missing_rate_ref,
         )
 
     if use_woe_bins or prefit_woe_engine is not None:
@@ -515,6 +543,8 @@ def feature_screen(
         plot_outputs=cfg.plot_outputs,
         iv_equal_freq=cfg.iv_equal_freq,
         on_empty_stage=cfg.on_empty_stage,
+        missing_rate_threshold=cfg.missing_rate_threshold,
+        missing_rate_ref=cfg.missing_rate_ref,
     )
 
 

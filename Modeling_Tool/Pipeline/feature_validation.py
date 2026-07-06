@@ -97,6 +97,7 @@ class FeatureValidationPipelineConfig:
         }
     )
 
+    missing_rate_threshold: float | None = None
     selection_enabled: bool = False
     selection_params: dict[str, Any] = field(default_factory=dict)
     weight_col: str | None = None
@@ -1174,6 +1175,7 @@ class FeatureValidationPipeline:
         params = dict(cfg.selection_params or {})
         corr_params = dict(cfg.corr_params or {})
         psi_params = dict(cfg.psi_params or {})
+        missing_rate_threshold = params.get("missing_rate_threshold", cfg.missing_rate_threshold)
         mapping = {
             "psi_enabled": params.get("psi_enabled", cfg.psi_enabled),
             "psi_threshold": params.get("psi_threshold", 0.2),
@@ -1196,6 +1198,11 @@ class FeatureValidationPipeline:
                 corr_params.get("max_iterations", 10),
             ),
             "corr_use_woe_bins": params.get("corr_use_woe_bins", cfg.corr_use_woe_bins),
+            "missing_rate_threshold": missing_rate_threshold,
+            "missing_rate_ref": params.get(
+                "missing_rate_ref",
+                cfg.woe_params.get("missing_ref_value", -999999),
+            ),
         }
         return screen_config_from_mapping(
             mapping,
@@ -1238,6 +1245,7 @@ class FeatureValidationPipeline:
         config_snapshot = {
             "selection_enabled": True,
             "selection_params": dict(cfg.selection_params or {}),
+            "missing_rate_threshold": screen_cfg.missing_rate_threshold,
             "weight_col": cfg.weight_col,
             "psi_use_woe_bins": screen_cfg.psi_use_woe_bins,
             "iv_use_woe_bins": screen_cfg.iv_use_woe_bins,
@@ -1673,9 +1681,15 @@ class FeatureValidationPipeline:
         }
         if selected_features:
             tables["selected_features"] = pd.DataFrame({"feature": selected_features})
-        screen_summary = (selection_summary or {}).get("screen_summary")
-        if isinstance(screen_summary, pd.DataFrame) and not screen_summary.empty:
-            tables["selection_screen_summary"] = screen_summary
+        if selection_summary:
+            for key in ("missing_rate", "missing_rate_dropped", "screen_summary"):
+                value = selection_summary.get(key)
+                if isinstance(value, pd.DataFrame) and not value.empty:
+                    tables[f"selection_{key}"] = value
+            if "final_features" in selection_summary:
+                tables["selection_final_features"] = pd.DataFrame(
+                    {"feature": list(selection_summary["final_features"])},
+                )
         for name, df in distribution_summary.items():
             tables[f"distribution_{name}"] = df
         return tables
