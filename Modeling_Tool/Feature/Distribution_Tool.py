@@ -186,6 +186,40 @@ def proc_means_by_grp(data, varlist, groupby=None, spec_missing_value=None, q=No
     return means_rpt
 
 
+_SCREENING_MEANS_COLS = ["attribute", "N_ALL", "N", "MISSING_RATE", "MIN", "MEAN", "MAX"]
+
+
+def proc_means_for_screening(data, varlist, spec_missing_value=None, q=None):
+    """Build a uniform means table for IV screening reports.
+
+    ``proc_means_by_grp`` returns object stats (unique/top/freq) when numeric and
+    categorical columns are melted together.  This helper splits by dtype so MIN,
+    MEAN, and MAX are always present (NaN for non-numeric features).
+    """
+    if not varlist:
+        return pd.DataFrame(columns=_SCREENING_MEANS_COLS)
+
+    numeric = [v for v in varlist if v in data.columns and pd.api.types.is_numeric_dtype(data[v])]
+    other = [v for v in varlist if v not in numeric and v in data.columns]
+    frames = []
+
+    if numeric:
+        frames.append(proc_means_by_grp(data, numeric, spec_missing_value=spec_missing_value, q=q))
+
+    for var in other:
+        part = proc_means_by_grp(data, [var], spec_missing_value=spec_missing_value, q=q)
+        for col in ("MIN", "MEAN", "MAX"):
+            if col not in part.columns:
+                part[col] = np.nan
+        frames.append(part)
+
+    if not frames:
+        return pd.DataFrame(columns=_SCREENING_MEANS_COLS)
+
+    out = pd.concat(frames, ignore_index=True)
+    return out[_SCREENING_MEANS_COLS]
+
+
 class DistributionShiftAnalyzer:
     """分布偏移分析器。
     

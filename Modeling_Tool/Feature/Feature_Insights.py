@@ -6,7 +6,7 @@
 import pandas as pd
 from tqdm import tqdm
 
-from .Distribution_Tool import proc_means_by_grp
+from .Distribution_Tool import proc_means_by_grp, proc_means_for_screening
 import logging
 logger = logging.getLogger(__name__)
 
@@ -208,14 +208,15 @@ class VarExtractionInsights:
         high_iv_summary = iv_info_res.query(f"IV >= {iv_cut}").round(4)
         high_iv_varlist = high_iv_summary['var'].tolist()
 
-        means = proc_means_by_grp(data, high_iv_varlist, spec_missing_value=self.missing_rate_ref)
-
         if len(high_iv_varlist) == 0:
             logger.info(f"WARNING: No variable with IV >= {iv_cut}")
-            means = means.rename(columns={"index": "attribute"})
+
+        means = proc_means_for_screening(
+            data, high_iv_varlist, spec_missing_value=self.missing_rate_ref,
+        )
 
         fnl_summary = high_iv_summary.merge(
-            means[['attribute', 'N_ALL', 'N', 'MISSING_RATE', 'MIN', 'MEAN', 'MAX']],
+            means,
             left_on=['var'],
             right_on=['attribute'],
             how='left'
