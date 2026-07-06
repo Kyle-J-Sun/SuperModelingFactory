@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,6 +16,9 @@ from Modeling_Tool.Core.utils import calc_iv
 _MISSING_BIN = "__MISSING__"
 
 
+_MISSING_RATE_COLS = ["var", "missing_rate"]
+
+
 @dataclass
 class WeightedScreenResult:
     selected_features: list[str]
@@ -23,6 +26,12 @@ class WeightedScreenResult:
     psi_table: pd.DataFrame
     corr_dropped: pd.DataFrame
     summary: pd.DataFrame
+    missing_rate_table: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=_MISSING_RATE_COLS),
+    )
+    missing_rate_dropped: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=_MISSING_RATE_COLS),
+    )
 
 
 def _summary_row(stage: str, n_in: int, n_out: int, threshold: Any, weight_col: str | None) -> dict:
@@ -327,6 +336,83 @@ def _weighted_corr_for_screen(
     return _weighted_pearson_corr_matrix(X, w_ins, nan_policy=corr_nan_policy)
 
 
+def _missing_rate_for_series(
+    series: pd.Series,
+    *,
+    w: np.ndarray | None = None,
+    missing_rate_ref: Any = None,
+) -> float:
+    values = series.copy()
+    if missing_rate_ref is not None:
+        values = values.replace(missing_rate_ref, np.nan)
+    if w is None:
+        total = len(values)
+        if total == 0:
+            return 1.0
+        valid = int(values.notna().sum())
+        return 1.0 - float(valid) / float(total)
+    arr = values.to_numpy(dtype=float, copy=False)
+    finite = np.isfinite(arr) & values.notna().to_numpy()
+    total_w = float(np.sum(w))
+    if total_w <= 0:
+        return 1.0
+    return 1.0 - float(np.sum(w[finite])) / total_w
+
+
+def _apply_missing_rate_stage(
+    ins: pd.DataFrame,
+    current: list[str],
+    summary_rows: list[dict],
+    *,
+    missing_rate_threshold: float | None,
+    missing_rate_ref: Any = None,
+    weight_col: str | None = None,
+    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+) -> tuple[list[str], pd.DataFrame, pd.DataFrame]:
+    empty = pd.DataFrame(columns=_MISSING_RATE_COLS)
+    if missing_rate_threshold is None:
+        return current, empty.copy(), empty.copy()
+
+    w = (
+        resolve_sample_weight(data=ins, weight_col=weight_col, expected_len=len(ins))
+        if weight_col is not None
+        else None
+    )
+    records: list[dict] = []
+    for var in current:
+        if var not in ins.columns:
+            continue
+        records.append({
+            "var": var,
+            "missing_rate": _missing_rate_for_series(
+                ins[var], w=w, missing_rate_ref=missing_rate_ref,
+            ),
+        })
+    missing_rate_table = pd.DataFrame(records) if records else empty.copy()
+    keep = missing_rate_table.loc[
+        missing_rate_table["missing_rate"] <= missing_rate_threshold, "var"
+    ].tolist()
+    missing_rate_dropped = missing_rate_table.loc[
+        missing_rate_table["missing_rate"] > missing_rate_threshold, _MISSING_RATE_COLS
+    ].copy()
+
+    n_before = len(current)
+    current = _apply_stage_keep(
+        current,
+        keep,
+        "missing_rate",
+        summary_rows,
+        on_empty_stage=on_empty_stage,
+        weight_col=weight_col,
+        threshold=missing_rate_threshold,
+        intersect=True,
+    )
+    summary_rows.append(
+        _summary_row("missing_rate", n_before, len(current), missing_rate_threshold, weight_col),
+    )
+    return current, missing_rate_table, missing_rate_dropped
+
+
 def _apply_stage_keep(
     current: list[str],
     keep: list[str],
@@ -439,12 +525,22 @@ def _legacy_unweighted_screen(
     plot_outputs: bool,
     iv_equal_freq: bool = True,
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+    missing_rate_threshold: float | None = None,
+    missing_rate_ref: Any = None,
 ) -> WeightedScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
     ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, None)]
+    current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
+        ins,
+        current,
+        summary_rows,
+        missing_rate_threshold=missing_rate_threshold,
+        missing_rate_ref=missing_rate_ref,
+        on_empty_stage=on_empty_stage,
+    )
 
     psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
     if psi_enabled:
@@ -528,6 +624,8 @@ def _legacy_unweighted_screen(
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),
+        missing_rate_table=missing_rate_table,
+        missing_rate_dropped=missing_rate_dropped,
     )
 
 
@@ -553,6 +651,8 @@ def _weighted_screen_impl(
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
     prefit_woe_engine: Any | None = None,
+    missing_rate_threshold: float | None = None,
+    missing_rate_ref: Any = None,
 ) -> WeightedScreenResult:
     ins = splits["ins"]
     oos = splits["oos"]
@@ -561,6 +661,15 @@ def _weighted_screen_impl(
 
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
+    current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
+        ins,
+        current,
+        summary_rows,
+        missing_rate_threshold=missing_rate_threshold,
+        missing_rate_ref=missing_rate_ref,
+        weight_col=weight_col,
+        on_empty_stage=on_empty_stage,
+    )
 
     # Precompute bin edges on ins for PSI / IV
     edges_cache: dict[str, list[float] | None] = {}
@@ -668,6 +777,8 @@ def _weighted_screen_impl(
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),
+        missing_rate_table=missing_rate_table,
+        missing_rate_dropped=missing_rate_dropped,
     )
 
 

@@ -31,6 +31,10 @@ def screen_result_to_summary(
         summary["iv"] = iv
     if not result.corr_dropped.empty:
         summary["corr_dropped"] = result.corr_dropped
+    if not result.missing_rate_table.empty:
+        summary["missing_rate"] = result.missing_rate_table
+    if not result.missing_rate_dropped.empty:
+        summary["missing_rate_dropped"] = result.missing_rate_dropped
     summary["corr_features"] = list(result.selected_features)
     summary["screen_summary"] = result.summary
     summary["final_features"] = list(result.selected_features)
