@@ -1457,8 +1457,17 @@ class FeatureValidationPipeline:
                 continue
             try:
                 bins = adapter.assign_bins(data, var)
-                tmp = pd.DataFrame({"bin": bins, target: target_series})
-                grouped = tmp.groupby("bin", dropna=False)[target].agg(["count", "sum"]).reset_index()
+                # Cast bins to object dtype and replace NaN with an explicit sentinel to
+                # avoid mixed Interval + NaN sort issues under older pandas/numpy combos
+                # (pandas <2.0 raises TypeError when groupby(sort=True) sees such a mix).
+                bin_arr = np.asarray(bins, dtype=object)
+                bin_arr = np.where(pd.isna(bin_arr), "__MISSING__", bin_arr)
+                tmp = pd.DataFrame({"bin": bin_arr, target: target_series.to_numpy()})
+                grouped = (
+                    tmp.groupby("bin", dropna=False, sort=False)[target]
+                    .agg(["count", "sum"])
+                    .reset_index()
+                )
                 grouped = grouped.rename(columns={"count": "n", "sum": "n_bad"})
                 grouped["n_good"] = grouped["n"] - grouped["n_bad"]
                 grouped["bad_pct"] = grouped["n_bad"] / total_bad
