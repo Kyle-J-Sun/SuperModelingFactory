@@ -19,7 +19,7 @@ from .Feature_Insights import (
     VarExtractionInsights as _BaseVarExtractionInsights,
     var_corr_filter,
 )
-from .Distribution_Tool import proc_means_by_grp
+from .Distribution_Tool import proc_means_for_screening
 
 
 def _psi_from_bins(expected_bins: pd.Series, current_bins: pd.Series, content: float) -> float:
@@ -110,9 +110,9 @@ def _screening_summary_from_engine(
     high_iv_summary = pd.DataFrame(rows).query(f"iv >= {iv_cut}").round(4)
     high_iv_varlist = high_iv_summary["var"].tolist()
     if high_iv_varlist:
-        means = proc_means_by_grp(data, high_iv_varlist, spec_missing_value=missing_rate_ref)
+        means = proc_means_for_screening(data, high_iv_varlist, spec_missing_value=missing_rate_ref)
         summary = high_iv_summary.merge(
-            means[["attribute", "N_ALL", "N", "MISSING_RATE", "MIN", "MEAN", "MAX"]],
+            means,
             left_on="var",
             right_on="attribute",
             how="left",
