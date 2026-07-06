@@ -1026,7 +1026,8 @@ class CreditModelPipeline:
         results = {}
         if not as_list(cfg.optuna_models):
             return results
-        search_spaces = cfg.optuna_params.get("search_spaces") or self._default_search_spaces()
+        user_search_spaces = cfg.optuna_params.get("search_spaces")
+        search_spaces = self._default_search_spaces() if user_search_spaces is None else user_search_spaces
         for raw_name in as_list(cfg.optuna_models):
             name = str(raw_name).lower()
             if name not in {"lgb", "xgb", "cat"} or name not in search_spaces:

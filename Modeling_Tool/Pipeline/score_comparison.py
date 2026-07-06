@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -7,6 +8,8 @@ from typing import Any, Callable
 import pandas as pd
 
 from ._common import as_list, make_dirs, safe_to_csv, write_basic_excel
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,7 +59,11 @@ class ScoreComparisonPipelineConfig:
         ]
     )
 
-    cross_vars: list[str] = field(default_factory=lambda: ["rating"])
+    # v0.4.0 behavior change: default is now [] (no cross-var breakdown).
+    # Previous default ["rating"] silently required a 'rating' column and either
+    # crashed or produced misleading breakdowns when it was absent. Callers who
+    # want a rating breakdown must now set cross_vars=["rating"] explicitly.
+    cross_vars: list[str] = field(default_factory=list)
     cross_metrics: dict[str, tuple[str, Any]] = field(default_factory=dict)
     cross_binning_numeric: list[bool] | bool = field(default_factory=lambda: [True, False])
     pairwise_cross_enabled: bool = True
@@ -135,8 +142,17 @@ class ScoreComparisonPipeline:
 
         cross_results = {}
         cross_metrics = cfg.cross_metrics or self._default_cross_metrics()
+        active_cross_vars = []
+        for cross_var in cfg.cross_vars:
+            if cross_var in work.columns:
+                active_cross_vars.append(cross_var)
+            else:
+                _logger.warning(
+                    "ScoreComparisonPipeline: cross_var %r not found in input columns; skipping.",
+                    cross_var,
+                )
         for score in score_cols:
-            for cross_var in cfg.cross_vars:
+            for cross_var in active_cross_vars:
                 for metric_name, (agg_col, agg_func) in cross_metrics.items():
                     key = f"{score}__{cross_var}__{metric_name}"
                     cross_results[key] = cross_risk(
@@ -246,7 +262,8 @@ class ScoreComparisonPipeline:
         comp_scores: list[str],
     ) -> None:
         cfg = self.config
-        required = [cfg.target_col, base_score] + comp_scores + score_cols + list(cfg.cross_vars)
+        # cross_vars are validated softly (warn+skip in run()); do not require them here.
+        required = [cfg.target_col, base_score] + comp_scores + score_cols
         if cfg.weight_col:
             required.append(cfg.weight_col)
         if cfg.split_col:

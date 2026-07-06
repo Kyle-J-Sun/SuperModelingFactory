@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +36,13 @@ class SampleAnalysisPipelineConfig:
     write_excel: bool = True
     approved_col: str | None = "is_approved"
 
+    # v0.4.0: split-grid preview controls.
+    # Default combinations (4 targets * 4 windows * 3 ratios * 20 seeds = 960 splits)
+    # can silently take hours. Set dry_run=True to short-circuit run() and only emit
+    # an estimated split count. Alternatively call SampleAnalysisPipeline
+    # .estimate_split_count() directly without running.
+    dry_run: bool = False
+
 
 @dataclass
 class SampleAnalysisPipelineResult:
@@ -50,8 +60,48 @@ class SampleAnalysisPipeline:
     def __init__(self, config: SampleAnalysisPipelineConfig | None = None):
         self.config = config or SampleAnalysisPipelineConfig()
 
+    def estimate_split_count(self, data: pd.DataFrame | None = None) -> dict[str, Any]:
+        """Return an upper-bound estimate of split candidates that _split_candidates would produce.
+
+        If `data` is provided, refine the OOT window count against the actual number of
+        distinct oot_time_dim values available (some windows may collapse if history is short).
+        """
+        cfg = self.config
+        n_targets = len(cfg.target_cols)
+        n_windows = len(cfg.oot_windows)
+        n_ratios = len(cfg.ins_oos_ratios)
+        n_seeds = len(list(cfg.random_seeds))
+        estimated = n_targets * n_windows * n_ratios * n_seeds
+        info: dict[str, Any] = {
+            "n_targets": n_targets,
+            "n_oot_windows": n_windows,
+            "n_ins_oos_ratios": n_ratios,
+            "n_random_seeds": n_seeds,
+            "estimated_max_splits": estimated,
+        }
+        if data is not None and cfg.oot_time_dim in data.columns:
+            n_periods = data[cfg.oot_time_dim].dropna().nunique()
+            info["available_oot_periods"] = int(n_periods)
+            info["windows_usable"] = sum(1 for w in cfg.oot_windows if int(w) < n_periods)
+        return info
+
     def run(self, data: pd.DataFrame) -> SampleAnalysisPipelineResult:
         self._validate_input(data)
+        if self.config.dry_run:
+            info = self.estimate_split_count(data)
+            _logger.warning(
+                "SampleAnalysisPipeline dry_run=True: skipping execution. Estimated splits: %s",
+                info,
+            )
+            empty = pd.DataFrame()
+            return SampleAnalysisPipelineResult(
+                label_coverage_summary=empty,
+                segment_bad_rate_summary=empty,
+                profile_summary=empty,
+                split_candidate_summary=pd.DataFrame([info]),
+                split_recommendation=empty,
+                output_paths={},
+            )
         work = data.copy()
         work[self.config.time_col] = pd.to_datetime(work[self.config.time_col])
 
