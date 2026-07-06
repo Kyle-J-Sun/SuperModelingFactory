@@ -13,6 +13,7 @@ from ._common import (
     as_list,
     make_dirs,
     safe_to_csv,
+    split_oot_by_flag,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
 )
@@ -908,8 +909,7 @@ class FeatureValidationPipeline:
                 raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
 
         if cfg.oot_col and cfg.oot_col in work.columns:
-            ins_oos = work[work[cfg.oot_col] == 0].copy()
-            oot = work[work[cfg.oot_col] != 0].copy()
+            ins_oos, oot = split_oot_by_flag(work, cfg.oot_col)
         else:
             ins_oos = work.copy()
             oot = pd.DataFrame(columns=work.columns)

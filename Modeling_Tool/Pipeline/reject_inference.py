@@ -268,8 +268,17 @@ class RejectInferencePipeline:
         missing = [c for c in missing if c not in data.columns]
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
-        if cfg.train_prescore and cfg.target_col not in data.columns:
-            raise KeyError(f"Missing target column {cfg.target_col!r} for pre-score training")
+        # Prescore is trained either explicitly (train_prescore=True) or
+        # implicitly when score_col is absent (see _run, L154). Either path
+        # requires target_col — validate both up-front instead of failing
+        # deep inside _fit_prescore with a confusing KeyError.
+        will_train_prescore = cfg.train_prescore or cfg.score_col not in data.columns
+        if will_train_prescore and cfg.target_col not in data.columns:
+            raise KeyError(
+                f"Missing target column {cfg.target_col!r} for pre-score training "
+                f"(train_prescore={cfg.train_prescore}, score_col {cfg.score_col!r} "
+                f"{'present' if cfg.score_col in data.columns else 'absent'})"
+            )
 
     def _validate_ri_approved_config(self) -> None:
         cfg = self.config
@@ -277,6 +286,19 @@ class RejectInferencePipeline:
             raise ValueError("ri_score_direction must be 'high_bad' or 'high_good'")
         if not 0 < float(cfg.ri_validation_frac) < 1:
             raise ValueError("ri_validation_frac must be in (0, 1)")
+        if not 0 <= float(cfg.oot_frac) < 1:
+            raise ValueError("oot_frac must be in [0, 1)")
+        # OOT + validation combined must leave room for a real training pool.
+        # Otherwise _sample_validation_ids' fallback (pool = approved when the
+        # exclude set covers everything) silently overlaps validation with OOT,
+        # leaking OOT rows into the validation metric.
+        combined = float(cfg.oot_frac) + float(cfg.ri_validation_frac)
+        if combined >= 1.0:
+            raise ValueError(
+                f"oot_frac ({cfg.oot_frac}) + ri_validation_frac ({cfg.ri_validation_frac}) "
+                f"= {combined:.3f} must be < 1.0 to leave a non-empty training pool disjoint "
+                f"from OOT and validation"
+            )
         if cfg.ri_approved_scope not in {"reference_only", "output_subset"}:
             raise ValueError("ri_approved_scope must be 'reference_only' or 'output_subset'")
         if cfg.ri_approved_frac is not None and cfg.ri_approved_n is not None:

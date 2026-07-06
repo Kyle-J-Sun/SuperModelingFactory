@@ -364,3 +364,40 @@ def write_basic_excel(
 
     em.close_workbook()
     return report_path
+
+
+def split_oot_by_flag(
+    data: pd.DataFrame,
+    oot_col: str | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split a frame into (ins_oos, oot) based on an OOT flag column.
+
+    Rows where ``oot_col`` equals 0 (after numeric coercion) are treated as
+    in-sample/out-of-sample, everything else is out-of-time.
+
+    The column is coerced with ``pd.to_numeric(errors="raise")`` so string /
+    boolean / mixed-dtype flags raise a clear error instead of silently routing
+    every row to ``oot`` (previous behavior: string ``"0"`` != integer ``0``,
+    so every row ended up in ``oot`` and ``ins_oos`` came out empty).
+
+    If ``oot_col`` is falsy or absent from ``data``, the full frame is returned
+    as ``ins_oos`` and an empty frame with matching columns as ``oot`` — same
+    as the historical fallback.
+    """
+    if not oot_col or oot_col not in data.columns:
+        empty = pd.DataFrame(columns=data.columns)
+        return data, empty
+
+    raw = data[oot_col]
+    try:
+        numeric = pd.to_numeric(raw, errors="raise")
+    except (ValueError, TypeError) as exc:
+        raise TypeError(
+            f"oot_col {oot_col!r} must be numeric (0 = ins_oos, non-zero = oot); "
+            f"got dtype={raw.dtype} with non-numeric values. Original error: {exc}"
+        ) from exc
+
+    mask_oot = numeric.fillna(0).astype(float) != 0.0
+    ins_oos = data.loc[~mask_oot].copy()
+    oot = data.loc[mask_oot].copy()
+    return ins_oos, oot
