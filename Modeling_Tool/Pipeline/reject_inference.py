@@ -621,7 +621,7 @@ class RejectInferencePipeline:
             params.setdefault("random_state", cfg.random_state)
             model = GradientBoostingModel(cfg.ri_model_type, params)
             weight = train["_weight"].values if "_weight" in train.columns else None
-            fit_kwargs = {"wgt": weight} if weight is not None else {}
+            fit_kwargs = {"sample_weight": weight} if weight is not None else {}
             model.fit(
                 x=train[feature_cols],
                 y=(train[cfg.target_col] > 0.5).astype(int),
