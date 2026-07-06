@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -307,9 +308,45 @@ def predict_positive(model: Any, data: pd.DataFrame, feature_cols: list[str]) ->
         raise TypeError(f"Model {type(model)!r} does not expose predict/predict_proba")
 
     pred_arr = np.asarray(pred)
-    if pred_arr.ndim == 2 and pred_arr.shape[1] > 1:
-        return pred_arr[:, 1]
-    return pred_arr.reshape(-1)
+    n_rows = len(data)
+
+    if pred_arr.ndim == 2:
+        if pred_arr.shape[1] == 2:
+            # sklearn convention: column 1 is positive class
+            result = pred_arr[:, 1]
+        elif pred_arr.shape[1] == 1:
+            result = pred_arr[:, 0]
+        else:
+            raise ValueError(
+                f"predict_proba returned unexpected shape {pred_arr.shape}; "
+                f"expected 1-D or 2-D with 1-2 columns."
+            )
+    elif pred_arr.ndim == 1:
+        result = pred_arr
+    else:
+        raise ValueError(
+            f"predict_proba returned unexpected ndim={pred_arr.ndim} "
+            f"(shape={pred_arr.shape}); expected 1-D or 2-D."
+        )
+
+    result = result.reshape(-1)
+    if len(result) != n_rows:
+        raise ValueError(
+            f"predict_positive length mismatch: got {len(result)} predictions "
+            f"for {n_rows} input rows. Model {type(model).__name__} may have "
+            f"dropped rows silently."
+        )
+
+    finite_mask = np.isfinite(result)
+    if not finite_mask.all():
+        n_bad = int((~finite_mask).sum())
+        warnings.warn(
+            f"predict_positive: {n_bad}/{n_rows} predictions are NaN/Inf "
+            f"from model {type(model).__name__}. Downstream scoring may be affected.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return result
 
 
 def add_dataset_with_optional_weight(

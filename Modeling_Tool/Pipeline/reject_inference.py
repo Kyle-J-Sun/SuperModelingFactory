@@ -477,7 +477,20 @@ class RejectInferencePipeline:
         cfg = self.config
         bad_scores = approved.loc[approved[cfg.target_col] == 1, cfg.score_col]
         if len(bad_scores.dropna()) == 0:
-            return float(approved[cfg.score_col].median())
+            fallback = float(approved[cfg.score_col].median())
+            if not np.isfinite(fallback):
+                raise ValueError(
+                    "Cannot derive default hard cutoff: no valid bad-sample scores and "
+                    "overall score median is NaN. Check prescore model output, or set "
+                    "ri_method_params['hard_cutoff']['cutoff'] explicitly."
+                )
+            warnings.warn(
+                f"No bad samples with valid {cfg.score_col!r}; using overall score "
+                f"median {fallback:.6f} as default hard cutoff.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return fallback
         percentile = 25 if cfg.ri_score_direction == "high_bad" else 75
         return float(np.percentile(bad_scores.dropna(), percentile))
 
