@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Checkout main package
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: SuperModelingFactory
 
       - name: Checkout test suite (private)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Kyle-J-Sun/SuperModelingFactory_pytest
           token: ${{ secrets.PYTEST_REPO_TOKEN }}
@@ -37,7 +37,7 @@ jobs:
           ref: main
 
       - name: Setup Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
