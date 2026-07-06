@@ -366,6 +366,38 @@ def write_basic_excel(
     return report_path
 
 
+def copy_column_length_checked(
+    dst: pd.DataFrame,
+    src: pd.DataFrame,
+    col: str,
+    *,
+    dst_name: str,
+    src_name: str,
+) -> None:
+    """Positionally copy ``src[col]`` into ``dst[col]`` with a length guard.
+
+    ``warm_start_score_col`` in credit_model relies on WOE-transformed splits
+    lining up row-for-row with the raw splits they were transformed from. That
+    assumption held in practice, but the historical implementation used a bare
+    ``dst[col] = src[col].to_numpy()`` which would corrupt the join whenever the
+    two frames drifted in length (fit-query filtering, prior ``.dropna``, etc.)
+    with no error. This helper enforces the invariant explicitly.
+
+    Values are copied by position (``.to_numpy()``) — not by index alignment —
+    which matches the way ``adapter.transform`` returns rows in the same order
+    they entered. Lengths must match exactly; otherwise raise ``ValueError``
+    with the frame names so the caller can debug.
+    """
+    if len(dst) != len(src):
+        raise ValueError(
+            f"Cannot copy column {col!r} from {src_name!r} (len={len(src)}) to "
+            f"{dst_name!r} (len={len(dst)}): row counts must match. This usually "
+            f"means WOE transformation dropped or reordered rows relative to the "
+            f"source frame — check woe_fit_query / dropna behavior."
+        )
+    dst[col] = src[col].to_numpy()
+
+
 def split_oot_by_flag(
     data: pd.DataFrame,
     oot_col: str | None,

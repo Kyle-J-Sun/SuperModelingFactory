@@ -11,6 +11,7 @@ from ._common import (
     add_dataset_with_optional_weight,
     apply_woe_fit_query,
     as_list,
+    copy_column_length_checked,
     make_dirs,
     merge_dict,
     persist_explain_outputs,
@@ -600,10 +601,22 @@ class CreditModelPipeline:
         if cfg.warm_start_enabled and cfg.warm_start_score_col:
             for name, df in woe_splits.items():
                 if cfg.warm_start_score_col not in df.columns and cfg.warm_start_score_col in splits[name].columns:
-                    df[cfg.warm_start_score_col] = splits[name][cfg.warm_start_score_col].to_numpy()
+                    copy_column_length_checked(
+                        df,
+                        splits[name],
+                        cfg.warm_start_score_col,
+                        dst_name=f"woe_splits[{name!r}]",
+                        src_name=f"splits[{name!r}]",
+                    )
             for name, df in extra_eval.items():
                 if cfg.warm_start_score_col not in df.columns and cfg.warm_start_score_col in cfg.extra_eval_datasets[name].columns:
-                    df[cfg.warm_start_score_col] = cfg.extra_eval_datasets[name][cfg.warm_start_score_col].to_numpy()
+                    copy_column_length_checked(
+                        df,
+                        cfg.extra_eval_datasets[name],
+                        cfg.warm_start_score_col,
+                        dst_name=f"extra_eval[{name!r}]",
+                        src_name=f"extra_eval_datasets[{name!r}]",
+                    )
 
         return {
             "engine": adapter,
@@ -697,11 +710,23 @@ class CreditModelPipeline:
         if cfg.warm_start_enabled and cfg.warm_start_score_col:
             for name, df in woe_splits.items():
                 if cfg.warm_start_score_col not in df.columns:
-                    df[cfg.warm_start_score_col] = splits[name][cfg.warm_start_score_col].to_numpy()
+                    copy_column_length_checked(
+                        df,
+                        splits[name],
+                        cfg.warm_start_score_col,
+                        dst_name=f"woe_splits[{name!r}]",
+                        src_name=f"splits[{name!r}]",
+                    )
             for name, df in extra_eval.items():
                 if cfg.warm_start_score_col not in df.columns:
                     source = cfg.extra_eval_datasets[name]
-                    df[cfg.warm_start_score_col] = source[cfg.warm_start_score_col].to_numpy()
+                    copy_column_length_checked(
+                        df,
+                        source,
+                        cfg.warm_start_score_col,
+                        dst_name=f"extra_eval[{name!r}]",
+                        src_name=f"extra_eval_datasets[{name!r}]",
+                    )
 
         return {
             "engine": engine,
