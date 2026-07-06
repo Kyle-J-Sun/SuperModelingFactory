@@ -21,6 +21,8 @@ Examples
 >>> df_inferred = inferrer.infer(df_approved, df_rejected, 'score')
 """
 
+import warnings
+
 import pandas as pd
 import numpy as np
 from typing import Union, Optional, List, Dict, Any, Tuple
@@ -208,7 +210,28 @@ class HardCutoffInferrer(RejectInferrer):
               score_col: Optional[str] = None) -> pd.DataFrame:
         """
         Apply hard cutoff inference.
-        
+
+        NaN-scored rejects (0.4.2 fix, N17)
+        ------------------------------------
+        Before 0.4.2, any rejected row whose ``score_col`` value was NaN was
+        silently labelled ``0`` ("good") because ``NaN >= cutoff`` and
+        ``NaN <= cutoff`` both evaluate to ``False``, which the old code then
+        cast through ``.astype(int)``. That silently seeded the training set
+        with as many synthetic "good" rejects as there were NaN scores, biasing
+        every downstream model that consumed the combined frame.
+
+        From 0.4.2:
+
+        * If **every** reject has a NaN score, ``ValueError`` is raised with the
+          missing count — the caller has no signal to infer from and must
+          re-check upstream scoring.
+        * If **some** rejects have NaN scores, a ``RuntimeWarning`` is emitted
+          naming the NaN count and share, and those rows carry ``target = NaN``
+          in the returned frame (not ``0``). Callers that intersect on the
+          target column will drop them explicitly instead of training on
+          silently-fabricated labels.
+        * Rejects with finite scores are labelled exactly as before.
+
         Parameters
         ----------
         df_approved : pandas.DataFrame
@@ -217,20 +240,53 @@ class HardCutoffInferrer(RejectInferrer):
             Rejected applications.
         score_col : str, optional
             Score column.
-        
+
         Returns
         -------
         pandas.DataFrame
-            Combined data with inferred targets.
+            Combined data with inferred targets. Rejects whose score was NaN
+            (see above) will have ``target = NaN`` rather than ``0``.
         """
         score_col = score_col or self.score_col
-        
+
         df_rejected_copy = df_rejected.copy()
+
+        scores = pd.to_numeric(df_rejected_copy[score_col], errors="coerce")
+        nan_mask = scores.isna()
+        n_nan = int(nan_mask.sum())
+        n_total = int(len(scores))
+
+        if n_total > 0 and n_nan == n_total:
+            raise ValueError(
+                f"HardCutoffInferrer.infer: every rejected row (n={n_total}) has a "
+                f"NaN value in score_col={score_col!r}. Cannot infer targets. "
+                f"Check the upstream prescore step or pass a different score column."
+            )
+
+        if n_nan > 0:
+            share = n_nan / n_total if n_total else 0.0
+            warnings.warn(
+                f"HardCutoffInferrer.infer: {n_nan}/{n_total} ({share:.1%}) rejected "
+                f"rows have NaN in score_col={score_col!r}. These rows now carry "
+                f"target=NaN in the returned frame (pre-0.4.2 they were silently "
+                f"labelled 0). Drop them explicitly downstream if the training step "
+                f"cannot handle NaN targets.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         if self.score_direction == "high_bad":
-            df_rejected_copy[self.target_col] = (df_rejected_copy[score_col] >= self.cutoff).astype(int)
+            labels = (scores >= self.cutoff)
         else:
-            df_rejected_copy[self.target_col] = (df_rejected_copy[score_col] <= self.cutoff).astype(int)
-        
+            labels = (scores <= self.cutoff)
+
+        # Preserve NaN-ness explicitly: labels for NaN scores become NaN, not
+        # False -> 0. Cast the finite side back to int without losing the NaN
+        # rows.
+        target_series = labels.astype("float")
+        target_series[nan_mask] = np.nan
+        df_rejected_copy[self.target_col] = target_series
+
         return pd.concat([df_approved, df_rejected_copy], ignore_index=True)
 
 

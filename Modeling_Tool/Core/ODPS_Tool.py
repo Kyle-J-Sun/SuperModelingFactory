@@ -247,7 +247,7 @@ class ODPSRunner(object):
 
         return table_schema
 
-    def upload_df(self, df, table_name, table_schema=None, partition=None):
+    def upload_df(self, df, table_name, table_schema=None, partition=None, atomic=True):
         """上传数据集至mc中创建新表
 
         Parameters
@@ -260,20 +260,113 @@ class ODPSRunner(object):
             数据集
         partition: string
             保存分区
+        atomic: bool, default True
+            When ``True`` (recommended, default from 0.4.2), the target table is
+            replaced through a temp-table + rename swap so that a failure between
+            ``delete_table`` and the completed write never leaves the caller
+            with a dropped-and-empty table. When ``False``, the pre-0.4.2
+            behaviour is used: the existing table is dropped first and then
+            recreated, so any exception during write leaves the target table
+            missing. Only set ``atomic=False`` if you deliberately want the
+            legacy behaviour, e.g. for tables whose downstream readers expect
+            a specific object identity.
         """
         if table_schema is None:
             df.loc[:, "py_inserttime"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             table_schema = self.cre_table_schema(df=df, partition_name=None)
 
-        self.o.delete_table(table_name, if_exists=True)
-        t = self.o.create_table(table_name, table_schema)
+        if not atomic:
+            # Legacy pre-0.4.2 non-atomic path — retained under an explicit
+            # opt-out for callers that need the old identity semantics.
+            self.o.delete_table(table_name, if_exists=True)
+            t = self.o.create_table(table_name, table_schema)
+            if bool(partition):
+                with t.open_writer(partition=partition, create_partition=True) as writer:
+                    writer.write(df.values.tolist())
+            else:
+                with t.open_writer() as writer:
+                    writer.write(df.values.tolist())
+            logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
+            return
 
-        if bool(partition):
-            with t.open_writer(partition=partition, create_partition=True) as writer:
-                writer.write(df.values.tolist())
-        else:
-            with t.open_writer() as writer:
-                writer.write(df.values.tolist())
+        # Atomic swap path (default from 0.4.2). If any step before the final
+        # swap fails, the original table is untouched.
+        ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        tmp_name = f"{table_name}__tmp_{ts}"
+        old_name = f"{table_name}__old_{ts}"
+
+        # Step 1: write data into the temp table. If this fails, drop the
+        # partial temp table and re-raise; the target table is untouched.
+        self.o.delete_table(tmp_name, if_exists=True)
+        tmp_table = self.o.create_table(tmp_name, table_schema)
+        try:
+            if bool(partition):
+                with tmp_table.open_writer(partition=partition, create_partition=True) as writer:
+                    writer.write(df.values.tolist())
+            else:
+                with tmp_table.open_writer() as writer:
+                    writer.write(df.values.tolist())
+        except Exception:
+            try:
+                self.o.delete_table(tmp_name, if_exists=True)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    f"upload_df: failed to drop temp table {tmp_name} after write error: {cleanup_exc!r}"
+                )
+            raise
+
+        # Step 2: swap. If the original table exists, rename it aside first so
+        # that the rename of tmp -> target is guaranteed to succeed. Then drop
+        # the old copy (best-effort, warn on failure).
+        target_exists = self.o.exist_table(table_name)
+        if target_exists:
+            try:
+                self.o.run_sql(f"ALTER TABLE {table_name} RENAME TO {old_name};")
+            except Exception:
+                # Rename of the live target failed — do not touch it. Drop the
+                # tmp table so we don't leak it, then re-raise.
+                try:
+                    self.o.delete_table(tmp_name, if_exists=True)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    logger.warning(
+                        f"upload_df: failed to drop temp table {tmp_name} after rename-target failure: {cleanup_exc!r}"
+                    )
+                raise
+
+        try:
+            self.o.run_sql(f"ALTER TABLE {tmp_name} RENAME TO {table_name};")
+        except Exception:
+            # tmp -> target rename failed. If we already moved the original,
+            # try to restore it so the caller is not left with a missing table.
+            if target_exists:
+                try:
+                    self.o.run_sql(f"ALTER TABLE {old_name} RENAME TO {table_name};")
+                    logger.warning(
+                        f"upload_df: swap of {tmp_name} -> {table_name} failed; restored original from {old_name}"
+                    )
+                except Exception as restore_exc:  # noqa: BLE001
+                    logger.error(
+                        f"upload_df: swap of {tmp_name} -> {table_name} failed AND restore of "
+                        f"{old_name} -> {table_name} failed: {restore_exc!r}. "
+                        f"Manual recovery required — original data is in {old_name}."
+                    )
+            try:
+                self.o.delete_table(tmp_name, if_exists=True)
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+        # Step 3: drop the moved-aside original — best-effort, do not fail the
+        # call if this cleanup errors, since the swap already succeeded.
+        if target_exists:
+            try:
+                self.o.delete_table(old_name, if_exists=True)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    f"upload_df: swap succeeded but failed to drop old copy {old_name}: {cleanup_exc!r}. "
+                    f"Safe to delete manually."
+                )
+
         logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
 
     def insert_df(self, df, table_name, overwrite=True, partition=None):

@@ -172,8 +172,17 @@ class SampleSplitter:
                 exclude_cols: Optional[List[str]] = None,
                 test_size: Optional[float] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Split DataFrame while excluding certain columns from split.
-        
+        Split DataFrame into train/test partitions while keeping every column.
+
+        ``exclude_cols`` means "these columns should not participate in the
+        split strategy" (i.e. they must not be used as stratify keys or as
+        features driving the split), not "these columns should be dropped
+        from the output frames." Before 0.4.2 the columns listed here were
+        silently dropped from ``train_df`` / ``test_df``, which broke every
+        downstream step that relied on carry-through keys such as ``user_id``
+        or ``apply_date``. Fixed in 0.4.2: both output frames now contain the
+        full column set of the input frame.
+
         Parameters
         ----------
         df : pandas.DataFrame
@@ -181,45 +190,47 @@ class SampleSplitter:
         target : str
             Target column name.
         exclude_cols : list of str, optional
-            Columns to exclude from split.
+            Columns to carry through the split without letting them influence
+            the split strategy. Their values are preserved verbatim on both
+            output frames.
         test_size : float, optional
             Override default test size.
-        
+
         Returns
         -------
         tuple
-            (train_df, test_df)
-        
+            (train_df, test_df) — both include every column of ``df`` (target
+            column, features, and any ``exclude_cols``).
+
         Examples
         --------
         >>> train_df, test_df = splitter.split_df(df, 'target', exclude_cols=['id', 'date'])
+        >>> assert 'id' in train_df.columns and 'date' in test_df.columns
         """
         test_size = test_size if test_size is not None else self.test_size
-        
-        exclude_cols = exclude_cols or []
-        feature_cols = [c for c in df.columns if c not in exclude_cols + [target]]
-        
-        X = df[feature_cols]
+
+        exclude_cols = list(exclude_cols or [])
+
         y = df[target]
-        
+
         if self.stratify:
             strat = y
         else:
             strat = None
-        
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
+
+        # Split on the index so that we can reindex the full frame afterwards.
+        # This preserves every column (features, target, and exclude_cols)
+        # on both output frames.
+        train_idx, test_idx = train_test_split(
+            df.index,
             test_size=test_size,
             random_state=self.random_state,
             stratify=strat
         )
-        
-        train_df = X_train.copy()
-        train_df[target] = y_train
-        
-        test_df = X_test.copy()
-        test_df[target] = y_test
-        
+
+        train_df = df.loc[train_idx].copy()
+        test_df = df.loc[test_idx].copy()
+
         return train_df, test_df
 
 
