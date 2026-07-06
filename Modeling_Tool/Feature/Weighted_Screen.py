@@ -113,11 +113,25 @@ def _weighted_bin_distribution(
     w: np.ndarray,
     content: float,
 ) -> pd.Series:
+    """Return the weighted bin distribution as an observed-only frequency
+    Series.
+
+    Fix (0.4.2, N23): the pre-0.4.2 version unioned ``_MISSING_BIN`` into the
+    returned index and clipped every entry to ``content`` (a small positive
+    floor such as ``1e-5``). When only one side of a PSI comparison had missing
+    values, that forced a large synthetic mass on the missing bin of the side
+    that actually observed zero missings — which then propagated through
+    ``_psi_from_distributions`` as a large spurious PSI component. The fix is
+    to return only the bins actually observed in ``bins``; the alignment and
+    zero-safety are done exactly once, in ``_psi_from_distributions``, so both
+    sides are treated symmetrically. The ``content`` parameter is retained for
+    signature stability but is now unused in this helper.
+    """
+    del content  # retained for signature stability; alignment is elsewhere.
     df = pd.DataFrame({"bin": bins, "w": w})
     dist = df.groupby("bin", dropna=False)["w"].sum()
     total = float(dist.sum()) or 1.0
-    dist = dist / total
-    return dist.reindex(dist.index.union([_MISSING_BIN]), fill_value=0.0).clip(lower=content)
+    return dist / total
 
 
 def _psi_from_distributions(expected: pd.Series, actual: pd.Series, content: float) -> float:

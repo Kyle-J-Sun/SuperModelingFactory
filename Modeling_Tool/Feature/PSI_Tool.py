@@ -7,11 +7,19 @@ to measure the distribution drift between expected and actual datasets.
 Author: Matrix Agent
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from typing import Union, List, Dict, Optional, Tuple, Callable, Any
 from tqdm import tqdm
 from Modeling_Tool.Core.Binning_Tool import quick_binning
+
+# Missing bucket label used across PSI helpers when ``missing_policy="include"``
+# (the 0.4.2 default). Kept identical to the sentinel already used by
+# ``Feature.Weighted_Screen`` and ``WOE_Adapter`` so downstream aggregators can
+# recognise it without special-casing.
+_MISSING_BIN = "__MISSING__"
 
 # ============================================================================
 # Classes
@@ -460,14 +468,29 @@ def _calculate_single_psi(
     return_details: bool = False,
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
-    precision: int = 5
+    precision: int = 5,
+    missing_policy: str = "drop",
 ) -> Union[float, Tuple[float, pd.DataFrame]]:
     """
     Calculate Population Stability Index (PSI) for a single variable.
-    
+
     This function bins both expected and actual series using the same breakpoints,
     then calculates PSI based on the distribution difference between them.
-    
+
+    Missing handling (0.4.2, N29)
+    ------------------------------
+    Before 0.4.2, both series were unconditionally passed through ``.dropna()``
+    before binning. Any drift in the *missing rate itself* — the single most
+    common early signal of a data-pipeline break — was silently invisible in
+    the returned PSI. 0.4.2 adds the ``missing_policy`` parameter so callers
+    can opt in to the corrected behaviour. The default remains ``"drop"`` for
+    strict backward compatibility with the pre-0.4.2 numeric output; the next
+    minor release will flip the default to ``"include"``. Pass
+    ``missing_policy="include"`` to route NaN rows through a dedicated
+    ``"__MISSING__"`` bin on both sides so missing-rate drift contributes to
+    the PSI. Pass ``missing_policy="warn_and_drop"`` to keep the old numbers
+    but at least surface a ``RuntimeWarning`` naming the two NaN counts.
+
     Parameters
     ----------
     expected_series : pandas.Series
@@ -486,62 +509,112 @@ def _calculate_single_psi(
         Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
         Decimal precision. Default is 5.
-        
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. ``"drop"`` (default in 0.4.2) reproduces the
+        pre-0.4.2 behaviour and silently excludes NaN rows from both sides
+        before binning. ``"include"`` treats NaN as its own ``"__MISSING__"``
+        bin so missing-rate drift shows up in the PSI — recommended for any
+        production drift monitor, and will become the default in the next
+        minor release. ``"warn_and_drop"`` behaves like ``"drop"`` but emits
+        a ``RuntimeWarning`` naming the two NaN counts so the caller sees what
+        was dropped.
+
     Returns
     -------
     float or tuple
         If return_details is False: Returns total PSI value.
         If return_details is True: Returns tuple of (PSI value, details DataFrame).
-        
+
     Notes
     -----
     PSI Formula: Σ (Actual% - Expected%) * ln(Actual% / Expected%)
     A PSI < 0.1 indicates stable population, 0.1-0.25 suggests some change,
     and > 0.25 indicates significant drift.
     """
-    # Drop NA
+    if missing_policy not in {"include", "drop", "warn_and_drop"}:
+        raise ValueError(
+            f"_calculate_single_psi: missing_policy must be one of "
+            f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
+        )
+
+    # Record NaN counts before splitting so we can (a) re-attach the missing
+    # bin under "include" and (b) warn under "warn_and_drop".
+    n_expected = int(len(expected_series))
+    n_actual = int(len(actual_series))
+    n_expected_na = int(expected_series.isna().sum())
+    n_actual_na = int(actual_series.isna().sum())
+
+    if missing_policy == "warn_and_drop" and (n_expected_na or n_actual_na):
+        warnings.warn(
+            f"_calculate_single_psi: dropping NaN rows before binning. "
+            f"expected: {n_expected_na}/{n_expected} NaN, "
+            f"actual: {n_actual_na}/{n_actual} NaN. "
+            f"Pass missing_policy='include' to treat NaN as its own bin so "
+            f"missing-rate drift is captured.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     expected_clean = expected_series.dropna()
     actual_clean = actual_series.dropna()
-    
+
     # Bin the expected data to get breakpoints
     expected_bins, breakpoints = quick_binning(
-        pd.DataFrame(expected_clean), 
-        expected_clean.name, 
-        labels=None, 
-        nbins=buckets, 
-        precision=precision, 
-        equal_freq=equal_freq, 
-        right=True, 
+        pd.DataFrame(expected_clean),
+        expected_clean.name,
+        labels=None,
+        nbins=buckets,
+        precision=precision,
+        equal_freq=equal_freq,
+        right=True,
         include_lowest=False,
-        min_bin_prop=min_bin_prop, 
-        tree_binning=False, 
-        target=None, 
+        min_bin_prop=min_bin_prop,
+        tree_binning=False,
+        target=None,
         random_state=42
     )
-    
+
     # Bin the actual data using the same breakpoints
     actual_bins, _ = quick_binning(
-        pd.DataFrame(actual_clean), 
-        actual_clean.name, 
-        labels=None, 
-        nbins=list(breakpoints), 
-        precision=precision, 
-        equal_freq=equal_freq, 
-        right=True, 
+        pd.DataFrame(actual_clean),
+        actual_clean.name,
+        labels=None,
+        nbins=list(breakpoints),
+        precision=precision,
+        equal_freq=equal_freq,
+        right=True,
         include_lowest=False,
-        min_bin_prop=min_bin_prop, 
-        tree_binning=False, 
-        target=None, 
+        min_bin_prop=min_bin_prop,
+        tree_binning=False,
+        target=None,
         random_state=42
     )
-    
-    # Get bin counts
+
+    # Get bin counts (finite-value rows only, from quick_binning)
     expected_count = expected_bins.value_counts(normalize=False, sort=False)
     actual_count = actual_bins.value_counts(normalize=False, sort=False)
-    
-    # Get bin proportions
-    expected_percents = expected_bins.value_counts(normalize=True, sort=False)
-    actual_percents = actual_bins.value_counts(normalize=True, sort=False)
+
+    if missing_policy == "include":
+        # Re-attach the __MISSING__ bin so that missing-rate drift contributes
+        # to the PSI on both sides. The denominators use the *original* row
+        # counts (before dropna) so the fractions are directly comparable.
+        if n_expected_na > 0:
+            expected_count = pd.concat(
+                [expected_count, pd.Series({_MISSING_BIN: n_expected_na})]
+            )
+        if n_actual_na > 0:
+            actual_count = pd.concat(
+                [actual_count, pd.Series({_MISSING_BIN: n_actual_na})]
+            )
+        expected_denom = float(n_expected) if n_expected > 0 else 1.0
+        actual_denom = float(n_actual) if n_actual > 0 else 1.0
+        expected_percents = expected_count / expected_denom
+        actual_percents = actual_count / actual_denom
+    else:
+        # "drop" / "warn_and_drop": legacy behaviour, denominators are the
+        # NaN-dropped row counts, so missing-rate drift is invisible.
+        expected_percents = expected_bins.value_counts(normalize=True, sort=False)
+        actual_percents = actual_bins.value_counts(normalize=True, sort=False)
     
     # Ensure both series have the same bin indices
     all_bins = expected_percents.index.union(actual_percents.index)
