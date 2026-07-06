@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import gc
+import logging
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 from ._common import (
     apply_woe_fit_query,
@@ -939,8 +942,15 @@ class FeatureValidationPipeline:
 
                 splitter = SampleSplitter(test_size=test_size, random_state=random_state, stratify=True)
                 return splitter.split_df(data, target=target_col)
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning(
+                    "SampleSplitter stratified split failed; falling back to naive random split. "
+                    "target=%s test_size=%s random_state=%s error=%r",
+                    target_col,
+                    test_size,
+                    random_state,
+                    exc,
+                )
         oos = data.sample(frac=test_size, random_state=random_state)
         ins = data.drop(index=oos.index)
         return ins.reset_index(drop=True), oos.reset_index(drop=True)
@@ -1512,24 +1522,48 @@ class FeatureValidationPipeline:
         new_features: list[str],
         incumbent_features: list[str],
     ) -> pd.DataFrame:
+        # Vectorized in v0.4.0: previous O(n^2) Python loop with .loc[] lookups was
+        # a real bottleneck at 3000+ features (~4.5M scalar lookups). Uses np.triu_indices
+        # to extract the upper triangle once, filters by threshold, then classifies pair_type
+        # via boolean masks. Output is numerically identical to the loop version.
+        empty_cols = ["var1", "var2", "corr", "abs_corr", "pair_type"]
         if corr_matrix.empty:
-            return pd.DataFrame(columns=["var1", "var2", "corr", "abs_corr", "pair_type"])
-        rows = []
+            return pd.DataFrame(columns=empty_cols)
+        cols = list(corr_matrix.columns)
+        n = len(cols)
+        if n < 2:
+            return pd.DataFrame(columns=empty_cols)
+        values = corr_matrix.to_numpy()
+        iu, ju = np.triu_indices(n, k=1)
+        pair_corr = values[iu, ju]
+        with np.errstate(invalid="ignore"):
+            mask = np.isfinite(pair_corr) & (np.abs(pair_corr) > threshold)
+        if not mask.any():
+            return pd.DataFrame(columns=empty_cols)
+        iu = iu[mask]
+        ju = ju[mask]
+        pair_corr = pair_corr[mask]
+        col_arr = np.asarray(cols, dtype=object)
+        var1 = col_arr[iu]
+        var2 = col_arr[ju]
         new_set = set(new_features)
         incumbent_set = set(incumbent_features)
-        cols = list(corr_matrix.columns)
-        for i, var1 in enumerate(cols):
-            for var2 in cols[i + 1:]:
-                corr = corr_matrix.loc[var1, var2]
-                if pd.notna(corr) and abs(corr) > threshold:
-                    if var1 in new_set and var2 in new_set:
-                        pair_type = "new_new"
-                    elif (var1 in new_set and var2 in incumbent_set) or (var2 in new_set and var1 in incumbent_set):
-                        pair_type = "new_incumbent"
-                    else:
-                        pair_type = "incumbent_incumbent"
-                    rows.append({"var1": var1, "var2": var2, "corr": corr, "abs_corr": abs(corr), "pair_type": pair_type})
-        return pd.DataFrame(rows)
+        v1_new = np.fromiter((v in new_set for v in var1), dtype=bool, count=len(var1))
+        v2_new = np.fromiter((v in new_set for v in var2), dtype=bool, count=len(var2))
+        v1_inc = np.fromiter((v in incumbent_set for v in var1), dtype=bool, count=len(var1))
+        v2_inc = np.fromiter((v in incumbent_set for v in var2), dtype=bool, count=len(var2))
+        pair_type = np.full(len(var1), "incumbent_incumbent", dtype=object)
+        pair_type[(v1_new & v2_inc) | (v2_new & v1_inc)] = "new_incumbent"
+        pair_type[v1_new & v2_new] = "new_new"
+        return pd.DataFrame(
+            {
+                "var1": var1,
+                "var2": var2,
+                "corr": pair_corr,
+                "abs_corr": np.abs(pair_corr),
+                "pair_type": pair_type,
+            }
+        )
 
     def _correlated_detail(
         self,

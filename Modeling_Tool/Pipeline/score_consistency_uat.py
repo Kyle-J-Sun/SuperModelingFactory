@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 import pandas as pd
 
 from ._common import make_dirs, safe_to_csv
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +41,13 @@ class ScoreConsistencyUATPipelineConfig:
 
     include_submodel_scores: bool = True
     submodel_pairs: dict[str, str] = field(default_factory=dict)
+
+    # Object-column numeric coercion controls (v0.4.0)
+    # In v0.3.x, object columns were silently coerced to numeric whenever ANY value
+    # could be parsed, discarding legitimate string labels (e.g. "A1", "NA") without
+    # warning. From 0.4.0, coercion is opt-in via safety modes below.
+    numeric_coercion_mode: str = "safe"  # "safe" | "aggressive" | "off"
+    numeric_coercion_min_ratio: float = 0.99  # only used in "safe" mode
 
 
 @dataclass
@@ -211,13 +221,51 @@ class ScoreConsistencyUATPipeline:
             indicator=True,
         )
 
-        for col in checker.df_compare.columns:
-            if col in ("flow_id", "_merge"):
-                continue
-            if checker.df_compare[col].dtype == object:
-                as_num = pd.to_numeric(checker.df_compare[col], errors="coerce")
-                if as_num.notna().any():
+        mode = getattr(self.config, "numeric_coercion_mode", "safe")
+        min_ratio = float(getattr(self.config, "numeric_coercion_min_ratio", 0.99))
+        if mode not in {"safe", "aggressive", "off"}:
+            raise ValueError(
+                f"numeric_coercion_mode must be one of 'safe','aggressive','off'; got {mode!r}"
+            )
+        if mode != "off":
+            for col in checker.df_compare.columns:
+                if col in ("flow_id", "_merge"):
+                    continue
+                if checker.df_compare[col].dtype != object:
+                    continue
+                original = checker.df_compare[col]
+                as_num = pd.to_numeric(original, errors="coerce")
+                original_notna = original.notna()
+                original_count = int(original_notna.sum())
+                if original_count == 0:
+                    continue
+                coerced_count = int((as_num.notna() & original_notna).sum())
+                parse_ratio = coerced_count / original_count
+                if mode == "aggressive":
+                    if coerced_count == 0:
+                        continue
+                    lost = original_count - coerced_count
+                    if lost > 0:
+                        _logger.warning(
+                            "Column %r: aggressive coercion turned %d/%d non-numeric values into NaN.",
+                            col,
+                            lost,
+                            original_count,
+                        )
                     checker.df_compare[col] = as_num
+                else:  # safe
+                    if parse_ratio >= min_ratio:
+                        checker.df_compare[col] = as_num
+                    elif coerced_count > 0:
+                        _logger.warning(
+                            "Column %r: only %d/%d (%.1f%%) values parseable as numeric (< min_ratio=%.2f); "
+                            "kept as object. Set numeric_coercion_mode='aggressive' to force coercion.",
+                            col,
+                            coerced_count,
+                            original_count,
+                            parse_ratio * 100,
+                            min_ratio,
+                        )
 
         checker.df_both = checker.df_compare[checker.df_compare["_merge"] == "both"].copy()
         checker._info_cols = [
