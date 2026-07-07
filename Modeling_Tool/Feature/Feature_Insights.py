@@ -4,9 +4,11 @@
 """
 
 import pandas as pd
+import warnings
 from tqdm import tqdm
 
 from .Distribution_Tool import proc_means_by_grp, proc_means_for_screening
+from Modeling_Tool._utils.robust import smf_logger
 import logging
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,7 @@ class VarExtractionInsights:
         self.seed = seed
         self.missing_rate_ref = missing_rate_ref
         self.spec_values = spec_values if spec_values is not None else []
+        self.failed_variables = []
 
     @staticmethod
     def remove_folder(file_path):
@@ -170,6 +173,7 @@ class VarExtractionInsights:
         """
         if dep is None:
             dep = self.dep
+        self.failed_variables = []
 
         from Modeling_Tool.Eval.Model_Eval_Tool import get_gains_table
 
@@ -200,8 +204,26 @@ class VarExtractionInsights:
                     attr_iv['var'] = var
                     iv_info_res.append(attr_iv)
 
-                except TypeError:
+                except (TypeError, ValueError, KeyError, ZeroDivisionError) as exc:
+                    row = smf_logger.record_and_continue(var, exc, stage="feature_insights")
+                    self.failed_variables.append((row["feature"], row["exception_type"]))
                     continue
+
+        if self.failed_variables:
+            failed = [name for name, _ in self.failed_variables]
+            warnings.warn(
+                f"{len(failed)}/{len(varlist)} variables failed insight computation: "
+                f"{failed[:10]}{'...' if len(failed) > 10 else ''} — see smf_logger for details",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        output_cols = [
+            'var', 'n_all', 'n', 'ks_in_gains', 'lift_in_gains', 'iv',
+            'n_bump', 'missing_rate', 'min', 'mean', 'max', 'n_bins'
+        ]
+        if not iv_info_res:
+            return pd.DataFrame(columns=output_cols)
 
         iv_info_res = pd.concat(iv_info_res).sort_values("IV", ascending=False)
 
@@ -222,10 +244,7 @@ class VarExtractionInsights:
             how='left'
         )
         fnl_summary.columns = [x.lower() for x in fnl_summary.columns]
-        fnl_summary = fnl_summary[[
-            'var', 'n_all', 'n', 'ks_in_gains', 'lift_in_gains', 'iv',
-            'n_bump', 'missing_rate', 'min', 'mean', 'max', 'n_bins'
-        ]]
+        fnl_summary = fnl_summary[output_cols]
 
         return fnl_summary
 

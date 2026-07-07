@@ -20,6 +20,58 @@ from Modeling_Tool.Core.Binning_Tool import quick_binning
 # ``Feature.Weighted_Screen`` and ``WOE_Adapter`` so downstream aggregators can
 # recognise it without special-casing.
 _MISSING_BIN = "__MISSING__"
+_PSI_BUCKET_POLICIES = {"floor_1e6", "smooth_laplace", "exclude"}
+
+
+def _validate_psi_bucket_policy(policy: str, caller: str) -> None:
+    if policy not in _PSI_BUCKET_POLICIES:
+        raise ValueError(
+            f"{caller}: psi_missing_bucket_policy must be one of "
+            f"{sorted(_PSI_BUCKET_POLICIES)}; got {policy!r}."
+        )
+
+
+def _psi_distributions_from_counts(
+    expected_count: pd.Series,
+    actual_count: pd.Series,
+    expected_total: float,
+    actual_total: float,
+    *,
+    content: float,
+    policy: str,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    _validate_psi_bucket_policy(policy, "_psi_distributions_from_counts")
+    all_bins = expected_count.index.union(actual_count.index)
+    expected_aligned = expected_count.reindex(all_bins, fill_value=0).astype(float)
+    actual_aligned = actual_count.reindex(all_bins, fill_value=0).astype(float)
+    one_sided = (expected_aligned == 0) | (actual_aligned == 0)
+
+    expected_total = float(expected_total) if expected_total > 0 else 1.0
+    actual_total = float(actual_total) if actual_total > 0 else 1.0
+
+    if policy == "exclude":
+        keep = ~one_sided
+        expected_aligned = expected_aligned[keep]
+        actual_aligned = actual_aligned[keep]
+        if expected_aligned.empty:
+            empty = pd.Series(dtype=float)
+            return empty, empty, empty, empty
+        expected_pct = expected_aligned / expected_total
+        actual_pct = actual_aligned / actual_total
+    elif policy == "smooth_laplace" and bool(one_sided.any()):
+        n_buckets = max(len(all_bins), 1)
+        expected_pct = (expected_aligned + 1.0) / (expected_total + n_buckets)
+        actual_pct = (actual_aligned + 1.0) / (actual_total + n_buckets)
+    else:
+        expected_pct = (expected_aligned / expected_total).clip(lower=content)
+        actual_pct = (actual_aligned / actual_total).clip(lower=content)
+
+    psi_values = (actual_pct - expected_pct) * np.log(actual_pct / expected_pct)
+
+    floor_expected = (expected_aligned / expected_total).clip(lower=content)
+    floor_actual = (actual_aligned / actual_total).clip(lower=content)
+    floor_values = (floor_actual - floor_expected) * np.log(floor_actual / floor_expected)
+    return expected_pct, actual_pct, psi_values, floor_values
 
 # ============================================================================
 # Classes
@@ -59,7 +111,8 @@ class PSICalculator:
         min_bin_prop: float = 0.05,
         content: float = 1e-6,
         precision: int = 5,
-        missing_policy: str = "include"
+        missing_policy: str = "include",
+        psi_missing_bucket_policy: str = "smooth_laplace",
     ):
         """
         Initialize PSICalculator with configuration parameters.
@@ -90,12 +143,14 @@ class PSICalculator:
                 f"PSICalculator.__init__: missing_policy must be one of "
                 f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
             )
+        _validate_psi_bucket_policy(psi_missing_bucket_policy, "PSICalculator.__init__")
         self.buckets = buckets
         self.equal_freq = equal_freq
         self.min_bin_prop = min_bin_prop
         self.content = content
         self.precision = precision
         self.missing_policy = missing_policy
+        self.psi_missing_bucket_policy = psi_missing_bucket_policy
     
 #     def _calculate_single_psi(
 #         self,
@@ -434,7 +489,8 @@ class PSICalculator:
         group_by: Optional[str] = None,
         group_name: Optional[str] = None,
         return_details = False,
-        missing_policy: Optional[str] = None
+        missing_policy: Optional[str] = None,
+        psi_missing_bucket_policy: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Calculate grouped PSI comparing two datasets, using expected as benchmark.
@@ -463,6 +519,11 @@ class PSICalculator:
             Grouped PSI results.
         """
         effective_policy = missing_policy if missing_policy is not None else self.missing_policy
+        effective_bucket_policy = (
+            psi_missing_bucket_policy
+            if psi_missing_bucket_policy is not None
+            else self.psi_missing_bucket_policy
+        )
         return calculate_multigroup_psi_two_sets(
             expected_df = expected_df,
             actual_df = current_data,
@@ -475,7 +536,8 @@ class PSICalculator:
             precision = self.precision,
             group_name = group_name,
             return_details = return_details,
-            missing_policy = effective_policy
+            missing_policy = effective_policy,
+            psi_missing_bucket_policy = effective_bucket_policy,
         )
 
 
@@ -493,6 +555,7 @@ def _calculate_single_psi(
     content: float = 1e-6,
     precision: int = 5,
     missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> Union[float, Tuple[float, pd.DataFrame]]:
     """
     Calculate Population Stability Index (PSI) for a single variable.
@@ -559,6 +622,7 @@ def _calculate_single_psi(
             f"_calculate_single_psi: missing_policy must be one of "
             f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
         )
+    _validate_psi_bucket_policy(psi_missing_bucket_policy, "_calculate_single_psi")
 
     # Record NaN counts before splitting so we can (a) re-attach the missing
     # bin under "include" and (b) warn under "warn_and_drop".
@@ -631,25 +695,24 @@ def _calculate_single_psi(
             )
         expected_denom = float(n_expected) if n_expected > 0 else 1.0
         actual_denom = float(n_actual) if n_actual > 0 else 1.0
-        expected_percents = expected_count / expected_denom
-        actual_percents = actual_count / actual_denom
     else:
         # "drop" / "warn_and_drop": legacy behaviour, denominators are the
         # NaN-dropped row counts, so missing-rate drift is invisible.
-        expected_percents = expected_bins.value_counts(normalize=True, sort=False)
-        actual_percents = actual_bins.value_counts(normalize=True, sort=False)
-    
-    # Ensure both series have the same bin indices
-    all_bins = expected_percents.index.union(actual_percents.index)
-    expected_percents = expected_percents.reindex(all_bins, fill_value=content)
-    actual_percents = actual_percents.reindex(all_bins, fill_value=content)
-    
-    # Clip to avoid division by zero
-    expected_percents = expected_percents.clip(lower=content)
-    actual_percents = actual_percents.clip(lower=content)
-    
-    # Calculate PSI
-    psi_values = (actual_percents - expected_percents) * np.log(actual_percents / expected_percents)
+        expected_denom = float(len(expected_bins)) if len(expected_bins) > 0 else 1.0
+        actual_denom = float(len(actual_bins)) if len(actual_bins) > 0 else 1.0
+
+    all_bins = expected_count.index.union(actual_count.index)
+    expected_count = expected_count.reindex(all_bins, fill_value=0).astype(float)
+    actual_count = actual_count.reindex(all_bins, fill_value=0).astype(float)
+
+    expected_percents, actual_percents, psi_values, psi_floor_values = _psi_distributions_from_counts(
+        expected_count,
+        actual_count,
+        expected_denom,
+        actual_denom,
+        content=content,
+        policy=psi_missing_bucket_policy,
+    )
     psi_total = psi_values.sum()
     
     if return_details:
@@ -658,8 +721,13 @@ def _calculate_single_psi(
             'actual_count': actual_count,
             'expected_percent': expected_percents,
             'actual_percent': actual_percents,
-            'psi_component': psi_values
+            'psi_component': psi_values,
+            'psi_component_floor_1e6': psi_floor_values,
         })
+        details["bucket_status"] = "common"
+        details.loc[(details["expected_count"] == 0) & (details["actual_count"] > 0), "bucket_status"] = "actual_only"
+        details.loc[(details["expected_count"] > 0) & (details["actual_count"] == 0), "bucket_status"] = "expected_only"
+        details["psi_missing_bucket_policy"] = psi_missing_bucket_policy
         return psi_total, details
     else:
         return psi_total
@@ -676,7 +744,8 @@ def calculate_psi(
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
     precision: int = 5,
-    missing_policy: str = "include"
+    missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> Union[float, pd.DataFrame, Tuple[Dict, Dict]]:
     """
     Calculate Population Stability Index (PSI) for a variable, optionally by groups.
@@ -767,7 +836,8 @@ def calculate_psi(
                     min_bin_prop,
                     content,
                     precision,
-                    missing_policy
+                    missing_policy,
+                    psi_missing_bucket_policy,
                 )
                 results[group] = psi_value
                 details_dict[group] = detail
@@ -781,7 +851,8 @@ def calculate_psi(
                     min_bin_prop,
                     content,
                     precision,
-                    missing_policy
+                    missing_policy,
+                    psi_missing_bucket_policy,
                 )
         
         if return_details:
@@ -800,7 +871,8 @@ def calculate_psi(
                 min_bin_prop, 
                 content, 
                 precision,
-                missing_policy
+                missing_policy,
+                psi_missing_bucket_policy,
             )
         else:
             return _calculate_single_psi(
@@ -812,7 +884,8 @@ def calculate_psi(
                 min_bin_prop, 
                 content, 
                 precision,
-                missing_policy
+                missing_policy,
+                psi_missing_bucket_policy,
             )
 
 
@@ -828,7 +901,8 @@ def calculate_within_psi(
     content: float = 1e-6,
     precision: int = 5,
     benchmark_display_name: Optional[str] = None,
-    missing_policy: str = "include"
+    missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> Union[pd.DataFrame, Dict]:
     """
     Calculate PSI values within a single dataset, comparing groups to a benchmark.
@@ -904,7 +978,8 @@ def calculate_within_psi(
                 min_bin_prop=min_bin_prop, 
                 content=content, 
                 precision=precision,
-                missing_policy=missing_policy
+                missing_policy=missing_policy,
+                psi_missing_bucket_policy=psi_missing_bucket_policy,
             )
             res_dict[obs_value] = psi
             detail_dict[obs_value] = details
@@ -919,7 +994,8 @@ def calculate_within_psi(
                 min_bin_prop=min_bin_prop, 
                 content=content, 
                 precision=precision,
-                missing_policy=missing_policy
+                missing_policy=missing_policy,
+                psi_missing_bucket_policy=psi_missing_bucket_policy,
             )
             res_dict[obs_value] = psi
     
@@ -943,7 +1019,8 @@ def calculate_psi_within_dataset(
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
     precision: int = 5,
-    missing_policy: str = "include"
+    missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> pd.DataFrame:
     """
     Calculate PSI for multiple variables within a dataset, comparing groups to a benchmark.
@@ -1003,7 +1080,8 @@ def calculate_psi_within_dataset(
             min_bin_prop=min_bin_prop, 
             content=content, 
             precision=precision,
-            missing_policy=missing_policy
+            missing_policy=missing_policy,
+            psi_missing_bucket_policy=psi_missing_bucket_policy,
         ).sort_values([grp_name]).reset_index(drop=True)
         
         single_psi['var'] = var
@@ -1022,7 +1100,8 @@ def calculate_multivar_psi_two_sets(
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
     precision: int = 5,
-    missing_policy: str = "include"
+    missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> pd.DataFrame:
     """
     Calculate PSI for multiple variables by comparing two different datasets.
@@ -1077,8 +1156,13 @@ def calculate_multivar_psi_two_sets(
             target_col=var, 
             group_by=group_by, 
             buckets=buckets,
+            equal_freq=equal_freq,
+            min_bin_prop=min_bin_prop,
+            content=content,
+            precision=precision,
             return_details=False,
-            missing_policy=missing_policy
+            missing_policy=missing_policy,
+            psi_missing_bucket_policy=psi_missing_bucket_policy,
         )
         if group_by is None:
             single_psi = pd.DataFrame([single_psi], columns=['psi'])
@@ -1219,7 +1303,8 @@ def calculate_multigroup_psi_two_sets(
     precision: int = 5,
     group_name: Optional[str] = None,
     return_details: bool = False,
-    missing_policy: str = "include"
+    missing_policy: str = "include",
+    psi_missing_bucket_policy: str = "smooth_laplace",
 ) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
     Calculate grouped PSI using expected DataFrame as benchmark, applied to actual DataFrame groups.
@@ -1278,7 +1363,8 @@ def calculate_multigroup_psi_two_sets(
                         min_bin_prop=min_bin_prop,
                         content=content,
                         precision=precision,
-                        missing_policy=missing_policy
+                        missing_policy=missing_policy,
+                        psi_missing_bucket_policy=psi_missing_bucket_policy,
                     )
                     
                     psi_records.append({group_name: group, 'var': var, 'psi': psi_val})
@@ -1296,7 +1382,7 @@ def calculate_multigroup_psi_two_sets(
                         detail_df[group_name] = group
                         detail_df['var'] = var
                         
-                        required_cols = ['bin', 'expected_count', 'actual_count', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var']
+                        required_cols = ['bin', 'expected_count', 'actual_count', 'expected_percent', 'actual_percent', 'psi_component', 'bucket_status', 'psi_missing_bucket_policy', group_name, 'var']
                         for col in required_cols:
                             if col not in detail_df.columns:
                                 detail_df[col] = np.nan
@@ -1326,7 +1412,8 @@ def calculate_multigroup_psi_two_sets(
                     min_bin_prop=min_bin_prop,
                     content=content,
                     precision=precision,
-                    missing_policy=missing_policy
+                    missing_policy=missing_policy,
+                    psi_missing_bucket_policy=psi_missing_bucket_policy,
                 )
                 psi_records.append({'var': var, 'psi': psi_val})
                 
@@ -1338,7 +1425,7 @@ def calculate_multigroup_psi_two_sets(
                         index_col = detail_df.columns[0]
                         detail_df = detail_df.rename(columns={index_col: 'bin'})
                     detail_df['var'] = var
-                    required_cols = ['bin', 'expected_count', 'actual_count', 'expected_percent', 'actual_percent', 'psi_component', 'var']
+                    required_cols = ['bin', 'expected_count', 'actual_count', 'expected_percent', 'actual_percent', 'psi_component', 'bucket_status', 'psi_missing_bucket_policy', 'var']
                     for col in required_cols:
                         if col not in detail_df.columns:
                             detail_df[col] = np.nan
@@ -1362,7 +1449,8 @@ def calculate_multigroup_psi_two_sets(
                 min_bin_prop=min_bin_prop, 
                 content=content, 
                 precision=precision,
-                missing_policy=missing_policy
+                missing_policy=missing_policy,
+                psi_missing_bucket_policy=psi_missing_bucket_policy,
             )
             
             return group_psi

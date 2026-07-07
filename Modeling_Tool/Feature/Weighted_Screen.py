@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight, weighted_rate
-from Modeling_Tool.Core.utils import calc_iv
+from Modeling_Tool._utils.robust import iv_guard
 
 _MISSING_BIN = "__MISSING__"
 
@@ -94,11 +94,31 @@ def _weighted_equal_freq_edges(
     return [-np.inf, *uniq, np.inf]
 
 
-def _assign_bins(x: np.ndarray, edges: list[float]) -> np.ndarray:
+def _assign_bins(
+    x: np.ndarray,
+    edges: list[float] | None,
+    *,
+    name: str | None = None,
+    on_null_edges: Literal["raise", "warn_and_zero", "silent"] = "raise",
+) -> np.ndarray:
     out = np.empty(len(x), dtype=object)
     missing = ~np.isfinite(x)
     out[missing] = _MISSING_BIN
     if edges is None:
+        if on_null_edges == "raise":
+            col = f" for column {name!r}" if name is not None else ""
+            raise ValueError(
+                f"_assign_bins requires non-None edges{col}; got None "
+                "(upstream binner failed silently)"
+            )
+        if on_null_edges == "warn_and_zero":
+            col = f" for column {name!r}" if name is not None else ""
+            warnings.warn(
+                f"_assign_bins got None edges{col}; mapping all non-null values "
+                "to 'all' for backward compatibility.",
+                UserWarning,
+                stacklevel=2,
+            )
         out[~missing] = "all"
         return out
     valid = x[~missing].astype(float)
@@ -148,30 +168,58 @@ def _weighted_iv_from_assigned_bins(
     w: np.ndarray,
     bins: np.ndarray,
     x: np.ndarray,
+    *,
+    var_name: str | None = None,
+    include_missing_bin: bool = False,
 ) -> tuple[float, int, float]:
-    total_bad = float(np.sum(w * y))
-    total_good = float(np.sum(w * (1.0 - y)))
+    included = np.ones(len(bins), dtype=bool)
+    if not include_missing_bin:
+        included &= bins != _MISSING_BIN
+    total_bad = float(np.sum(w[included] * y[included]))
+    total_good = float(np.sum(w[included] * (1.0 - y[included])))
     if total_bad <= 0 or total_good <= 0:
         missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
         return 0.0, 0, missing_rate
 
-    rows = []
+    iv = 0.0
+    n_bins = 0
+    n_contributing_bins = 0
+    n_degenerate = 0
     for b in pd.unique(bins):
+        if b == _MISSING_BIN and not include_missing_bin:
+            continue
+        n_bins += 1
         m = bins == b
         bad_w = float(np.sum(w[m] * y[m]))
         good_w = float(np.sum(w[m] * (1.0 - y[m])))
-        rows.append({
-            "bad_pct": bad_w / total_bad,
-            "good_pct": good_w / total_good,
-        })
-    if not rows:
+        contrib, is_degenerate = iv_guard(bad_w / total_bad, good_w / total_good)
+        if is_degenerate:
+            n_degenerate += 1
+            continue
+        iv += contrib
+        n_contributing_bins += 1
+    if n_contributing_bins == 0:
+        if n_degenerate:
+            prefix = f"{var_name}: " if var_name else ""
+            warnings.warn(
+                f"{prefix}{n_degenerate}/{n_degenerate} bins have zero-mass class, "
+                "IV computed on remainder",
+                UserWarning,
+                stacklevel=2,
+            )
         missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
         return 0.0, 0, missing_rate
 
-    stats = pd.DataFrame(rows)
-    iv = float(calc_iv(stats, "bad_pct", "good_pct").sum())
+    if n_degenerate:
+        prefix = f"{var_name}: " if var_name else ""
+        warnings.warn(
+            f"{prefix}{n_degenerate}/{n_bins} bins have zero-mass class, "
+            "IV computed on remainder",
+            UserWarning,
+            stacklevel=2,
+        )
     missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-    return iv, len(rows), missing_rate
+    return float(iv), n_bins, missing_rate
 
 
 def _weighted_iv_for_var(
@@ -181,32 +229,21 @@ def _weighted_iv_for_var(
     n_bins: int,
     min_bin_prop: float,
     precision: int,
+    *,
+    var_name: str | None = None,
+    include_missing_bin: bool = False,
+    on_null_edges: Literal["raise", "warn_and_zero", "silent"] = "raise",
 ) -> tuple[float, int, float]:
     edges = _weighted_equal_freq_edges(x, w, n_bins, min_bin_prop, precision=precision)
-    bins = _assign_bins(x, edges)
-    total_bad = float(np.sum(w * y))
-    total_good = float(np.sum(w * (1.0 - y)))
-    if total_bad <= 0 or total_good <= 0:
-        missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-        return 0.0, 0, missing_rate
-
-    rows = []
-    for b in pd.unique(bins):
-        m = bins == b
-        bad_w = float(np.sum(w[m] * y[m]))
-        good_w = float(np.sum(w[m] * (1.0 - y[m])))
-        rows.append({
-            "bad_pct": bad_w / total_bad,
-            "good_pct": good_w / total_good,
-        })
-    if not rows:
-        missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-        return 0.0, 0, missing_rate
-
-    stats = pd.DataFrame(rows)
-    iv = float(calc_iv(stats, "bad_pct", "good_pct").sum())
-    missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-    return iv, len(rows), missing_rate
+    bins = _assign_bins(x, edges, name=var_name, on_null_edges=on_null_edges)
+    return _weighted_iv_from_assigned_bins(
+        y,
+        w,
+        bins,
+        x,
+        var_name=var_name,
+        include_missing_bin=include_missing_bin,
+    )
 
 
 def _weighted_median(x: np.ndarray, w: np.ndarray) -> float:
@@ -691,7 +728,7 @@ def _weighted_screen_impl(
 
     psi_records: list[dict] = []
     if psi_enabled:
-        for var in feature_cols:
+        for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
             x_ins = ins[var].to_numpy(dtype=float)
@@ -700,18 +737,18 @@ def _weighted_screen_impl(
                     x_ins, w_ins, iv_bins, min_bin_prop, precision=precision,
                 )
             edges = edges_cache[var]
-            bins_ins = _assign_bins(x_ins, edges) if edges else _assign_bins(x_ins, None)
+            bins_ins = _assign_bins(x_ins, edges, name=var)
             exp_dist = _weighted_bin_distribution(bins_ins, w_ins, content)
 
             row: dict[str, Any] = {"var": var, "psi_ins_oos": np.nan, "psi_ins_oot": np.nan}
             if "oos" in psi_compare_splits and len(oos) > 0:
                 w_oos = resolve_sample_weight(data=oos, weight_col=weight_col, expected_len=len(oos))
-                bins_oos = _assign_bins(oos[var].to_numpy(dtype=float), edges)
+                bins_oos = _assign_bins(oos[var].to_numpy(dtype=float), edges, name=var)
                 act = _weighted_bin_distribution(bins_oos, w_oos, content)
                 row["psi_ins_oos"] = _psi_from_distributions(exp_dist, act, content)
             if "oot" in psi_compare_splits and len(oot) > 0:
                 w_oot = resolve_sample_weight(data=oot, weight_col=weight_col, expected_len=len(oot))
-                bins_oot = _assign_bins(oot[var].to_numpy(dtype=float), edges)
+                bins_oot = _assign_bins(oot[var].to_numpy(dtype=float), edges, name=var)
                 act = _weighted_bin_distribution(bins_oot, w_oot, content)
                 row["psi_ins_oot"] = _psi_from_distributions(exp_dist, act, content)
             psi_records.append(row)
@@ -747,6 +784,7 @@ def _weighted_screen_impl(
                 iv_bins,
                 min_bin_prop,
                 precision,
+                var_name=var,
             )
             iv_records.append({
                 "var": var,

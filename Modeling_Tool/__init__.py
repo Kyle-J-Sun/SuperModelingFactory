@@ -1,7 +1,9 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.5.0"
+__version__ = "0.5.1"
+
+from ._utils import SMF_MISSING_BIN
 
 # Core module - base data structures
 from .Core import (
@@ -141,6 +143,7 @@ def __getattr__(name):
 __all__ = [
     '__author__',
     '__version__',
+    'SMF_MISSING_BIN',
     'Binning',
     'super_binning',
     'ODPSRunner',

@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import warnings
 from tqdm import tqdm
 
+from Modeling_Tool._utils.robust import smf_logger
 from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 from .PSI_Tool import PSICalculator as _BasePSICalculator
+from .PSI_Tool import _psi_distributions_from_counts, _validate_psi_bucket_policy
 from .Feature_Insights import (
     CorrelationFilter as _BaseCorrelationFilter,
     VarExtractionInsights as _BaseVarExtractionInsights,
@@ -22,13 +25,23 @@ from .Feature_Insights import (
 from .Distribution_Tool import proc_means_for_screening
 
 
-def _psi_from_bins(expected_bins: pd.Series, current_bins: pd.Series, content: float) -> float:
-    expected_pct = expected_bins.value_counts(normalize=True, dropna=False)
-    current_pct = current_bins.value_counts(normalize=True, dropna=False)
-    all_bins = expected_pct.index.union(current_pct.index)
-    e = expected_pct.reindex(all_bins, fill_value=0).astype(float) + content
-    c = current_pct.reindex(all_bins, fill_value=0).astype(float) + content
-    return float(((c - e) * np.log(c / e)).sum())
+def _psi_from_bins(
+    expected_bins: pd.Series,
+    current_bins: pd.Series,
+    content: float,
+    psi_missing_bucket_policy: str,
+) -> float:
+    expected_count = expected_bins.value_counts(normalize=False, dropna=False)
+    current_count = current_bins.value_counts(normalize=False, dropna=False)
+    _, _, psi_values, _ = _psi_distributions_from_counts(
+        expected_count,
+        current_count,
+        float(len(expected_bins)),
+        float(len(current_bins)),
+        content=content,
+        policy=psi_missing_bucket_policy,
+    )
+    return float(psi_values.sum())
 
 
 def _make_monotone_adapter(owner, data: pd.DataFrame, varlist: list[str]):
@@ -65,6 +78,7 @@ def _screening_summary_from_engine(
     adapter,
     iv_cut: float,
     missing_rate_ref,
+    failed_variables: list[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
     rows = []
     target = data[dep]
@@ -97,7 +111,10 @@ def _screening_summary_from_engine(
                 "n_bump": int(grouped.shape[0]),
                 "n_bins": int(grouped.shape[0]),
             })
-        except Exception:
+        except (TypeError, ValueError, KeyError, ZeroDivisionError, np.linalg.LinAlgError) as exc:
+            row = smf_logger.record_and_continue(var, exc, stage="woe_engine_feature_patch")
+            if failed_variables is not None:
+                failed_variables.append((row["feature"], row["exception_type"]))
             continue
 
     columns = [
@@ -135,23 +152,61 @@ class PSICalculator:
         content: float = 1e-6,
         precision: int = 5,
         binning_engine=None,
+        missing_policy: str = "include",
+        psi_missing_bucket_policy: str = "smooth_laplace",
     ):
-        self._base = _BasePSICalculator(buckets, equal_freq, min_bin_prop, content, precision)
+        _validate_psi_bucket_policy(psi_missing_bucket_policy, "Feature.PSICalculator.__init__")
+        self._base = _BasePSICalculator(
+            buckets=buckets,
+            equal_freq=equal_freq,
+            min_bin_prop=min_bin_prop,
+            content=content,
+            precision=precision,
+            missing_policy=missing_policy,
+            psi_missing_bucket_policy=psi_missing_bucket_policy,
+        )
         self.buckets = buckets
         self.equal_freq = equal_freq
         self.min_bin_prop = min_bin_prop
         self.content = content
         self.precision = precision
+        self.missing_policy = missing_policy
+        self.psi_missing_bucket_policy = psi_missing_bucket_policy
         self.binning_engine = binning_engine
         self._woe_engine_adapter = as_woe_engine(binning_engine) if binning_engine is not None else None
 
     def __getattr__(self, name):
         return getattr(self._base, name)
 
-    def calculate(self, expected_df, current_data, varlist, group_by=None, group_name=None, return_details=False):
+    def calculate(
+        self,
+        expected_df,
+        current_data,
+        varlist,
+        group_by=None,
+        group_name=None,
+        return_details=False,
+        missing_policy=None,
+        psi_missing_bucket_policy=None,
+    ):
         adapter = self._woe_engine_adapter
+        effective_missing_policy = missing_policy if missing_policy is not None else self.missing_policy
+        effective_bucket_policy = (
+            psi_missing_bucket_policy
+            if psi_missing_bucket_policy is not None
+            else self.psi_missing_bucket_policy
+        )
         if adapter is None:
-            return self._base.calculate(expected_df, current_data, varlist, group_by, group_name, return_details)
+            return self._base.calculate(
+                expected_df,
+                current_data,
+                varlist,
+                group_by,
+                group_name,
+                return_details,
+                missing_policy=effective_missing_policy,
+                psi_missing_bucket_policy=effective_bucket_policy,
+            )
 
         detail = {}
         rows = []
@@ -178,7 +233,18 @@ class PSICalculator:
             expected_bins = adapter.assign_bins(expected_df, var)
             for grp_value, grp_df, group_info in groups:
                 current_bins = adapter.assign_bins(grp_df, var)
-                row = {"var": var, "psi": round(_psi_from_bins(expected_bins, current_bins, self.content), self.precision)}
+                row = {
+                    "var": var,
+                    "psi": round(
+                        _psi_from_bins(
+                            expected_bins,
+                            current_bins,
+                            self.content,
+                            effective_bucket_policy,
+                        ),
+                        self.precision,
+                    ),
+                }
                 row.update(group_info)
                 rows.append(row)
                 if return_details:
@@ -236,6 +302,7 @@ class VarExtractionInsights:
         self.woe_engine = woe_engine
         self.woe_binner = woe_binner
         self.woe_engine_params = woe_engine_params or {}
+        self.failed_variables = []
 
     def __getattr__(self, name):
         return getattr(self._base, name)
@@ -247,10 +314,30 @@ class VarExtractionInsights:
     def get_var_analysis_report(self, data, varlist, dep=None, iv_cut=0.01):
         if dep is None:
             dep = self.dep
+        self.failed_variables = []
         adapter = as_woe_engine(self.woe_binner) if self.woe_binner is not None else _make_monotone_adapter(self, data, varlist)
         if adapter is None:
-            return self._base.get_var_analysis_report(data, varlist, dep, iv_cut)
-        return _screening_summary_from_engine(data, varlist, dep, adapter, iv_cut, self.missing_rate_ref)
+            result = self._base.get_var_analysis_report(data, varlist, dep, iv_cut)
+            self.failed_variables = getattr(self._base, "failed_variables", [])
+            return result
+        result = _screening_summary_from_engine(
+            data,
+            varlist,
+            dep,
+            adapter,
+            iv_cut,
+            self.missing_rate_ref,
+            failed_variables=self.failed_variables,
+        )
+        if self.failed_variables:
+            failed = [name for name, _ in self.failed_variables]
+            warnings.warn(
+                f"{len(failed)}/{len(varlist)} variables failed WOE-engine insight computation: "
+                f"{failed[:10]}{'...' if len(failed) > 10 else ''} — see smf_logger for details",
+                UserWarning,
+                stacklevel=2,
+            )
+        return result
 
     def plot_woe(self, data, varlist, plot_group=None, plot_dirname="var_analysis_plot", plot_path=None):
         adapter = as_woe_engine(self.woe_binner) if self.woe_binner is not None else _make_monotone_adapter(self, data, varlist)

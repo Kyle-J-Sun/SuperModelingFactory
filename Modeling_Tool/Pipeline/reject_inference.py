@@ -134,6 +134,8 @@ class RejectInferencePipeline:
         feature_cols = self._resolve_feature_cols(data)
         self._validate_input(data, feature_cols)
         self._validate_ri_approved_config()
+        self._validate_split_col_schema(data)
+        self._validate_external_ri_approved_schema(data, feature_cols)
 
         datasets_dir = Path(cfg.output_dir) / "datasets"
         report_dir = Path(cfg.output_dir) / "report"
@@ -320,6 +322,35 @@ class RejectInferencePipeline:
             raise ValueError("ri_approved_data cannot be combined with ri_approved_query or ri_approved_func")
         if cfg.ri_approved_data is not None and cfg.ri_approved_scope == "output_subset":
             raise ValueError("ri_approved_scope='output_subset' cannot be used with external ri_approved_data")
+
+    def _validate_split_col_schema(self, data: pd.DataFrame) -> None:
+        cfg = self.config
+        if not cfg.split_col:
+            return
+        if cfg.split_col not in data.columns:
+            raise KeyError(f"Missing split_col {cfg.split_col!r}")
+        raw_split = data[cfg.split_col]
+        valid = {"ins", "oos", "oot"}
+        invalid = sorted(set(raw_split.dropna().astype(str).str.strip().str.lower()) - valid)
+        if invalid:
+            raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
+
+    def _validate_external_ri_approved_schema(
+        self,
+        data: pd.DataFrame,
+        feature_cols: list[str],
+    ) -> None:
+        cfg = self.config
+        if cfg.ri_approved_data is None:
+            return
+        ri_ref = cfg.ri_approved_data
+        required = [cfg.target_col] + feature_cols
+        will_train_prescore = cfg.train_prescore or cfg.score_col not in data.columns
+        if cfg.score_col not in ri_ref.columns and not will_train_prescore:
+            required.append(cfg.score_col)
+        missing = [col for col in dict.fromkeys(required) if col not in ri_ref.columns]
+        if missing:
+            raise KeyError(f"External ri_approved_data missing required columns: {missing}")
 
     def _prepare_split_col_data(self, work: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         cfg = self.config

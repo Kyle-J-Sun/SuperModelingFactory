@@ -1,12 +1,14 @@
 import os
 import pandas as pd
 import numpy as np
+import warnings
 
 from .WOE_Plot_Tool import get_bivar_graph
 from .WOE_Tool import mapping_woe, woe_transform
 
 from Modeling_Tool.Core.Binning_Tool import run_binning, get_bin_range_list
 from Modeling_Tool.Core.utils import calc_woe, calc_iv
+from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 def get_overall_woe_table(woe_master, data, varlist=None):
     """生成整体样本的WOE统计表，结构对齐训练集映射表。"""
@@ -185,7 +187,7 @@ class WOE_Master(object):
         woe_dict: dict, WOE mapping dictionary
     """
 
-    def __init__(self, train_data, varlist, dep=None, graph_save_dir="", woe_suffix="_woe", missing_ref_value=-999999, remove_exist_dir = False):
+    def __init__(self, train_data, varlist, dep=None, graph_save_dir="", woe_suffix="_woe", missing_ref_value=SMF_MISSING_BIN, remove_exist_dir = False):
         """Initialize WOE_Master instance.
 
         Args:
@@ -203,9 +205,33 @@ class WOE_Master(object):
         self.woe_suffix = woe_suffix
         self.missing_ref_value = missing_ref_value
         self.woe_dict = {}
+        self._validate_missing_ref_value()
         
         if remove_exist_dir:
             self.remove_folder(graph_save_dir)
+
+    def _validate_missing_ref_value(self):
+        try:
+            val = float(self.missing_ref_value)
+        except (TypeError, ValueError):
+            val = np.nan
+        if np.isfinite(val) and abs(val) < 1e10:
+            warnings.warn(
+                f"missing_ref_value={self.missing_ref_value} may collide with real data; "
+                "consider Modeling_Tool.SMF_MISSING_BIN",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        cols = [c for c in self.varlist if c in self.train_data.columns]
+        if not cols:
+            return
+        collision = (self.train_data[cols] == self.missing_ref_value).any().any()
+        if bool(collision):
+            raise ValueError(
+                f"missing_ref_value={self.missing_ref_value} collides with real values in "
+                "training data; use SMF_MISSING_BIN or a truly unhittable sentinel"
+            )
         
     @staticmethod
     def remove_folder(file_path):
@@ -304,6 +330,12 @@ class WOE_Master(object):
         Returns:
             pandas.DataFrame with WOE mapping information for all variables
         """
+        if not self.woe_dict:
+            raise ValueError(
+                "WOE_Master.woe_dict is empty — no variables were successfully binned. "
+                "Check upstream: (1) varlist is non-empty, (2) train_data has non-null values, "
+                "(3) any per-variable errors during .fit(). See .failed_variables if available."
+            )
         return pd.concat([v for k, v in self.woe_dict.items()])
 
     def save_mapping_table(self, save_dir):
@@ -440,6 +472,12 @@ def get_mapping_table(woe_dict):
     Returns:
         pandas.DataFrame with WOE mapping information
     """
+    if not woe_dict:
+        raise ValueError(
+            "WOE_Master.woe_dict is empty — no variables were successfully binned. "
+            "Check upstream: (1) varlist is non-empty, (2) train_data has non-null values, "
+            "(3) any per-variable errors during .fit(). See .failed_variables if available."
+        )
     return pd.concat([v for k, v in woe_dict.items()])
 
 

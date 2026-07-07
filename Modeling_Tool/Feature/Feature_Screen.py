@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 from .Weighted_Screen import (
     WeightedScreenResult,
@@ -163,7 +164,7 @@ def fit_screening_woe_engine(
 
     master_params = dict(woe_params or {})
     woe_suffix = master_params.pop("woe_suffix", "_woe")
-    missing_ref_value = master_params.pop("missing_ref_value", -999999)
+    missing_ref_value = master_params.pop("missing_ref_value", SMF_MISSING_BIN)
     master = WOE_Master(
         train_data=fit_ins,
         varlist=features,
@@ -224,7 +225,7 @@ def _woe_bins_unweighted_screen(
         missing_rate_ref=config.missing_rate_ref,
         on_empty_stage=config.on_empty_stage,
     )
-    binner = _resolve_screening_binner(splits, feature_cols, target_col, config, prefit_woe_engine)
+    binner = _resolve_screening_binner(splits, current, target_col, config, prefit_woe_engine)
 
     psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
     if config.psi_enabled:
@@ -357,7 +358,7 @@ def _weighted_woe_bins_screen(
     if binner is None:
         binner = fit_screening_woe_engine(
             ins,
-            feature_cols,
+            current,
             target_col,
             woe_engine=config.woe_engine,
             woe_fit_query=config.woe_fit_query,
@@ -369,7 +370,7 @@ def _weighted_woe_bins_screen(
 
     psi_records: list[dict] = []
     if config.psi_enabled:
-        for var in feature_cols:
+        for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
             bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
