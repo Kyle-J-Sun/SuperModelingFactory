@@ -257,6 +257,11 @@ class MonotoneWOEBinner:
         # }}
         self._results: Dict[str, Any] = {}
         self._is_fitted = False
+        # N38 (0.5.0): populated by apply_woe when unseen categorical values are
+        # observed in transform data. Keys are feature names; each value is a
+        # dict with unseen_values/affected_rows/affected_frac/total_rows.
+        # Reset at the start of every apply_woe call.
+        self._unseen_category_stats: Dict[str, dict] = {}
 
     # ─────────────────────────────────────────────────────────────────
     # 内部工具
@@ -2047,6 +2052,7 @@ class MonotoneWOEBinner:
         data: pd.DataFrame,
         suffix: str = "_woe",
         inplace: bool = False,
+        unseen_category_policy: str = "warn",
     ) -> pd.DataFrame:
         """
         将 data 中的特征原始数值转换为 WOE 值，添加 *_woe 列。
@@ -2066,14 +2072,39 @@ class MonotoneWOEBinner:
         data    : 含原始特征列的 DataFrame
         suffix  : WOE 列后缀，默认 "_woe"
         inplace : 是否在原 DataFrame 上操作（False = 返回副本）
+        unseen_category_policy : {"warn", "raise", "silent"}, optional
+            How to handle transform-time categorical values not seen at fit
+            time. Default in 0.5.0 is ``"warn"``, which fills the unseen
+            value with ``missing_woe`` (same as previous behaviour) but
+            emits a ``RuntimeWarning`` per feature listing the unseen
+            categories and affected row count, and populates
+            ``self._unseen_category_stats`` for programmatic monitoring.
+            Pass ``"raise"`` to fail loudly on first unseen category, or
+            ``"silent"`` to reproduce the pre-0.5.0 fully-silent behaviour.
+
+        Attributes populated
+        --------------------
+        _unseen_category_stats : Dict[str, dict]
+            Keys are feature names that saw at least one unseen category in
+            the most recent ``apply_woe`` call. Each value is
+            ``{"unseen_values": set, "affected_rows": int,
+            "affected_frac": float, "total_rows": int}``. Reset at the
+            start of every ``apply_woe`` call.
 
         Returns
         -------
         DataFrame，新增 {feat}{suffix} 列
         """
+        if unseen_category_policy not in {"warn", "raise", "silent"}:
+            raise ValueError(
+                f"apply_woe: unseen_category_policy must be one of "
+                f"'warn', 'raise', 'silent'; got {unseen_category_policy!r}."
+            )
         self._check_fitted()
         df = data if inplace else data.copy()
         woe_outputs: Dict[str, np.ndarray] = {}
+        # Reset per-call so callers can inspect stats from the *latest* run only.
+        self._unseen_category_stats = {}
 
         for feat, vr in self._results.items():
             if feat not in df.columns:
@@ -2109,6 +2140,51 @@ class MonotoneWOEBinner:
 
             # ── 类别特征：按取值直接查 WOE，不做区间切分 ──
             if vr.get("is_categorical"):
+                # N38 (0.5.0): detect transform-time categories that were not
+                # seen at fit time so drift on categorical features is visible.
+                if unseen_category_policy != "silent":
+                    fit_categories = set(vr.get("categories", []) or [])
+                    if fit_categories:
+                        observed = set(series.dropna().unique().tolist())
+                        unseen = observed - fit_categories
+                        if unseen:
+                            affected_mask = series.isin(unseen)
+                            affected_rows = int(affected_mask.sum())
+                            total_rows = int(len(series))
+                            stats = {
+                                "unseen_values": unseen,
+                                "affected_rows": affected_rows,
+                                "affected_frac": affected_rows / max(total_rows, 1),
+                                "total_rows": total_rows,
+                            }
+                            self._unseen_category_stats[feat] = stats
+                            try:
+                                unseen_preview = sorted(unseen)[:5]
+                            except TypeError:
+                                unseen_preview = list(unseen)[:5]
+                            more_suffix = "..." if len(unseen) > 5 else ""
+                            if unseen_category_policy == "raise":
+                                raise ValueError(
+                                    f"apply_woe: feature {feat!r} has "
+                                    f"{len(unseen)} unseen categories in "
+                                    f"transform data: {unseen_preview}{more_suffix}. "
+                                    f"{affected_rows}/{total_rows} rows affected "
+                                    f"({stats['affected_frac']:.1%}). "
+                                    f"Pass unseen_category_policy='warn' to fill "
+                                    f"with missing_woe and warn, or 'silent' for "
+                                    f"legacy behaviour."
+                                )
+                            else:  # "warn"
+                                warnings.warn(
+                                    f"apply_woe: feature {feat!r} has "
+                                    f"{len(unseen)} unseen categories in "
+                                    f"transform data: {unseen_preview}{more_suffix}. "
+                                    f"Filling with missing_woe={feat_missing_woe}. "
+                                    f"{affected_rows}/{total_rows} rows affected "
+                                    f"({stats['affected_frac']:.1%}).",
+                                    RuntimeWarning,
+                                    stacklevel=2,
+                                )
                 wt = vr["woe_table"]
                 # 原始取值 → WOE（fit 路径，精确匹配；int/float 由 dict 等价性兼容）
                 # refine_cate 聚类后，一个箱含多个类别(cat_members)；逐成员展开建表

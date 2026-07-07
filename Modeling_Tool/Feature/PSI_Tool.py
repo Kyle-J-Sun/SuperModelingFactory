@@ -58,7 +58,8 @@ class PSICalculator:
         equal_freq: bool = True,
         min_bin_prop: float = 0.05,
         content: float = 1e-6,
-        precision: int = 5
+        precision: int = 5,
+        missing_policy: str = "include"
     ):
         """
         Initialize PSICalculator with configuration parameters.
@@ -75,12 +76,26 @@ class PSICalculator:
             Small value to prevent division by zero. Default is 1e-6.
         precision : int, optional
             Decimal precision for rounding. Default is 5.
+        missing_policy : {"drop", "include", "warn_and_drop"}, optional
+            How NaN rows are handled. Default in 0.5.0 is "include", which routes
+            NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+            contributes to the PSI. This is the recommended production behaviour
+            and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+            numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
+            numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
+            naming the NaN counts.
         """
+        if missing_policy not in {"include", "drop", "warn_and_drop"}:
+            raise ValueError(
+                f"PSICalculator.__init__: missing_policy must be one of "
+                f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
+            )
         self.buckets = buckets
         self.equal_freq = equal_freq
         self.min_bin_prop = min_bin_prop
         self.content = content
         self.precision = precision
+        self.missing_policy = missing_policy
     
 #     def _calculate_single_psi(
 #         self,
@@ -418,7 +433,8 @@ class PSICalculator:
         varlist: List[str],
         group_by: Optional[str] = None,
         group_name: Optional[str] = None,
-        return_details = False
+        return_details = False,
+        missing_policy: Optional[str] = None
     ) -> pd.DataFrame:
         """
         Calculate grouped PSI comparing two datasets, using expected as benchmark.
@@ -435,12 +451,18 @@ class PSICalculator:
             Column to group by in both datasets.
         group_name : str, optional
             Specific group column name for multi-group calculation.
+        missing_policy : {"drop", "include", "warn_and_drop"}, optional
+            How NaN rows are handled. If None (default), falls back to the value
+            configured on ``self.missing_policy``. Pass an explicit value to
+            override the class-level default for this call only. See
+            ``PSICalculator.__init__`` for the semantics of each mode.
             
         Returns
         -------
         pandas.DataFrame
             Grouped PSI results.
         """
+        effective_policy = missing_policy if missing_policy is not None else self.missing_policy
         return calculate_multigroup_psi_two_sets(
             expected_df = expected_df,
             actual_df = current_data,
@@ -452,7 +474,8 @@ class PSICalculator:
             content = self.content,
             precision = self.precision,
             group_name = group_name,
-            return_details = return_details
+            return_details = return_details,
+            missing_policy = effective_policy
         )
 
 
@@ -469,7 +492,7 @@ def _calculate_single_psi(
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
     precision: int = 5,
-    missing_policy: str = "drop",
+    missing_policy: str = "include",
 ) -> Union[float, Tuple[float, pd.DataFrame]]:
     """
     Calculate Population Stability Index (PSI) for a single variable.
@@ -652,7 +675,8 @@ def calculate_psi(
     return_details: bool = False,
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
-    precision: int = 5
+    precision: int = 5,
+    missing_policy: str = "include"
 ) -> Union[float, pd.DataFrame, Tuple[Dict, Dict]]:
     """
     Calculate Population Stability Index (PSI) for a variable, optionally by groups.
@@ -682,6 +706,14 @@ def calculate_psi(
         Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
         Decimal precision. Default is 5.
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. Default in 0.5.0 is "include", which routes
+        NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+        contributes to the PSI. This is the recommended production behaviour
+        and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+        numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
+        numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
+        naming the NaN counts.
         
     Returns
     -------
@@ -734,7 +766,8 @@ def calculate_psi(
                     True,
                     min_bin_prop,
                     content,
-                    precision
+                    precision,
+                    missing_policy
                 )
                 results[group] = psi_value
                 details_dict[group] = detail
@@ -747,7 +780,8 @@ def calculate_psi(
                     False,
                     min_bin_prop,
                     content,
-                    precision
+                    precision,
+                    missing_policy
                 )
         
         if return_details:
@@ -765,7 +799,8 @@ def calculate_psi(
                 True, 
                 min_bin_prop, 
                 content, 
-                precision
+                precision,
+                missing_policy
             )
         else:
             return _calculate_single_psi(
@@ -776,7 +811,8 @@ def calculate_psi(
                 False, 
                 min_bin_prop, 
                 content, 
-                precision
+                precision,
+                missing_policy
             )
 
 
@@ -791,7 +827,8 @@ def calculate_within_psi(
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
     precision: int = 5,
-    benchmark_display_name: Optional[str] = None
+    benchmark_display_name: Optional[str] = None,
+    missing_policy: str = "include"
 ) -> Union[pd.DataFrame, Dict]:
     """
     Calculate PSI values within a single dataset, comparing groups to a benchmark.
@@ -823,6 +860,14 @@ def calculate_within_psi(
         Decimal precision. Default is 5.
     benchmark_display_name : str, optional
         Custom name for benchmark in results.
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. Default in 0.5.0 is "include", which routes
+        NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+        contributes to the PSI. This is the recommended production behaviour
+        and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+        numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
+        numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
+        naming the NaN counts.
         
     Returns
     -------
@@ -858,7 +903,8 @@ def calculate_within_psi(
                 return_details=True, 
                 min_bin_prop=min_bin_prop, 
                 content=content, 
-                precision=precision
+                precision=precision,
+                missing_policy=missing_policy
             )
             res_dict[obs_value] = psi
             detail_dict[obs_value] = details
@@ -872,7 +918,8 @@ def calculate_within_psi(
                 return_details=False, 
                 min_bin_prop=min_bin_prop, 
                 content=content, 
-                precision=precision
+                precision=precision,
+                missing_policy=missing_policy
             )
             res_dict[obs_value] = psi
     
@@ -895,7 +942,8 @@ def calculate_psi_within_dataset(
     buckets: int = 10,
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
-    precision: int = 5
+    precision: int = 5,
+    missing_policy: str = "include"
 ) -> pd.DataFrame:
     """
     Calculate PSI for multiple variables within a dataset, comparing groups to a benchmark.
@@ -923,6 +971,14 @@ def calculate_psi_within_dataset(
         Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
         Decimal precision. Default is 5.
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. Default in 0.5.0 is "include", which routes
+        NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+        contributes to the PSI. This is the recommended production behaviour
+        and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+        numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
+        numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
+        naming the NaN counts.
         
     Returns
     -------
@@ -946,7 +1002,8 @@ def calculate_psi_within_dataset(
             return_details=False, 
             min_bin_prop=min_bin_prop, 
             content=content, 
-            precision=precision
+            precision=precision,
+            missing_policy=missing_policy
         ).sort_values([grp_name]).reset_index(drop=True)
         
         single_psi['var'] = var
@@ -964,7 +1021,8 @@ def calculate_multivar_psi_two_sets(
     equal_freq: bool = True,
     min_bin_prop: float = 0.05,
     content: float = 1e-6,
-    precision: int = 5
+    precision: int = 5,
+    missing_policy: str = "include"
 ) -> pd.DataFrame:
     """
     Calculate PSI for multiple variables by comparing two different datasets.
@@ -992,6 +1050,14 @@ def calculate_multivar_psi_two_sets(
         Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
         Decimal precision. Default is 5.
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. Default in 0.5.0 is "include", which routes
+        NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+        contributes to the PSI. This is the recommended production behaviour
+        and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+        numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
+        numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
+        naming the NaN counts.
         
     Returns
     -------
@@ -1011,7 +1077,8 @@ def calculate_multivar_psi_two_sets(
             target_col=var, 
             group_by=group_by, 
             buckets=buckets,
-            return_details=False
+            return_details=False,
+            missing_policy=missing_policy
         )
         if group_by is None:
             single_psi = pd.DataFrame([single_psi], columns=['psi'])
@@ -1151,7 +1218,8 @@ def calculate_multigroup_psi_two_sets(
     content: float = 1e-6,
     precision: int = 5,
     group_name: Optional[str] = None,
-    return_details: bool = False
+    return_details: bool = False,
+    missing_policy: str = "include"
 ) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
     Calculate grouped PSI using expected DataFrame as benchmark, applied to actual DataFrame groups.
@@ -1181,6 +1249,12 @@ def calculate_multigroup_psi_two_sets(
     return_details : bool, optional
         是否返回详细分箱信息。若为 True，返回字典 {'psi': psi_df, 'details': details_df}，
         details_df 包含列：['bin', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var']
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        NaN 行处理策略。0.5.0 起默认为 "include"，将 NaN 行汇入独立的
+        "__MISSING__" 桶，使缺失率漂移进入 PSI 计算；这是推荐的生产行为，
+        并在 0.5.0 成为默认值（0.4.2 为 "drop" 以保持数值向后兼容）。
+        传入 "drop" 可复现 0.5.0 之前的数值，或 "warn_and_drop" 保留旧数值
+        同时发出 RuntimeWarning 报告两侧 NaN 数量。
     """
     if group_name is not None:
         if actual_df[group_name].isna().sum() > 0:
@@ -1203,7 +1277,8 @@ def calculate_multigroup_psi_two_sets(
                         return_details=True,
                         min_bin_prop=min_bin_prop,
                         content=content,
-                        precision=precision
+                        precision=precision,
+                        missing_policy=missing_policy
                     )
                     
                     psi_records.append({group_name: group, 'var': var, 'psi': psi_val})
@@ -1250,7 +1325,8 @@ def calculate_multigroup_psi_two_sets(
                     return_details=True,
                     min_bin_prop=min_bin_prop,
                     content=content,
-                    precision=precision
+                    precision=precision,
+                    missing_policy=missing_policy
                 )
                 psi_records.append({'var': var, 'psi': psi_val})
                 
@@ -1285,7 +1361,8 @@ def calculate_multigroup_psi_two_sets(
                 equal_freq=equal_freq, 
                 min_bin_prop=min_bin_prop, 
                 content=content, 
-                precision=precision
+                precision=precision,
+                missing_policy=missing_policy
             )
             
             return group_psi
