@@ -17,6 +17,28 @@ pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+
+def _split_odps_table_name(table_name):
+    """Return (qualifier, bare table name) for ODPS table identifiers.
+
+    MaxCompute accepts a project-qualified source in ``ALTER TABLE`` but the
+    ``RENAME TO`` target must be the bare table name within the same project.
+    """
+    table_name = str(table_name)
+    if "." not in table_name:
+        return "", table_name
+    qualifier, bare_name = table_name.rsplit(".", 1)
+    return qualifier, bare_name
+
+
+def _make_related_odps_table_name(table_name, suffix):
+    qualifier, bare_name = _split_odps_table_name(table_name)
+    related_bare = f"{bare_name}{suffix}"
+    if qualifier:
+        return f"{qualifier}.{related_bare}", related_bare
+    return related_bare, related_bare
+
+
 class ODPSRunner(object):
     _wide_schema_patch_lock = threading.RLock()
     _wide_schema_patch_ref_count = 0
@@ -292,8 +314,9 @@ class ODPSRunner(object):
         # Atomic swap path (default from 0.4.2). If any step before the final
         # swap fails, the original table is untouched.
         ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
-        tmp_name = f"{table_name}__tmp_{ts}"
-        old_name = f"{table_name}__old_{ts}"
+        _, target_rename_name = _split_odps_table_name(table_name)
+        tmp_name, _ = _make_related_odps_table_name(table_name, f"__tmp_{ts}")
+        old_name, old_rename_name = _make_related_odps_table_name(table_name, f"__old_{ts}")
 
         # Step 1: write data into the temp table. If this fails, drop the
         # partial temp table and re-raise; the target table is untouched.
@@ -321,7 +344,7 @@ class ODPSRunner(object):
         target_exists = self.o.exist_table(table_name)
         if target_exists:
             try:
-                self.o.run_sql(f"ALTER TABLE {table_name} RENAME TO {old_name};")
+                self.o.run_sql(f"ALTER TABLE {table_name} RENAME TO {old_rename_name};")
             except Exception:
                 # Rename of the live target failed — do not touch it. Drop the
                 # tmp table so we don't leak it, then re-raise.
@@ -334,13 +357,13 @@ class ODPSRunner(object):
                 raise
 
         try:
-            self.o.run_sql(f"ALTER TABLE {tmp_name} RENAME TO {table_name};")
+            self.o.run_sql(f"ALTER TABLE {tmp_name} RENAME TO {target_rename_name};")
         except Exception:
             # tmp -> target rename failed. If we already moved the original,
             # try to restore it so the caller is not left with a missing table.
             if target_exists:
                 try:
-                    self.o.run_sql(f"ALTER TABLE {old_name} RENAME TO {table_name};")
+                    self.o.run_sql(f"ALTER TABLE {old_name} RENAME TO {target_rename_name};")
                     logger.warning(
                         f"upload_df: swap of {tmp_name} -> {table_name} failed; restored original from {old_name}"
                     )
