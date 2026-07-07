@@ -17,6 +17,8 @@ on:
       - 'Modeling_Tool/__init__.py'
       - 'setup.py'
       - 'pyproject.toml'
+      - 'README.md'
+      - 'Modeling_Tool/README.md'
       - 'scripts/check_version_consistency.py'
       - '.github/workflows/version-consistency.yml'
   pull_request:
@@ -25,6 +27,8 @@ on:
       - 'Modeling_Tool/__init__.py'
       - 'setup.py'
       - 'pyproject.toml'
+      - 'README.md'
+      - 'Modeling_Tool/README.md'
       - 'scripts/check_version_consistency.py'
       - '.github/workflows/version-consistency.yml'
   workflow_dispatch:

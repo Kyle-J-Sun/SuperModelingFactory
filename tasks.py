@@ -78,6 +78,8 @@ def release(args) -> None:
         (ROOT / "pyproject.toml", r"^version\s*=.*", f'version = "{version}"'),
         (ROOT / "setup.py", r'SMF_VERSION", "[^"]+"', f'SMF_VERSION", "{version}"'),
         (ROOT / "Modeling_Tool" / "__init__.py", r'__version__ = "[^"]+"', f'__version__ = "{version}"'),
+        (ROOT / "README.md", r"^-\s+\*\*Version\*\*:\s*\S+", f"- **Version**: {version}"),
+        (ROOT / "Modeling_Tool" / "README.md", r"^-\s+\*\*Version\*\*:\s*\S+", f"- **Version**: {version}"),
     ]
     for path, pattern, repl in bumps:
         text = path.read_text(encoding="utf-8")
@@ -86,7 +88,15 @@ def release(args) -> None:
 
     verify(None)
 
-    _run(["git", "add", "pyproject.toml", "setup.py", "Modeling_Tool/__init__.py"])
+    _run([
+        "git",
+        "add",
+        "pyproject.toml",
+        "setup.py",
+        "Modeling_Tool/__init__.py",
+        "README.md",
+        "Modeling_Tool/README.md",
+    ])
     _run(["git", "commit", "-m", f"chore: bump version to {version}"])
     _run(["git", "tag", "-a", f"v{version}", "-m", f"Release v{version}"])
 
@@ -95,7 +105,7 @@ def release(args) -> None:
     print("    git push origin main")
     print(f"    git push origin v{version}")
     print()
-    print("Also bump README version footers and sync doc / pytest repos.")
+    print("Also sync SuperModelingFactory_doc / SuperModelingFactory_pytest version references.")
     print("GitHub Actions will then build wheels and create the Release.")
 
 

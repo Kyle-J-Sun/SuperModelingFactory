@@ -48,12 +48,14 @@ release:  ## Tag + push a new release. Usage: `make release VERSION=0.3.6`
 	$(PYTHON) -c "import re,pathlib; \
 files=[('pyproject.toml',r'^version\s*=.*',f'version = \"$(VERSION)\"'), \
 ('setup.py',r'SMF_VERSION\", \"[^\"]+\"',f'SMF_VERSION\", \"$(VERSION)\"'), \
-('Modeling_Tool/__init__.py',r'__version__ = \"[^\"]+\"',f'__version__ = \"$(VERSION)\"')]; \
+('Modeling_Tool/__init__.py',r'__version__ = \"[^\"]+\"',f'__version__ = \"$(VERSION)\"'), \
+('README.md',r'^-\s+\*\*Version\*\*:\s*\S+',f'- **Version**: $(VERSION)'), \
+('Modeling_Tool/README.md',r'^-\s+\*\*Version\*\*:\s*\S+',f'- **Version**: $(VERSION)')]; \
 [(lambda p,pat,rep: p.write_text(re.sub(pat,rep,p.read_text(encoding='utf-8'),count=1,flags=re.M)))(pathlib.Path(f),pat,rep) for f,pat,rep in files]"
 	@echo "==> verifying package"
 	$(MAKE) verify
 	@echo "==> committing version bump"
-	git add pyproject.toml setup.py Modeling_Tool/__init__.py
+	git add pyproject.toml setup.py Modeling_Tool/__init__.py README.md Modeling_Tool/README.md
 	git commit -m "chore: bump version to $(VERSION)"
 	@echo "==> tagging v$(VERSION)"
 	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"

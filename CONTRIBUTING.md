@@ -145,7 +145,7 @@ SMF uses **semantic versioning**: `MAJOR.MINOR.PATCH`.
 
 ### Release procedure
 
-Bump version in **all four** places (they must agree):
+Bump version in **all five** places (they must agree):
 
 - `pyproject.toml :: version`
 - `setup.py :: SMF_VERSION` default
@@ -157,7 +157,7 @@ Bump version in **all four** places (they must agree):
 git checkout main && git pull
 
 make release VERSION=0.3.6
-# bumps pyproject.toml, runs verify, commits, tags
+# bumps package metadata + README footers, runs verify, commits, tags
 
 git push origin main
 git push origin v0.3.6
