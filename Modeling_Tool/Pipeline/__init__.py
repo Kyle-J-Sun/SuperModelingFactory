@@ -31,6 +31,23 @@ from .feature_validation import (
 )
 from .orchestrator import run_modeling_from_validation
 from .screening_artifact import FeatureScreeningArtifact, screen_result_to_summary
+from .field_meta import (
+    FieldMeta,
+    PipelineRegistryEntry,
+    PIPELINE_REGISTRY,
+    config_from_dict,
+    config_from_yaml,
+    config_to_dict,
+    config_to_yaml,
+    extract_config_schema,
+    extract_pipeline_schema,
+    extract_schema,
+    generate_pipeline_code,
+    get_config_field_meta,
+    get_pipeline_registry,
+    get_pipeline_registry_schema,
+    validate_pipeline_config,
+)
 
 __all__ = [
     "RejectInferencePipeline",
@@ -57,4 +74,19 @@ __all__ = [
     "FeatureScreeningArtifact",
     "screen_result_to_summary",
     "run_modeling_from_validation",
+    "FieldMeta",
+    "PipelineRegistryEntry",
+    "PIPELINE_REGISTRY",
+    "get_pipeline_registry",
+    "get_pipeline_registry_schema",
+    "get_config_field_meta",
+    "extract_config_schema",
+    "extract_pipeline_schema",
+    "extract_schema",
+    "config_to_dict",
+    "config_from_dict",
+    "config_to_yaml",
+    "config_from_yaml",
+    "validate_pipeline_config",
+    "generate_pipeline_code",
 ]
