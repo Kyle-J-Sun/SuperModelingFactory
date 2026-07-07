@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 import logging
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+from Modeling_Tool._utils.nan_guard import warn_if_nan_ratio_exceeds
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,33 @@ def compute_bic(model, x, y, sample_weight=None):
     return bic
 
 
+def _prepare_nan_handled_frame(data, nan_handling="fillna_median", warn_threshold=0.05, context=""):
+    """Return a numeric frame with explicit NaN handling for selection stats."""
+    allowed = {"fillna_0", "fillna_mean", "fillna_median", "drop_rows", "raise"}
+    if nan_handling not in allowed:
+        raise ValueError(f"nan_handling must be one of {sorted(allowed)}; got {nan_handling!r}")
+
+    frame = data.copy()
+    for col in frame.columns:
+        warn_if_nan_ratio_exceeds(frame[col], threshold=warn_threshold, context=f"{context}.{col}")
+
+    if nan_handling == "raise":
+        if frame.isna().any().any():
+            missing_cols = frame.columns[frame.isna().any()].tolist()
+            raise ValueError(f"{context}: NaN values present in columns {missing_cols}")
+        return frame
+    if nan_handling == "drop_rows":
+        return frame.dropna(axis=0)
+    if nan_handling == "fillna_0":
+        return frame.fillna(0)
+
+    if nan_handling == "fillna_mean":
+        fill_values = frame.mean(numeric_only=True).fillna(0)
+    else:
+        fill_values = frame.median(numeric_only=True).fillna(0)
+    return frame.fillna(fill_values).fillna(0)
+
+
 class FeatureSelectionAnalyzer:
     """
     Feature selection analyzer using statistical tests.
@@ -284,7 +312,7 @@ class FeatureSelectionAnalyzer:
         self.selected_features_ = None
         self.chi2_results_ = None
 
-    def chi2_selection(self, data, feature_cols, target_col):
+    def chi2_selection(self, data, feature_cols, target_col, nan_handling="fillna_median", nan_warn_threshold=0.05):
         """
         Select features using chi-squared test.
 
@@ -305,8 +333,13 @@ class FeatureSelectionAnalyzer:
         from sklearn.feature_selection import chi2
         from sklearn.preprocessing import MinMaxScaler
 
-        x = data[feature_cols].fillna(0)
-        y = data[target_col]
+        x = _prepare_nan_handled_frame(
+            data[feature_cols],
+            nan_handling=nan_handling,
+            warn_threshold=nan_warn_threshold,
+            context="FeatureSelectionAnalyzer.chi2_selection",
+        )
+        y = data.loc[x.index, target_col]
 
         scaler = MinMaxScaler()
         x_scaled = scaler.fit_transform(x)
@@ -324,7 +357,7 @@ class FeatureSelectionAnalyzer:
         self.selected_features_ = results.loc[results['selected'], 'feature'].tolist()
         return results
 
-    def compute_vif(self, data):
+    def compute_vif(self, data, nan_handling="fillna_median", nan_warn_threshold=0.05):
         """
         Compute Variance Inflation Factor (VIF) for multicollinearity detection.
 
@@ -340,9 +373,15 @@ class FeatureSelectionAnalyzer:
         """
         from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-        x = data.fillna(0).values
+        work = _prepare_nan_handled_frame(
+            data,
+            nan_handling=nan_handling,
+            warn_threshold=nan_warn_threshold,
+            context="FeatureSelectionAnalyzer.compute_vif",
+        )
+        x = work.values
         vif_data = pd.DataFrame({
-            'feature': data.columns,
+            'feature': work.columns,
             'VIF': [variance_inflation_factor(x, i) for i in range(x.shape[1])]
         }).sort_values('VIF', ascending=False).reset_index(drop=True)
 

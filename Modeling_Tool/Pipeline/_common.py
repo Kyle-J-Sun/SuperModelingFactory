@@ -285,7 +285,12 @@ def get_raw_model(model: Any) -> Any:
     return model
 
 
-def predict_positive(model: Any, data: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+def predict_positive(
+    model: Any,
+    data: pd.DataFrame,
+    feature_cols: list[str],
+    warn_nan: bool = True,
+) -> np.ndarray:
     raw_model = get_raw_model(model)
     x = data[feature_cols]
 
@@ -338,7 +343,7 @@ def predict_positive(model: Any, data: pd.DataFrame, feature_cols: list[str]) ->
         )
 
     finite_mask = np.isfinite(result)
-    if not finite_mask.all():
+    if warn_nan and not finite_mask.all():
         n_bad = int((~finite_mask).sum())
         warnings.warn(
             f"predict_positive: {n_bad}/{n_rows} predictions are NaN/Inf "
@@ -347,6 +352,35 @@ def predict_positive(model: Any, data: pd.DataFrame, feature_cols: list[str]) ->
             stacklevel=2,
         )
     return result
+
+
+def predict_positive_many(
+    model: Any,
+    datasets: Mapping[str, pd.DataFrame],
+    feature_cols: list[str],
+) -> tuple[dict[str, np.ndarray], dict[str, int]]:
+    """Predict multiple datasets and emit one aggregate NaN/Inf warning."""
+    preds: dict[str, np.ndarray] = {}
+    stats: dict[str, int] = {}
+    total_bad = 0
+    total_rows = 0
+    for name, data in datasets.items():
+        pred = predict_positive(model, data, feature_cols, warn_nan=False)
+        bad = int((~np.isfinite(pred)).sum())
+        stats[str(name)] = bad
+        total_bad += bad
+        total_rows += len(pred)
+        preds[str(name)] = pred
+
+    if total_bad:
+        detail = ", ".join(f"{name}={count}" for name, count in stats.items() if count)
+        warnings.warn(
+            f"NaN/Inf predictions coerced or returned: {detail}; "
+            f"total {total_bad}/{total_rows}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return preds, stats
 
 
 def add_dataset_with_optional_weight(

@@ -14,6 +14,7 @@ import pandas as pd
 from sklearn.metrics import precision_recall_curve, roc_auc_score, roc_curve
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+from Modeling_Tool._utils.robust import smf_logger
 
 
 def resolve_weights(data=None, weight_col=None, sample_weight=None, expected_len=None, wgt=None, wgt_col=None):
@@ -43,7 +44,8 @@ def safe_weighted_average(values, weights=None):
 def safe_auc(y_true, y_score, sample_weight=None):
     try:
         return float(roc_auc_score(y_true, y_score, sample_weight=sample_weight))
-    except Exception:
+    except (ValueError, ZeroDivisionError) as exc:
+        smf_logger.record_and_continue("auc", exc, stage="weighted_eval.safe_auc")
         return np.nan
 
 

@@ -128,6 +128,7 @@ class RejectInferencePipeline:
 
     def __init__(self, config: RejectInferencePipelineConfig | None = None):
         self.config = config or RejectInferencePipelineConfig()
+        self.predict_positive_nan_stats: dict[str, dict[str, int]] = {}
 
     def run(self, data: pd.DataFrame) -> RejectInferencePipelineResult:
         cfg = self.config
@@ -718,8 +719,22 @@ class RejectInferencePipeline:
 
             train_eval = train[train[cfg.approved_col] == 1].copy()
             eval_sets = {"train": train_eval, "validation": val.copy(), "oot": oot.copy()}
+            nan_stats: dict[str, int] = {}
             for ds in eval_sets.values():
-                ds["pred_prob"] = predict_positive(model, ds, feature_cols)
+                ds["pred_prob"] = predict_positive(model, ds, feature_cols, warn_nan=False)
+            for ds_name, ds in eval_sets.items():
+                nan_stats[ds_name] = int((~np.isfinite(ds["pred_prob"].to_numpy(dtype=float))).sum())
+            self.predict_positive_nan_stats[str(method)] = nan_stats
+            total_bad = sum(nan_stats.values())
+            if total_bad:
+                total_rows = sum(len(ds) for ds in eval_sets.values())
+                detail = ", ".join(f"{k}={v}" for k, v in nan_stats.items() if v)
+                warnings.warn(
+                    f"{method}: NaN/Inf predictions detected across RI evaluation datasets: "
+                    f"{detail}; total {total_bad}/{total_rows}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
             evaluator = PerformanceEvaluator(
                 tgt_name=cfg.target_col,

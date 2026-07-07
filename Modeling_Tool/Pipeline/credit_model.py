@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import warnings
 
 from ._common import (
     add_dataset_with_optional_weight,
@@ -175,6 +176,7 @@ class CreditModelPipeline:
 
     def __init__(self, config: CreditModelPipelineConfig | None = None):
         self.config = config or CreditModelPipelineConfig()
+        self.predict_positive_nan_stats: dict[str, dict[str, int]] = {}
         self._validate_gbm_feature_source_config()
 
     def run(self, data: pd.DataFrame) -> CreditModelPipelineResult:
@@ -1101,10 +1103,23 @@ class CreditModelPipeline:
                 equal_freq=True,
             )
             eval_splits = {**splits, **model_extra}
+            nan_stats: dict[str, int] = {}
             for ds_name, df in eval_splits.items():
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
+                nan_stats[str(ds_name)] = int((~np.isfinite(scored[f"pred_{name}"].to_numpy(dtype=float))).sum())
                 add_dataset_with_optional_weight(evaluator, ds_name, scored, weight_col=cfg.weight_col)
+            self.predict_positive_nan_stats[str(name)] = nan_stats
+            total_bad = sum(nan_stats.values())
+            if total_bad:
+                total_rows = sum(len(df) for df in eval_splits.values())
+                detail = ", ".join(f"{k}={v}" for k, v in nan_stats.items() if v)
+                warnings.warn(
+                    f"{name}: NaN/Inf predictions detected across evaluation datasets: "
+                    f"{detail}; total {total_bad}/{total_rows}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             fig_save_path = None
             if cfg.write_outputs and cfg.plot_outputs:
                 fig_save_path = str(Path(cfg.output_dir) / "figs" / "perf" / f"perf_{name}.png")
@@ -1121,7 +1136,7 @@ class CreditModelPipeline:
         if self._warm_start_requested_for(model_name) and model_name in {"lgb", "xgb"}:
             init_score = self._get_warm_start_init_score(model_name, data)
             return wrapper.predict_with_base_margin(data[feature_cols], init_score, return_prob=True)
-        return predict_positive(wrapper, data, feature_cols)
+        return predict_positive(wrapper, data, feature_cols, warn_nan=False)
 
     def _will_run_explainability(self) -> bool:
         cfg = self.config

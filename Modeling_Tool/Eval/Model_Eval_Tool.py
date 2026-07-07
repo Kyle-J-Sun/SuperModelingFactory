@@ -1,5 +1,6 @@
 import logging
 import os
+import warnings
 import numpy as np
 import pandas as pd
 from Modeling_Tool.Core.Binning_Tool import get_bin_range_list, super_binning
@@ -2246,8 +2247,9 @@ class PerformanceEvaluator:
         self.weight_col = weight_col
         self.datasets = {}
         self.dataset_weight_cols = {}
+        self.evaluate_status = None
     
-    def add_dataset(self, name, data, weight_col = None):
+    def add_dataset(self, name, data, weight_col = None, overwrite = False):
         """
         添加数据集。
         
@@ -2263,6 +2265,17 @@ class PerformanceEvaluator:
         self
             返回自身以便链式调用
         """
+        if name in self.datasets and not overwrite:
+            raise KeyError(
+                f"Dataset name {name!r} already exists. Use overwrite=True to replace it, "
+                "or pass a different dataset name."
+            )
+        if name in self.datasets and overwrite:
+            warnings.warn(
+                f"PerformanceEvaluator.add_dataset overwriting existing dataset {name!r}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.datasets[name] = data
         self.dataset_weight_cols[name] = weight_col
         return self
@@ -2304,16 +2317,38 @@ class PerformanceEvaluator:
             ``fig_save_path`` 自动按标签加后缀 (如 ``perf.png`` → ``perf_<label>.png``)。
         """
         if len(self.datasets) == 0:
+            self.evaluate_status = "no_datasets"
             return pd.DataFrame([])
 
         if self.scr_name is None and self.model is None and self.feature_cols is None:
-            return -1
+            self.evaluate_status = "compute_failed"
+            warnings.warn(
+                "PerformanceEvaluator.evaluate() now returns an empty DataFrame instead of -1; "
+                "inspect .evaluate_status for the failure reason.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return pd.DataFrame([])
         
         if self.scr_name is None and self.model is None:
-            return -2
+            self.evaluate_status = "compute_failed"
+            warnings.warn(
+                "PerformanceEvaluator.evaluate() now returns an empty DataFrame instead of -2; "
+                "inspect .evaluate_status for the failure reason.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return pd.DataFrame([])
         
         if self.scr_name is None and self.feature_cols is None:
-            return -3
+            self.evaluate_status = "compute_failed"
+            warnings.warn(
+                "PerformanceEvaluator.evaluate() now returns an empty DataFrame instead of -3; "
+                "inspect .evaluate_status for the failure reason.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return pd.DataFrame([])
 
         active_weight_col = weight_col or self.weight_col
         has_dataset_weight = any(v is not None for v in self.dataset_weight_cols.values())
@@ -2369,6 +2404,7 @@ class PerformanceEvaluator:
                     )
             if rpt_save_path:
                 fnl_df.to_csv(rpt_save_path, index=False)
+            self.evaluate_status = "ok" if not fnl_df.empty else "empty_input"
             return fnl_df
 
         # ── 多 y 标签支持: tgt_name 为 list/tuple 时, 逐标签评估后纵向拼接 ──
@@ -2412,6 +2448,7 @@ class PerformanceEvaluator:
                 _ipy_display(fnl_df)
             if rpt_save_path:
                 fnl_df.to_csv(rpt_save_path, index = False)
+            self.evaluate_status = "ok" if not fnl_df.empty else "empty_input"
             return fnl_df
 
         def _get_score(data):
@@ -2472,6 +2509,7 @@ class PerformanceEvaluator:
                 }
 
             if len(eval_datasets) == 0:
+                self.evaluate_status = "empty_input"
                 return pd.DataFrame([])
 
             model_eval_result_df = evaluate_performance(
@@ -2570,4 +2608,5 @@ class PerformanceEvaluator:
         if rpt_save_path:
             fnl_df.to_csv(rpt_save_path, index = False)
 
+        self.evaluate_status = "ok" if isinstance(fnl_df, pd.DataFrame) and not fnl_df.empty else "empty_input"
         return fnl_df

@@ -367,8 +367,7 @@ class NumVarBinning:
         if modify:
             self.cut_points = self.modify_cutpoints(df, points)
         else:
-            points.sort()
-            self.cut_points = points
+            self.cut_points = sorted(points)
         self.bins = len(self.cut_points) - 1
 
         binning_series = pd.cut(df[self.var_name], self.cut_points, right=False)

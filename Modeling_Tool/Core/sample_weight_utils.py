@@ -52,6 +52,12 @@ def validate_sample_weight(weights, expected_len=None):
         raise ValueError("sample_weight must be finite (no NaN/inf).")
     if np.any(w < 0):
         raise ValueError("sample_weight must be non-negative.")
+    total = float(np.sum(w))
+    if total <= 0:
+        raise ValueError(
+            "sample_weight sum must be > 0; got sum={0}. "
+            "All-zero weights make weighted metrics undefined.".format(total)
+        )
     return w
 
 

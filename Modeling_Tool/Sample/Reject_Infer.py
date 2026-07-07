@@ -28,6 +28,8 @@ import numpy as np
 from typing import Union, Optional, List, Dict, Any, Tuple
 from abc import ABC, abstractmethod
 
+from Modeling_Tool._utils.nan_guard import warn_if_nan_ratio_exceeds
+
 
 class RejectInferrer(ABC):
     """
@@ -81,6 +83,45 @@ class RejectInferrer(ABC):
 
     def _rng(self) -> np.random.Generator:
         return np.random.default_rng(self.random_state)
+
+    def _filter_nan_bad_probability(
+        self,
+        df_rejected: pd.DataFrame,
+        p_bad: pd.Series,
+        score_col: str,
+        nan_score_policy: str,
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        if nan_score_policy not in {"drop", "raise", "fill_0.5"}:
+            raise ValueError("nan_score_policy must be one of 'drop', 'raise', or 'fill_0.5'")
+
+        stats = warn_if_nan_ratio_exceeds(
+            p_bad,
+            threshold=0.01,
+            context="reject inference bad probability",
+        )
+        n_nan = int(stats["n_nan"])
+        if n_nan == 0:
+            return df_rejected, p_bad
+
+        n_total = int(stats["n_total"])
+        if nan_score_policy == "raise":
+            raise ValueError(
+                f"Reject inference bad probability contains {n_nan}/{n_total} NaN values "
+                f"from score_col={score_col!r}."
+            )
+        if nan_score_policy == "fill_0.5":
+            return df_rejected, p_bad.fillna(0.5)
+
+        keep = p_bad.notna()
+        dropped = int((~keep).sum())
+        warnings.warn(
+            f"Reject inference dropped {dropped}/{n_total} rejected rows with NaN bad probability "
+            f"from score_col={score_col!r}. Set nan_score_policy='fill_0.5' to reproduce "
+            f"the legacy 50/50 behaviour.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return df_rejected.loc[keep].copy(), p_bad.loc[keep]
     
     @abstractmethod
     def infer(self, df_approved: pd.DataFrame,
@@ -315,12 +356,14 @@ class FuzzyAugmentInferrer(RejectInferrer):
         weight_factor: float = 1.0,
         score_direction: str = 'high_good',
         random_state: Optional[int] = None,
+        nan_score_policy: str = "drop",
     ):
         """
         Initialize FuzzyAugmentInferrer.
         """
         super().__init__(target_col, score_col, score_direction=score_direction, random_state=random_state)
         self.weight_factor = weight_factor
+        self.nan_score_policy = nan_score_policy
     
     def infer(self, df_approved: pd.DataFrame,
               df_rejected: pd.DataFrame,
@@ -347,7 +390,13 @@ class FuzzyAugmentInferrer(RejectInferrer):
         df_approved_copy = df_approved.copy()
         df_approved_copy['_weight'] = 1.0
 
-        p_bad = self._bad_probability(df_rejected[score_col]).fillna(0.5)
+        p_bad = self._bad_probability(df_rejected[score_col])
+        df_rejected, p_bad = self._filter_nan_bad_probability(
+            df_rejected,
+            p_bad,
+            score_col=score_col,
+            nan_score_policy=self.nan_score_policy,
+        )
         bad_copy = df_rejected.copy()
         bad_copy[self.target_col] = 1
         bad_copy['_weight'] = p_bad.to_numpy(dtype=float) * float(self.weight_factor)

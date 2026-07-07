@@ -242,8 +242,6 @@ class ScoreConsistencyUATPipeline:
                 coerced_count = int((as_num.notna() & original_notna).sum())
                 parse_ratio = coerced_count / original_count
                 if mode == "aggressive":
-                    if coerced_count == 0:
-                        continue
                     lost = original_count - coerced_count
                     if lost > 0:
                         _logger.warning(

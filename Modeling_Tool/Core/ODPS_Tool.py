@@ -39,6 +39,41 @@ def _make_related_odps_table_name(table_name, suffix):
     return related_bare, related_bare
 
 
+def _parse_odps_partition_spec(partition):
+    if isinstance(partition, dict):
+        return [(str(k).strip(), str(v).strip().strip("'\"")) for k, v in partition.items()]
+    pairs = []
+    for item in str(partition).split(","):
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError(f"Invalid ODPS partition spec item {item!r}; expected key=value.")
+        key, value = item.split("=", 1)
+        pairs.append((key.strip(), value.strip().strip("'\"")))
+    if not pairs:
+        raise ValueError("partition must contain at least one key=value pair.")
+    return pairs
+
+
+def _format_odps_partition_spec(pairs, quoted=False):
+    parts = []
+    for key, value in pairs:
+        safe_value = str(value).replace("'", "''")
+        if quoted:
+            parts.append(f"{key}='{safe_value}'")
+        else:
+            parts.append(f"{key}={safe_value}")
+    return ",".join(parts)
+
+
+def _make_related_odps_partition_spec(partition, suffix):
+    pairs = _parse_odps_partition_spec(partition)
+    related = list(pairs)
+    key, value = related[-1]
+    related[-1] = (key, f"{value}{suffix}")
+    return _format_odps_partition_spec(related, quoted=False)
+
+
 class ODPSRunner(object):
     _wide_schema_patch_lock = threading.RLock()
     _wide_schema_patch_ref_count = 0
@@ -392,7 +427,21 @@ class ODPSRunner(object):
 
         logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
 
-    def insert_df(self, df, table_name, overwrite=True, partition=None):
+    def _partition_exists(self, table, partition):
+        if hasattr(table, "exist_partition"):
+            return bool(table.exist_partition(partition))
+        try:
+            table.get_partition(partition)
+            return True
+        except Exception:
+            return False
+
+    def _rename_partition(self, table_name, source_partition, target_partition):
+        src = _format_odps_partition_spec(_parse_odps_partition_spec(source_partition), quoted=True)
+        dst = _format_odps_partition_spec(_parse_odps_partition_spec(target_partition), quoted=True)
+        self.o.run_sql(f"ALTER TABLE {table_name} PARTITION ({src}) RENAME TO PARTITION ({dst});")
+
+    def insert_df(self, df, table_name, overwrite=True, partition=None, atomic=True):
         """将数据集插入至mc已存在的表中.
 
         Parameters
@@ -411,6 +460,53 @@ class ODPSRunner(object):
             df.loc[:, "py_inserttime"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         if bool(partition):
+            if overwrite and atomic:
+                ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+                staging_partition = _make_related_odps_partition_spec(partition, f"__staging_{ts}")
+                backup_partition = _make_related_odps_partition_spec(partition, f"__old_{ts}")
+                target_exists = self._partition_exists(t, partition)
+
+                for stale in (staging_partition, backup_partition):
+                    try:
+                        t.delete_partition(stale, if_exists=True)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        logger.warning(
+                            f"insert_df: failed to cleanup partition {stale} before atomic write: {cleanup_exc!r}"
+                        )
+
+                try:
+                    with t.open_writer(partition=staging_partition, create_partition=True) as writer:
+                        writer.write(df.values.tolist())
+                    if target_exists:
+                        self._rename_partition(table_name, partition, backup_partition)
+                    self._rename_partition(table_name, staging_partition, partition)
+                except Exception:
+                    if target_exists:
+                        try:
+                            if not self._partition_exists(t, partition) and self._partition_exists(t, backup_partition):
+                                self._rename_partition(table_name, backup_partition, partition)
+                        except Exception as restore_exc:  # noqa: BLE001
+                            logger.error(
+                                f"insert_df: failed to restore original partition {partition} "
+                                f"from {backup_partition}: {restore_exc!r}. Manual recovery may be required."
+                            )
+                    try:
+                        t.delete_partition(staging_partition, if_exists=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise
+
+                if target_exists:
+                    try:
+                        t.delete_partition(backup_partition, if_exists=True)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        logger.warning(
+                            f"insert_df: atomic swap succeeded but failed to drop backup partition "
+                            f"{backup_partition}: {cleanup_exc!r}. Safe to delete manually."
+                        )
+                logger.info('<<<< insert_df atomic partition write done: shape={0} >>>>'.format(df.shape))
+                return
+
             if overwrite:
                 t.delete_partition(partition, if_exists=True)
             with t.open_writer(partition=partition, create_partition=True) as writer:
