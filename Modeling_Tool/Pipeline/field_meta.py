@@ -250,6 +250,7 @@ _FIELD_LABELS = {
     "numeric_coercion_min_ratio": "安全数值转换阈值",
     "input_type": "输入类型",
     "csv_read_kwargs": "CSV 读取参数",
+    "enable_batch": "启用 CSV 分批",
     "feature_batch_size": "特征分批大小",
     "feature_batches": "显式特征批次",
     "batch_base_cols": "批处理基础列",
@@ -331,6 +332,7 @@ _FIELD_DESCRIPTIONS = {
     "online_data": "线上 DataFrame，仅代码模式可用。",
     "psi_reference_data": "外部 PSI benchmark DataFrame，仅代码模式可用。",
     "submodel_pairs": "子模型字段映射，GUI 可用 key=value 或 JSON 形式编辑。",
+    "enable_batch": "是否显式启用 CSV feature batch 模式；默认关闭。关闭时 feature_batch_size/feature_batches 仅保留在配置中，不会触发分批。",
     "feature_batch_size": "CSV 宽表模式下每批分析的新特征数量。",
     "feature_batches": "显式指定每批新特征列表；优先级高于 feature_batch_size。",
     "batch_corr_mode": "within_batch 只算批内相关性，block_pairwise 会额外读 CSV 计算跨批相关性。",
@@ -626,7 +628,7 @@ def _infer_group(name: str) -> str:
         return ANALYSIS_GROUP
     if "model" in name or name.startswith("lr_") or name.startswith("warm_start") or name.startswith("backward") or name.startswith("optuna") or name.startswith("explain") or name == "owen_enabled":
         return MODEL_GROUP
-    if name in {"sql_dir", "offline_sql", "online_sql", "sqlrunner", "offline_data", "online_data", "input_type", "csv_read_kwargs"}:
+    if name in {"sql_dir", "offline_sql", "online_sql", "sqlrunner", "offline_data", "online_data", "input_type", "csv_read_kwargs", "enable_batch"}:
         return DATA_GROUP
     if name.startswith("perf") or name in {"nbins", "min_bin_prop", "equal_freq", "cross_vars", "cross_metrics"}:
         return EVAL_GROUP
@@ -687,7 +689,7 @@ def _field_meta(config_class: type, field_name: str, field_type: Any, default_va
         meta.depends_on = {"warm_start_enabled": True}
     if field_name.startswith("monotone_refine_") and field_name.endswith("_params"):
         meta.depends_on = {field_name.replace("_params", "_enabled"): True}
-    if field_name in {"feature_batch_size", "feature_batches", "batch_corr_mode"}:
+    if field_name in {"enable_batch", "feature_batch_size", "feature_batches", "batch_corr_mode"}:
         meta.group = "CSV 分批"
         meta.advanced = True
     return meta
@@ -1028,8 +1030,13 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
         if int(vals.get("optuna_n_trials", 5) or 0) < 5:
             warnings.append("optuna_n_trials 建议至少为 5，过小的搜索轮数不稳定。")
     elif entry.key == "feature_validation":
+        has_batch_config = bool(vals.get("feature_batches")) or vals.get("feature_batch_size") is not None
         if vals.get("feature_batch_size") is not None and int(vals["feature_batch_size"]) <= 0:
             errors.append("feature_batch_size 必须为正整数。")
+        if vals.get("enable_batch") and not has_batch_config:
+            errors.append("enable_batch=True 时必须配置 feature_batch_size 或 feature_batches。")
+        if vals.get("enable_batch") is False and has_batch_config:
+            warnings.append("enable_batch=False 时 feature_batch_size/feature_batches 不会触发 CSV 分批。")
         if vals.get("batch_corr_mode") == "block_pairwise":
             method = str((vals.get("corr_params") or {}).get("method", "pearson")).lower()
             if method == "kendall":

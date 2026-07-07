@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -33,6 +34,7 @@ class FeatureValidationPipelineConfig:
 
     input_type: Literal["auto", "dataframe", "csv"] = "auto"
     csv_read_kwargs: dict[str, Any] = field(default_factory=dict)
+    enable_batch: bool = False
     feature_batch_size: int | None = None
     feature_batches: list[list[str]] | None = None
     batch_base_cols: list[str] | None = None
@@ -150,10 +152,19 @@ class FeatureValidationPipeline:
 
     def run(self, data: pd.DataFrame | str | Path) -> FeatureValidationPipelineResult:
         input_type = self._resolve_input_type(data)
+        if self.config.enable_batch and input_type != "csv":
+            raise ValueError("enable_batch=True currently requires CSV input.")
         if input_type == "csv":
             csv_path = Path(data)
             if self._is_batch_mode():
                 return self._run_csv_batches(csv_path)
+            if self._has_batch_config():
+                warnings.warn(
+                    "feature_batch_size/feature_batches are configured but enable_batch=False; "
+                    "FeatureValidationPipeline will read the CSV in full and ignore batch settings.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             return self._run_dataframe(self._read_csv(csv_path))
         if not isinstance(data, pd.DataFrame):
             raise TypeError("data must be a pandas DataFrame when input_type='dataframe'.")
@@ -268,9 +279,17 @@ class FeatureValidationPipeline:
             return cfg.input_type
         return "dataframe" if isinstance(data, pd.DataFrame) else "csv"
 
-    def _is_batch_mode(self) -> bool:
+    def _has_batch_config(self) -> bool:
         cfg = self.config
         return bool(cfg.feature_batches) or cfg.feature_batch_size is not None
+
+    def _is_batch_mode(self) -> bool:
+        cfg = self.config
+        if not cfg.enable_batch:
+            return False
+        if not self._has_batch_config():
+            raise ValueError("enable_batch=True requires feature_batch_size or feature_batches.")
+        return True
 
     def _read_csv(self, csv_path: Path, usecols: list[str] | None = None, nrows: int | None = None) -> pd.DataFrame:
         if not csv_path.exists():
@@ -325,6 +344,7 @@ class FeatureValidationPipeline:
                     cfg,
                     output_dir=str(batch_dir),
                     input_type="dataframe",
+                    enable_batch=False,
                     feature_batch_size=None,
                     feature_batches=None,
                     new_feature_cols=list(batch_features),
