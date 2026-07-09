@@ -1,7 +1,7 @@
 # encoding: utf-8
 
 __author__ = "Jingkai Sun"
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 from ._utils import SMF_MISSING_BIN
 
