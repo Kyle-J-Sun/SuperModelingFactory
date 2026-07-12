@@ -20,6 +20,48 @@ from ._common import (
 )
 
 
+class _LRNanFillWrapper:
+    """Wrap a fitted LRMaster with train-derived NaN/Inf fill values.
+
+    sklearn's LogisticRegression rejects non-finite inputs while the RI
+    pipeline feeds models raw feature frames, so the exact fill values
+    learned from the training frame must be re-applied at every predict
+    call — otherwise training and scoring would silently run on different
+    imputations. Module-level class so saved models stay picklable.
+    """
+
+    def __init__(self, model: Any, fill_values: dict[str, float], nan_handling: str):
+        self._inner = model
+        self.fill_values_ = dict(fill_values)
+        self.nan_handling = str(nan_handling)
+
+    def _fill(self, data: pd.DataFrame) -> pd.DataFrame:
+        fill_cols = [c for c in self.fill_values_ if c in data.columns]
+        if not fill_cols:
+            return data
+        filled = data.copy()
+        block = filled[fill_cols].replace([np.inf, -np.inf], np.nan)
+        filled[fill_cols] = block.fillna(self.fill_values_)
+        return filled
+
+    def predict_proba(self, data: pd.DataFrame, varlist: list[str] | None = None, **kwargs: Any) -> Any:
+        return self._inner.predict_proba(self._fill(data), varlist=varlist, **kwargs)
+
+    def predict(self, data: pd.DataFrame, varlist: list[str] | None = None, **kwargs: Any) -> Any:
+        return self._inner.predict(self._fill(data), varlist=varlist, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # Never delegate dunders: leaking the inner model's __getstate__ /
+        # __setstate__ into pickle would serialize the wrapper as a bare
+        # LRMaster and drop the fill values on reload.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        inner = self.__dict__.get("_inner")
+        if inner is None:
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
 @dataclass
 class RejectInferencePipelineConfig:
     output_dir: str = "output/reject_inference"
@@ -46,6 +88,12 @@ class RejectInferencePipelineConfig:
     train_ri_models: bool = True
     ri_model_type: str = "lgb"
     ri_model_params: dict[str, Any] = field(default_factory=dict)
+    # NaN/Inf handling for lr models (both prescore_model_type="lr" and
+    # ri_model_type="lr"). GBM backends accept NaN natively; sklearn
+    # LogisticRegression does not, so lr features are imputed with
+    # train-derived fill values that are re-applied at scoring time.
+    # "raise" forbids imputation and fails fast on non-finite features.
+    lr_nan_handling: Literal["fillna_median", "fillna_mean", "fillna_0", "raise"] = "fillna_median"
     include_no_ri_benchmark: bool = True
     ri_validation_frac: float = 0.2
     save_models: bool = False
@@ -239,6 +287,9 @@ class RejectInferencePipeline:
         if model_type == "lr":
             lr_params = dict(params)
             standardize = bool(lr_params.pop("standardize", False))
+            train_fit, val_fit, fill_values = self._prepare_lr_frames(
+                train_fit, val_fit, feature_cols,
+            )
             model = LRMaster(params=lr_params or None, standardize=standardize)
             model.fit(
                 data=train_fit,
@@ -249,6 +300,8 @@ class RejectInferencePipeline:
                 val_tgt_name=cfg.target_col,
                 weight_col=weight_col,
             )
+            if fill_values is not None:
+                return _LRNanFillWrapper(model, fill_values, cfg.lr_nan_handling)
             return model
 
         model = GradientBoostingModel(model_type, params)
@@ -263,6 +316,69 @@ class RejectInferencePipeline:
             **fit_kwargs,
         )
         return model
+
+    def _prepare_lr_frames(
+        self,
+        train_fit: pd.DataFrame,
+        val_fit: pd.DataFrame,
+        feature_cols: list[str],
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float] | None]:
+        """Apply cfg.lr_nan_handling to the lr feature frames.
+
+        GBM backends consume NaN natively; sklearn LogisticRegression raises
+        ``Input X contains NaN`` on raw pipeline features. Fill values are
+        computed on the training frame only and returned so the fitted model
+        re-applies the identical imputation at scoring time via
+        _LRNanFillWrapper. Callers pass throwaway copies, so frames are
+        modified in place.
+        """
+        cfg = self.config
+        allowed = {"fillna_median", "fillna_mean", "fillna_0", "raise"}
+        mode = str(cfg.lr_nan_handling)
+        if mode not in allowed:
+            raise ValueError(
+                f"lr_nan_handling must be one of {sorted(allowed)}; got {mode!r}"
+            )
+        train_block = train_fit[feature_cols].replace([np.inf, -np.inf], np.nan)
+        val_block = val_fit[feature_cols].replace([np.inf, -np.inf], np.nan)
+        n_bad_train = int(train_block.isna().sum().sum())
+        n_bad_val = int(val_block.isna().sum().sum())
+        if mode == "raise":
+            if n_bad_train or n_bad_val:
+                bad_cols = sorted(
+                    set(train_block.columns[train_block.isna().any()])
+                    | set(val_block.columns[val_block.isna().any()])
+                )
+                raise ValueError(
+                    f"lr model features contain {n_bad_train + n_bad_val} "
+                    f"non-finite value(s) across {len(bad_cols)} feature(s) "
+                    f"(e.g. {bad_cols[:5]}) and lr_nan_handling='raise'. "
+                    f"Clean the features first, or set lr_nan_handling to "
+                    f"'fillna_median'/'fillna_mean'/'fillna_0'."
+                )
+            return train_fit, val_fit, None
+        if mode == "fillna_0":
+            fill_series = pd.Series(0.0, index=feature_cols)
+        elif mode == "fillna_mean":
+            fill_series = train_block.mean(numeric_only=True).reindex(feature_cols).fillna(0.0)
+        else:
+            fill_series = train_block.median(numeric_only=True).reindex(feature_cols).fillna(0.0)
+        fill_values = {str(col): float(fill_series[col]) for col in feature_cols}
+        if n_bad_train or n_bad_val:
+            n_cols = int((train_block.isna().any() | val_block.isna().any()).sum())
+            warnings.warn(
+                f"lr model: {n_bad_train + n_bad_val} non-finite feature "
+                f"value(s) across {n_cols}/{len(feature_cols)} feature(s) "
+                f"filled with train-derived {mode} values (sklearn LR cannot "
+                f"handle NaN). Fill values are stored on the model and "
+                f"re-applied at scoring time; set lr_nan_handling='raise' to "
+                f"forbid imputation.",
+                UserWarning,
+                stacklevel=2,
+            )
+        train_fit[feature_cols] = train_block.fillna(fill_values)
+        val_fit[feature_cols] = val_block.fillna(fill_values)
+        return train_fit, val_fit, fill_values
 
     def run(self, data: pd.DataFrame) -> RejectInferencePipelineResult:
         cfg = self.config
@@ -1074,6 +1190,10 @@ class RejectInferencePipeline:
             "model_type": model_type,
             "random_state": cfg.random_state,
         }
+        fill_values = getattr(model, "fill_values_", None)
+        if fill_values is not None:
+            metadata["lr_nan_handling"] = getattr(model, "nan_handling", None)
+            metadata["lr_fill_values"] = dict(fill_values)
         save_model(
             model,
             path,
