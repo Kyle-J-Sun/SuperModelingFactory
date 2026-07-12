@@ -567,9 +567,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
             result_attrs=[
                 "label_coverage_summary",
                 "segment_bad_rate_summary",
+                "profile_summary",
                 "split_candidate_summary",
                 "split_recommendation",
-                "report_path",
+                "output_paths",
             ],
         ),
         "mock_sample": PipelineRegistryEntry(
@@ -1029,6 +1030,17 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("optuna_n_trials 必须 >= 1。")
         if int(vals.get("optuna_n_trials", 5) or 0) < 5:
             warnings.append("optuna_n_trials 建议至少为 5，过小的搜索轮数不稳定。")
+        allowed_lr_search_params = {
+            "objective", "primary_set", "gap_ref_sets", "metric", "refit", "verbose"
+        }
+        unknown_lr_search_params = sorted(
+            set(vals.get("lr_search_params") or {}) - allowed_lr_search_params
+        )
+        if unknown_lr_search_params:
+            errors.append(
+                f"Unsupported lr_search_params keys: {unknown_lr_search_params}; "
+                f"allowed keys are {sorted(allowed_lr_search_params)}."
+            )
     elif entry.key == "feature_validation":
         has_batch_config = bool(vals.get("feature_batches")) or vals.get("feature_batch_size") is not None
         if vals.get("feature_batch_size") is not None and int(vals["feature_batch_size"]) <= 0:
@@ -1057,6 +1069,21 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("target_col 不能为空。")
         if missing("score_cols") and missing("base_score"):
             warnings.append("未配置 score_cols/base_score 时将依赖 Pipeline 自动探测分数字段。")
+        if vals.get("group_specs") is not None:
+            try:
+                from ._common import normalize_group_specs
+
+                normalize_group_specs(vals["group_specs"])
+            except (TypeError, ValueError) as exc:
+                errors.append(f"Invalid group_specs: {exc}")
+        for name, spec in (vals.get("cross_metrics") or {}).items():
+            if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+                errors.append(
+                    f"cross_metrics[{name!r}] must be a two-item [column, aggregation] pair."
+                )
+        pairwise_agg = vals.get("pairwise_cross_agg_dict")
+        if pairwise_agg is not None and not isinstance(pairwise_agg, dict):
+            errors.append("pairwise_cross_agg_dict must be a {column: aggregation(s)} mapping.")
     elif entry.key == "score_consistency_uat":
         if missing("main_model_score_col"):
             errors.append("main_model_score_col 不能为空。")

@@ -402,12 +402,14 @@ def _missing_rate_for_series(
             return 1.0
         valid = int(values.notna().sum())
         return 1.0 - float(valid) / float(total)
-    arr = values.to_numpy(dtype=float, copy=False)
-    finite = np.isfinite(arr) & values.notna().to_numpy()
+    present = values.notna().to_numpy()
+    if pd.api.types.is_numeric_dtype(values):
+        arr = values.to_numpy(dtype=float, copy=False)
+        present &= np.isfinite(arr)
     total_w = float(np.sum(w))
     if total_w <= 0:
         return 1.0
-    return 1.0 - float(np.sum(w[finite])) / total_w
+    return 1.0 - float(np.sum(w[present])) / total_w
 
 
 def _apply_missing_rate_stage(

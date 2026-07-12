@@ -99,36 +99,170 @@ class RejectInferencePipeline:
         "parceling": "parceling",
     }
 
-    _DEFAULT_PRESCORE_PARAMS = {
-        "n_estimators": 200,
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": -1,
-        "early_stopping_rounds": 30,
-        "eval_metric": "auc",
+    _MODEL_TYPE_ALIASES = {
+        "lgb": "lgb",
+        "lightgbm": "lgb",
+        "xgb": "xgb",
+        "xgboost": "xgb",
+        "cat": "cat",
+        "catboost": "cat",
+        "lr": "lr",
+        "logistic": "lr",
+        "logistic_regression": "lr",
     }
 
-    _DEFAULT_RI_MODEL_PARAMS = {
-        "n_estimators": 200,
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_samples": 30,
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": -1,
-        "early_stopping_rounds": 30,
-        "eval_metric": "auc",
+    _DEFAULT_PRESCORE_PARAMS_BY_TYPE = {
+        "lgb": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "n_jobs": -1,
+            "verbose": -1,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+        },
+        "xgb": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "max_depth": 5,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "n_jobs": -1,
+            "verbosity": 0,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+        },
+        "cat": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "verbose": False,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+            "allow_writing_files": False,
+        },
+        "lr": {"C": 1.0, "solver": "lbfgs", "max_iter": 1000},
+    }
+
+    _DEFAULT_RI_MODEL_PARAMS_BY_TYPE = {
+        "lgb": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_samples": 30,
+            "n_jobs": -1,
+            "verbose": -1,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+        },
+        "xgb": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "max_depth": 5,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "min_child_weight": 1,
+            "n_jobs": -1,
+            "verbosity": 0,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+        },
+        "cat": {
+            "n_estimators": 200,
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "verbose": False,
+            "early_stopping_rounds": 30,
+            "eval_metric": "auc",
+            "allow_writing_files": False,
+        },
+        "lr": {"C": 1.0, "solver": "lbfgs", "max_iter": 1000},
     }
 
     def __init__(self, config: RejectInferencePipelineConfig | None = None):
         self.config = config or RejectInferencePipelineConfig()
         self.predict_positive_nan_stats: dict[str, dict[str, int]] = {}
+
+    @classmethod
+    def _normalize_model_type(cls, model_type: str, *, config_name: str) -> str:
+        normalized = cls._MODEL_TYPE_ALIASES.get(str(model_type).strip().lower())
+        if normalized is None:
+            raise ValueError(
+                f"{config_name} must be one of lgb/xgb/cat/lr; got {model_type!r}"
+            )
+        return normalized
+
+    def _resolve_model_params(
+        self,
+        model_type: str,
+        overrides: dict[str, Any],
+        *,
+        role: Literal["prescore", "ri"],
+    ) -> tuple[str, dict[str, Any]]:
+        config_name = "prescore_model_type" if role == "prescore" else "ri_model_type"
+        normalized = self._normalize_model_type(model_type, config_name=config_name)
+        defaults_by_type = (
+            self._DEFAULT_PRESCORE_PARAMS_BY_TYPE
+            if role == "prescore"
+            else self._DEFAULT_RI_MODEL_PARAMS_BY_TYPE
+        )
+        params = merge_dict(defaults_by_type[normalized], overrides)
+        if normalized == "cat":
+            if "random_seed" not in params:
+                params.setdefault("random_state", self.config.random_state)
+        else:
+            params.setdefault("random_state", self.config.random_state)
+        return normalized, params
+
+    def _fit_pipeline_model(
+        self,
+        *,
+        model_type: str,
+        params: dict[str, Any],
+        train: pd.DataFrame,
+        val: pd.DataFrame,
+        feature_cols: list[str],
+        weight_col: str | None = None,
+    ) -> Any:
+        from Modeling_Tool import GradientBoostingModel, LRMaster
+
+        cfg = self.config
+        train_fit = train.copy()
+        val_fit = val.copy()
+        train_fit[cfg.target_col] = (pd.to_numeric(train_fit[cfg.target_col]) > 0.5).astype(int)
+        val_fit[cfg.target_col] = (pd.to_numeric(val_fit[cfg.target_col]) > 0.5).astype(int)
+
+        if model_type == "lr":
+            lr_params = dict(params)
+            standardize = bool(lr_params.pop("standardize", False))
+            model = LRMaster(params=lr_params or None, standardize=standardize)
+            model.fit(
+                data=train_fit,
+                varlist=feature_cols,
+                tgt_name=cfg.target_col,
+                val_data=val_fit,
+                val_varlist=feature_cols,
+                val_tgt_name=cfg.target_col,
+                weight_col=weight_col,
+            )
+            return model
+
+        model = GradientBoostingModel(model_type, params)
+        fit_kwargs = {}
+        if weight_col is not None:
+            fit_kwargs["sample_weight"] = train_fit[weight_col].to_numpy(dtype=float)
+        model.fit(
+            x=train_fit[feature_cols],
+            y=train_fit[cfg.target_col],
+            valx=val_fit[feature_cols],
+            valy=val_fit[cfg.target_col],
+            **fit_kwargs,
+        )
+        return model
 
     def run(self, data: pd.DataFrame) -> RejectInferencePipelineResult:
         cfg = self.config
@@ -172,7 +306,10 @@ class RejectInferencePipeline:
                     feature_cols=feature_cols,
                     model_role="prescore",
                     ri_method=None,
-                    model_type=cfg.prescore_model_type,
+                    model_type=self._normalize_model_type(
+                        cfg.prescore_model_type,
+                        config_name="prescore_model_type",
+                    ),
                 )
 
         approved_full = work[work[cfg.approved_col] == 1].copy().reset_index(drop=True)
@@ -294,6 +431,8 @@ class RejectInferencePipeline:
 
     def _validate_ri_approved_config(self) -> None:
         cfg = self.config
+        self._normalize_model_type(cfg.prescore_model_type, config_name="prescore_model_type")
+        self._normalize_model_type(cfg.ri_model_type, config_name="ri_model_type")
         if cfg.ri_score_direction not in {"high_bad", "high_good"}:
             raise ValueError("ri_score_direction must be 'high_bad' or 'high_good'")
         if not 0 < float(cfg.ri_validation_frac) < 1:
@@ -472,7 +611,7 @@ class RejectInferencePipeline:
         return pd.DataFrame(rows, columns=["metric", "value"])
 
     def _fit_prescore(self, data: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.DataFrame, Any]:
-        from Modeling_Tool import GradientBoostingModel, SampleSplitter
+        from Modeling_Tool import SampleSplitter
 
         cfg = self.config
         approved = data[(data[cfg.approved_col] == 1) & data[cfg.target_col].notna()].copy()
@@ -492,14 +631,17 @@ class RejectInferencePipeline:
             stratify=True,
         )
         train, val = splitter.split_df(approved, target=cfg.target_col)
-        params = merge_dict(self._DEFAULT_PRESCORE_PARAMS, cfg.prescore_params)
-        params.setdefault("random_state", cfg.random_state)
-        model = GradientBoostingModel(cfg.prescore_model_type, params)
-        model.fit(
-            x=train[feature_cols],
-            y=train[cfg.target_col].astype(int),
-            valx=val[feature_cols],
-            valy=val[cfg.target_col].astype(int),
+        model_type, params = self._resolve_model_params(
+            cfg.prescore_model_type,
+            cfg.prescore_params,
+            role="prescore",
+        )
+        model = self._fit_pipeline_model(
+            model_type=model_type,
+            params=params,
+            train=train,
+            val=val,
+            feature_cols=feature_cols,
         )
         scored = data.copy()
         scored[cfg.score_col] = predict_positive(model, scored, feature_cols)
@@ -614,9 +756,14 @@ class RejectInferencePipeline:
             appr = df[cfg.approved_col] == 1
             rej = df[cfg.approved_col] == 0
             try:
-                auc = roc_auc_score(df.loc[appr, cfg.target_col], df.loc[appr, cfg.score_col])
+                approved_target = df.loc[appr, cfg.target_col]
+                approved_score = df.loc[appr, cfg.score_col]
+                raw_auc = roc_auc_score(approved_target, approved_score)
+                risk_score = approved_score if cfg.ri_score_direction == "high_bad" else -approved_score
+                direction_adjusted_auc = roc_auc_score(approved_target, risk_score)
             except Exception:
-                auc = np.nan
+                raw_auc = np.nan
+                direction_adjusted_auc = np.nan
             rows.append(
                 {
                     "ri_method": method,
@@ -627,7 +774,9 @@ class RejectInferencePipeline:
                     "bad_rate_rej": _target_mean(df.loc[rej]),
                     "bad_rate_total": _target_mean(df),
                     "has_weight_col": "_weight" in df.columns,
-                    "prescore_AUC": auc,
+                    "prescore_AUC": direction_adjusted_auc,
+                    "prescore_AUC_raw": raw_auc,
+                    "prescore_score_direction": cfg.ri_score_direction,
                 }
             )
         return pd.DataFrame(rows)
@@ -641,7 +790,7 @@ class RejectInferencePipeline:
         model_dir: Path,
         split_oot_data: pd.DataFrame | None = None,
     ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str], pd.DataFrame]:
-        from Modeling_Tool import GradientBoostingModel, PerformanceEvaluator
+        from Modeling_Tool import PerformanceEvaluator
 
         cfg = self.config
         rng = np.random.default_rng(cfg.random_state)
@@ -703,17 +852,19 @@ class RejectInferencePipeline:
             if len(val) == 0:
                 raise ValueError("RI validation sample is empty after splitting")
 
-            params = merge_dict(self._DEFAULT_RI_MODEL_PARAMS, cfg.ri_model_params)
-            params.setdefault("random_state", cfg.random_state)
-            model = GradientBoostingModel(cfg.ri_model_type, params)
-            weight = train["_weight"].values if "_weight" in train.columns else None
-            fit_kwargs = {"sample_weight": weight} if weight is not None else {}
-            model.fit(
-                x=train[feature_cols],
-                y=(train[cfg.target_col] > 0.5).astype(int),
-                valx=val[feature_cols],
-                valy=val[cfg.target_col].astype(int),
-                **fit_kwargs,
+            model_type, params = self._resolve_model_params(
+                cfg.ri_model_type,
+                cfg.ri_model_params,
+                role="ri",
+            )
+            weight_col = "_weight" if "_weight" in train.columns else None
+            model = self._fit_pipeline_model(
+                model_type=model_type,
+                params=params,
+                train=train,
+                val=val,
+                feature_cols=feature_cols,
+                weight_col=weight_col,
             )
             models[method] = model
 
@@ -787,7 +938,7 @@ class RejectInferencePipeline:
                     feature_cols=feature_cols,
                     model_role="ri_model",
                     ri_method=method,
-                    model_type=cfg.ri_model_type,
+                    model_type=model_type,
                     metrics=row,
                 )
 

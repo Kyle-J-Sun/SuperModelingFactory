@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from ._common import as_list, make_dirs, safe_to_csv, write_basic_excel
+from ._common import as_list, make_dirs, normalize_group_specs, safe_to_csv, write_basic_excel
 
 _logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class ScoreComparisonPipelineConfig:
     segment_dims: list[str] | None = None
     include_time_population_cross: bool = True
     group_min_size: int | None = None
-    group_specs: list[dict[str, Any]] | None = None
+    group_specs: dict[str, list[str]] | list[Any] | None = None
     gains_add_func: Callable[[pd.DataFrame], pd.Series] | None = None
     custom_metric_cols: list[str] = field(default_factory=lambda: ["credit_limit", "age", "apr"])
     gains_display_metric_list: list[str] = field(
@@ -108,7 +108,10 @@ class ScoreComparisonPipeline:
         if cfg.write_outputs or cfg.write_excel:
             make_dirs(cfg.output_dir, Path(cfg.output_dir) / "figs", report_dir)
 
-        cross_agg_dict = cfg.pairwise_cross_agg_dict or self._default_cross_agg_dict()
+        cross_agg_dict = cfg.pairwise_cross_agg_dict or self._default_cross_agg_dict(work)
+        cross_agg_dict = self._validate_pairwise_cross_agg_dict(work, cross_agg_dict)
+        cross_metrics = cfg.cross_metrics or self._default_cross_metrics(work)
+        cross_metrics = self._validate_cross_metrics(work, cross_metrics)
         met = Model_Evaluation_Tool(
             data=work,
             dep=cfg.target_col,
@@ -141,7 +144,6 @@ class ScoreComparisonPipeline:
         group_perf = self._run_group_perf(met, EvaluationPipeline, work)
 
         cross_results = {}
-        cross_metrics = cfg.cross_metrics or self._default_cross_metrics()
         active_cross_vars = []
         for cross_var in cfg.cross_vars:
             if cross_var in work.columns:
@@ -198,7 +200,7 @@ class ScoreComparisonPipeline:
             for name, df in group_perf.items():
                 sheets[f"Dim_{name}"] = df
             first_cross = next(iter(cross_results.values()), None)
-            sheets["Cross_Risk_Sample"] = first_cross.reset_index() if first_cross is not None else None
+            sheets["Cross_Risk_Sample"] = self._cross_risk_for_excel(first_cross)
             write_basic_excel(report_path, sheets, title="SMF Model Score Comparison Report")
 
         return ScoreComparisonPipelineResult(
@@ -220,6 +222,46 @@ class ScoreComparisonPipeline:
             result.insert(0, "sample_scope", "global")
         return result
 
+    @staticmethod
+    def _unique_labels(labels: list[str]) -> list[str]:
+        counts: dict[str, int] = {}
+        output: list[str] = []
+        for raw_label in labels:
+            label = str(raw_label) or "value"
+            count = counts.get(label, 0)
+            counts[label] = count + 1
+            output.append(label if count == 0 else f"{label}_{count + 1}")
+        return output
+
+    @classmethod
+    def _cross_risk_for_excel(cls, frame: pd.DataFrame | None) -> pd.DataFrame | None:
+        """Return an Excel-safe copy without duplicate MultiIndex labels."""
+        if frame is None:
+            return None
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError(f"Cross risk result must be a DataFrame, got {type(frame)!r}")
+
+        index_labels = []
+        for level, name in enumerate(frame.index.names):
+            suffix = str(name) if name not in (None, "") else "level"
+            index_labels.append(f"index_{level}_{suffix}")
+        index_labels = cls._unique_labels(index_labels)
+        index_frame = pd.DataFrame(
+            {
+                label: frame.index.get_level_values(level).to_numpy()
+                for level, label in enumerate(index_labels)
+            }
+        )
+
+        values = frame.reset_index(drop=True).copy()
+        value_labels = []
+        for col in values.columns:
+            parts = col if isinstance(col, tuple) else (col,)
+            label = "__".join(str(part) for part in parts if part not in (None, ""))
+            value_labels.append(label or "value")
+        values.columns = cls._unique_labels(value_labels)
+        return pd.concat([index_frame.reset_index(drop=True), values], axis=1)
+
     def _normalize_group_values(self, data: pd.DataFrame) -> None:
         cfg = self.config
         cols: list[str] = []
@@ -227,9 +269,9 @@ class ScoreComparisonPipeline:
         cols.extend(str(col) for col in as_list(cfg.population_dims))
         if cfg.split_col:
             cols.append(cfg.split_col)
-        for spec in as_list(cfg.group_specs):
-            if isinstance(spec, dict):
-                cols.extend(str(col) for col in as_list(spec.get("columns", [])))
+        if cfg.group_specs is not None:
+            for spec in normalize_group_specs(cfg.group_specs):
+                cols.extend(str(col) for col in spec["columns"])
         missing_tokens = {str(x).strip() for x in as_list(cfg.group_missing_values)}
         for col in dict.fromkeys(cols):
             if col not in data.columns:
@@ -287,20 +329,65 @@ class ScoreComparisonPipeline:
             }
         )
 
-    def _default_cross_metrics(self) -> dict[str, tuple[str, Any]]:
+    def _default_cross_metrics(self, data: pd.DataFrame | None = None) -> dict[str, tuple[str, Any]]:
         cfg = self.config
         metrics: dict[str, tuple[str, Any]] = {"bad_rate": (cfg.target_col, "mean")}
         for col in cfg.custom_metric_cols:
-            metrics[col] = (col, "mean")
+            if data is None or col in data.columns:
+                metrics[col] = (col, "mean")
         return metrics
 
-    def _default_cross_agg_dict(self) -> dict[str, Any]:
+    def _validate_cross_metrics(
+        self,
+        data: pd.DataFrame,
+        metrics: dict[str, Any],
+    ) -> dict[str, tuple[str, Any]]:
+        if not isinstance(metrics, dict):
+            raise TypeError("cross_metrics must be a mapping of metric_name to (column, aggregation)")
+        normalized: dict[str, tuple[str, Any]] = {}
+        for name, spec in metrics.items():
+            if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+                raise ValueError(
+                    f"cross_metrics[{name!r}] must be a two-item (column, aggregation) pair; "
+                    f"got {spec!r}"
+                )
+            agg_col, agg_func = spec
+            if agg_col not in data.columns:
+                raise KeyError(f"cross_metrics[{name!r}] references missing column {agg_col!r}")
+            if not (isinstance(agg_func, str) or callable(agg_func)):
+                raise TypeError(
+                    f"cross_metrics[{name!r}] aggregation must be a string or callable; "
+                    f"got {type(agg_func).__name__}"
+                )
+            normalized[str(name)] = (str(agg_col), agg_func)
+        return normalized
+
+    def _validate_pairwise_cross_agg_dict(
+        self,
+        data: pd.DataFrame,
+        agg_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(agg_dict, dict):
+            raise TypeError("pairwise_cross_agg_dict must be a mapping of column to aggregation(s)")
+        for col, funcs in agg_dict.items():
+            if col not in data.columns:
+                raise KeyError(f"pairwise_cross_agg_dict references missing column {col!r}")
+            func_list = list(funcs) if isinstance(funcs, (list, tuple)) else [funcs]
+            if not func_list or any(not (isinstance(func, str) or callable(func)) for func in func_list):
+                raise TypeError(
+                    f"pairwise_cross_agg_dict[{col!r}] must be an aggregation or a non-empty "
+                    "list of string/callable aggregations"
+                )
+        return dict(agg_dict)
+
+    def _default_cross_agg_dict(self, data: pd.DataFrame | None = None) -> dict[str, Any]:
         cfg = self.config
         agg: dict[str, Any] = {
             cfg.target_col: ["count", lambda x: round(x.sum() / x.count(), 4)],
         }
         for col in cfg.custom_metric_cols:
-            agg[col] = ["count", lambda x: round(x.mean(), 4)]
+            if data is None or col in data.columns:
+                agg[col] = ["count", lambda x: round(x.mean(), 4)]
         return agg
 
     def _run_group_perf(self, met: Any, evaluation_pipeline_cls: Any, data: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -333,7 +420,8 @@ class ScoreComparisonPipeline:
     def _resolve_group_specs(self, data: pd.DataFrame) -> list[dict[str, Any]]:
         cfg = self.config
         if cfg.group_specs is not None:
-            return list(cfg.group_specs)
+            min_size = cfg.group_min_size if cfg.group_min_size is not None else cfg.min_data_size
+            return normalize_group_specs(cfg.group_specs, default_min_size=min_size)
 
         min_size = cfg.group_min_size if cfg.group_min_size is not None else cfg.min_data_size
         specs: list[dict[str, Any]] = []

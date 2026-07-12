@@ -55,6 +55,63 @@ def as_list(value: Any | Iterable[Any] | None, default: list[Any] | None = None)
     return list(value)
 
 
+def normalize_group_specs(
+    value: Any,
+    *,
+    default_min_size: int | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize supported Pipeline group-spec forms into named dictionaries."""
+    if value is None:
+        return []
+
+    if isinstance(value, Mapping):
+        raw_specs = []
+        for name, spec in value.items():
+            if isinstance(spec, Mapping):
+                item = dict(spec)
+                item.setdefault("name", str(name))
+            else:
+                item = {"name": str(name), "columns": as_list(spec)}
+            raw_specs.append(item)
+    else:
+        raw_specs = as_list(value)
+
+    normalized: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for idx, spec in enumerate(raw_specs):
+        if isinstance(spec, Mapping):
+            item = dict(spec)
+            columns = item.get("columns", item.get("cols"))
+            if columns is None:
+                raise ValueError(
+                    f"group_specs entry {idx} must contain 'columns'; got keys {sorted(item)}"
+                )
+            columns = as_list(columns)
+            name = str(item.get("name") or "_x_".join(str(col) for col in columns))
+            min_size = item.get("min_size", default_min_size)
+        else:
+            columns = as_list(spec)
+            name = "_x_".join(str(col) for col in columns) or f"group_{idx}"
+            min_size = default_min_size
+
+        if not columns or any(not isinstance(col, str) or not col.strip() for col in columns):
+            raise ValueError(
+                f"group_specs entry {idx} must define a non-empty list of column names; "
+                f"got {columns!r}"
+            )
+        if name in seen_names:
+            raise ValueError(f"group_specs contains duplicate name {name!r}")
+        seen_names.add(name)
+        normalized.append(
+            {
+                "name": name,
+                "columns": [str(col) for col in columns],
+                "min_size": default_min_size if min_size is None else int(min_size),
+            }
+        )
+    return normalized
+
+
 def merge_dict(base: Mapping[str, Any] | None, override: Mapping[str, Any] | None) -> dict[str, Any]:
     merged = dict(base or {})
     merged.update(dict(override or {}))

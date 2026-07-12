@@ -929,6 +929,21 @@ class CreditModelPipeline:
         base_params = dict(cfg.model_params.get("lr", {}))
         standardize = bool(base_params.pop("standardize", False))
         lr = LRMaster(params=base_params or None, standardize=standardize)
+        allowed_search_params = {
+            "objective",
+            "primary_set",
+            "gap_ref_sets",
+            "metric",
+            "refit",
+            "verbose",
+        }
+        unknown_search_params = sorted(set(cfg.lr_search_params) - allowed_search_params)
+        if unknown_search_params:
+            raise ValueError(
+                f"Unsupported lr_search_params keys: {unknown_search_params}. "
+                f"Allowed keys are {sorted(allowed_search_params)}. "
+                "LRMaster.grid_search_params uses holdout eval_sets and does not accept cv."
+            )
         params = merge_dict(
             {
                 "objective": "oot_gap_penalized",

@@ -392,8 +392,23 @@ class SampleAnalysisPipeline:
                 "bad_rate": sub[target].mean(),
             }
             for col in self.config.profile_cols:
-                row[f"{col}_mean"] = sub[col].mean()
-                row[f"{col}_median"] = sub[col].median()
+                series = sub[col]
+                row[f"{col}_missing_rate"] = float(series.isna().mean()) if len(series) else np.nan
+                if pd.api.types.is_numeric_dtype(series):
+                    row[f"{col}_mean"] = series.mean()
+                    row[f"{col}_median"] = series.median()
+                    continue
+
+                non_missing = series.dropna()
+                modes = non_missing.mode(dropna=True)
+                top_value = modes.iloc[0] if len(modes) else None
+                top_count = int(non_missing.eq(top_value).sum()) if top_value is not None else 0
+                row[f"{col}_nunique"] = int(non_missing.nunique(dropna=True))
+                row[f"{col}_top"] = top_value
+                row[f"{col}_top_count"] = top_count
+                row[f"{col}_top_rate"] = (
+                    float(top_count) / float(len(non_missing)) if len(non_missing) else np.nan
+                )
             rows.append(row)
         return rows
 

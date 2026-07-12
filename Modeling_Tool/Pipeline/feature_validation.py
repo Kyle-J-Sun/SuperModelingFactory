@@ -16,6 +16,7 @@ from ._common import (
     apply_woe_fit_query,
     as_list,
     make_dirs,
+    normalize_group_specs,
     safe_to_csv,
     split_oot_by_flag,
     validate_woe_fit_query_columns,
@@ -992,13 +993,10 @@ class FeatureValidationPipeline:
     def _group_specs(self, include_global: bool = True) -> dict[str, list[str]]:
         cfg = self.config
         if cfg.group_specs is not None:
-            if isinstance(cfg.group_specs, dict):
-                return {str(k): list(v) for k, v in cfg.group_specs.items()}
-            specs = {}
-            for idx, spec in enumerate(cfg.group_specs):
-                cols = [spec] if isinstance(spec, str) else list(spec)
-                specs["x".join(cols) or f"group_{idx}"] = cols
-            return specs
+            return {
+                str(spec["name"]): list(spec["columns"])
+                for spec in normalize_group_specs(cfg.group_specs)
+            }
         specs: dict[str, list[str]] = {}
         if include_global:
             specs["global"] = []
