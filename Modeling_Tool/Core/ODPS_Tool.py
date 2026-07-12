@@ -281,17 +281,31 @@ class ODPSRunner(object):
 
     @staticmethod
     def cre_table_schema(df, partition_name=None):
-
-        dtypes = df.dtypes
-        isnum_dtypes = [pd.api.types.is_numeric_dtype(x) for x in dtypes]
-        isint_dtypes = [pd.api.types.is_integer_dtype(x) for x in dtypes]
-
         table_columns = []
         table_partitions = []
-        for i in range(len(df.columns)):
-            col = df.columns[i]
-            col_type = "string" if not isnum_dtypes[i] else "float"
-            col_type = "bigint" if isint_dtypes[i] else col_type
+        for col, dtype in df.dtypes.items():
+            if pd.api.types.is_complex_dtype(dtype) or pd.api.types.is_timedelta64_dtype(dtype):
+                raise TypeError(
+                    f"Unsupported dtype for ODPS schema inference: column={col!r}, dtype={dtype!s}."
+                )
+            if pd.api.types.is_bool_dtype(dtype):
+                col_type = "boolean"
+            elif pd.api.types.is_integer_dtype(dtype):
+                col_type = "bigint"
+            elif pd.api.types.is_float_dtype(dtype):
+                col_type = "float" if str(dtype).lower() == "float32" else "double"
+            elif pd.api.types.is_datetime64_any_dtype(dtype):
+                col_type = "datetime"
+            elif (
+                pd.api.types.is_string_dtype(dtype)
+                or pd.api.types.is_object_dtype(dtype)
+                or isinstance(dtype, pd.CategoricalDtype)
+            ):
+                col_type = "string"
+            else:
+                raise TypeError(
+                    f"Unsupported dtype for ODPS schema inference: column={col!r}, dtype={dtype!s}."
+                )
             if col == partition_name:
                 table_partitions.append(Partition(name=col, type=col_type))
             else:
@@ -303,6 +317,28 @@ class ODPSRunner(object):
             table_schema = Schema(columns=table_columns)
 
         return table_schema
+
+    @staticmethod
+    def _to_odps_records(df):
+        """Return Python records with pandas missing values converted to ODPS NULL."""
+        object_df = df.astype(object)
+        object_df = object_df.where(pd.notna(object_df), None)
+        return object_df.values.tolist()
+
+    def _execute_sql_blocking(self, sql):
+        """Execute DDL and wait until the remote ODPS instance has completed."""
+        execute_sql = getattr(self.o, "execute_sql", None)
+        if callable(execute_sql):
+            return execute_sql(sql)
+
+        run_sql = getattr(self.o, "run_sql", None)
+        if not callable(run_sql):
+            raise AttributeError("ODPS client must provide execute_sql() or run_sql().")
+        instance = run_sql(sql)
+        wait_for_success = getattr(instance, "wait_for_success", None)
+        if callable(wait_for_success):
+            wait_for_success()
+        return instance
 
     def upload_df(self, df, table_name, table_schema=None, partition=None, atomic=True):
         """上传数据集至mc中创建新表
@@ -328,9 +364,11 @@ class ODPSRunner(object):
             legacy behaviour, e.g. for tables whose downstream readers expect
             a specific object identity.
         """
+        upload_data = df.copy()
         if table_schema is None:
-            df.loc[:, "py_inserttime"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            table_schema = self.cre_table_schema(df=df, partition_name=None)
+            upload_data.loc[:, "py_inserttime"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            table_schema = self.cre_table_schema(df=upload_data, partition_name=None)
+        records = self._to_odps_records(upload_data)
 
         if not atomic:
             # Legacy pre-0.4.2 non-atomic path — retained under an explicit
@@ -339,10 +377,10 @@ class ODPSRunner(object):
             t = self.o.create_table(table_name, table_schema)
             if bool(partition):
                 with t.open_writer(partition=partition, create_partition=True) as writer:
-                    writer.write(df.values.tolist())
+                    writer.write(records)
             else:
                 with t.open_writer() as writer:
-                    writer.write(df.values.tolist())
+                    writer.write(records)
             logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
             return
 
@@ -360,10 +398,10 @@ class ODPSRunner(object):
         try:
             if bool(partition):
                 with tmp_table.open_writer(partition=partition, create_partition=True) as writer:
-                    writer.write(df.values.tolist())
+                    writer.write(records)
             else:
                 with tmp_table.open_writer() as writer:
-                    writer.write(df.values.tolist())
+                    writer.write(records)
         except Exception:
             try:
                 self.o.delete_table(tmp_name, if_exists=True)
@@ -379,7 +417,7 @@ class ODPSRunner(object):
         target_exists = self.o.exist_table(table_name)
         if target_exists:
             try:
-                self.o.run_sql(f"ALTER TABLE {table_name} RENAME TO {old_rename_name};")
+                self._execute_sql_blocking(f"ALTER TABLE {table_name} RENAME TO {old_rename_name};")
             except Exception:
                 # Rename of the live target failed — do not touch it. Drop the
                 # tmp table so we don't leak it, then re-raise.
@@ -392,13 +430,13 @@ class ODPSRunner(object):
                 raise
 
         try:
-            self.o.run_sql(f"ALTER TABLE {tmp_name} RENAME TO {target_rename_name};")
+            self._execute_sql_blocking(f"ALTER TABLE {tmp_name} RENAME TO {target_rename_name};")
         except Exception:
             # tmp -> target rename failed. If we already moved the original,
             # try to restore it so the caller is not left with a missing table.
             if target_exists:
                 try:
-                    self.o.run_sql(f"ALTER TABLE {old_name} RENAME TO {target_rename_name};")
+                    self._execute_sql_blocking(f"ALTER TABLE {old_name} RENAME TO {target_rename_name};")
                     logger.warning(
                         f"upload_df: swap of {tmp_name} -> {table_name} failed; restored original from {old_name}"
                     )
@@ -439,7 +477,9 @@ class ODPSRunner(object):
     def _rename_partition(self, table_name, source_partition, target_partition):
         src = _format_odps_partition_spec(_parse_odps_partition_spec(source_partition), quoted=True)
         dst = _format_odps_partition_spec(_parse_odps_partition_spec(target_partition), quoted=True)
-        self.o.run_sql(f"ALTER TABLE {table_name} PARTITION ({src}) RENAME TO PARTITION ({dst});")
+        self._execute_sql_blocking(
+            f"ALTER TABLE {table_name} PARTITION ({src}) RENAME TO PARTITION ({dst});"
+        )
 
     def insert_df(self, df, table_name, overwrite=True, partition=None, atomic=True):
         """将数据集插入至mc已存在的表中.
@@ -457,7 +497,9 @@ class ODPSRunner(object):
         """
         t = self.o.get_table(table_name)
         if "py_inserttime" in t.schema and "py_inserttime" not in df.columns:
+            df = df.copy()
             df.loc[:, "py_inserttime"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        records = self._to_odps_records(df)
 
         if bool(partition):
             if overwrite and atomic:
@@ -476,7 +518,7 @@ class ODPSRunner(object):
 
                 try:
                     with t.open_writer(partition=staging_partition, create_partition=True) as writer:
-                        writer.write(df.values.tolist())
+                        writer.write(records)
                     if target_exists:
                         self._rename_partition(table_name, partition, backup_partition)
                     self._rename_partition(table_name, staging_partition, partition)
@@ -510,10 +552,10 @@ class ODPSRunner(object):
             if overwrite:
                 t.delete_partition(partition, if_exists=True)
             with t.open_writer(partition=partition, create_partition=True) as writer:
-                writer.write(df.values.tolist())
+                writer.write(records)
         else:
             if overwrite:
                 t.truncate()
             with t.open_writer() as writer:
-                writer.write(df.values.tolist())
+                writer.write(records)
         logger.info('<<<< 完成数据入表: shape={0} >>>>'.format(df.shape))

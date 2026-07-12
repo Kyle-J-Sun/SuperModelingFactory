@@ -38,6 +38,7 @@ class ProcCompareConfig:
     numeric_tol: float = 1e-8
     numeric_rtol: float = 0.0
     datetime_tol_seconds: float = 0.0
+    datetime_cols: list[str] = field(default_factory=list)
     per_column_tolerance: dict[str, Any] = field(default_factory=dict)
 
     both_null_equal: bool = True
@@ -185,15 +186,27 @@ class ProcCompareEngine:
         cols = sorted((set(left_df.columns) | set(right_df.columns)) - {_ROW_ID_COL})
         rows = []
         ignore = set(self.config.ignore_cols)
-        compare_set = set(self._resolve_compare_cols(left_df, right_df, key_cols, allow_missing=True))
+        requested_compare_set = set(
+            self._resolve_compare_cols(left_df, right_df, key_cols, allow_missing=True)
+        )
         for col in cols:
             in_left = col in left_df.columns
             in_right = col in right_df.columns
+            requested_for_compare = col in requested_compare_set
+            eligible_for_compare = bool(
+                requested_for_compare
+                and in_left
+                and in_right
+                and col not in key_cols
+                and col not in ignore
+            )
             if col in key_cols:
                 role = "key"
+            elif not (in_left and in_right):
+                role = "schema_only"
             elif col in ignore:
                 role = "ignored"
-            elif col in compare_set:
+            elif eligible_for_compare:
                 role = "compare"
             else:
                 role = "not_compared"
@@ -207,6 +220,8 @@ class ProcCompareEngine:
                 {
                     "column": col,
                     "role": role,
+                    "requested_for_compare": bool(requested_for_compare),
+                    "eligible_for_compare": bool(eligible_for_compare),
                     "in_left": bool(in_left),
                     "in_right": bool(in_right),
                     "dtype_left": str(left_df[col].dtype) if in_left else "",
@@ -239,6 +254,7 @@ class ProcCompareEngine:
         right_df: pd.DataFrame,
         key_cols: list[str],
         schema_summary: pd.DataFrame | None = None,
+        keep_internal_stats: bool = False,
     ) -> ProcCompareResult:
         left_df, left_dups = self._handle_duplicates(left_df, key_cols, self.config.left_name)
         right_df, right_dups = self._handle_duplicates(right_df, key_cols, self.config.right_name)
@@ -349,7 +365,11 @@ class ProcCompareEngine:
         return ProcCompareResult(
             coverage_summary=coverage_summary,
             schema_summary=schema_summary,
-            column_summary=self._strip_internal_columns(column_summary),
+            column_summary=(
+                column_summary
+                if keep_internal_stats
+                else self._strip_internal_columns(column_summary)
+            ),
             row_summary=row_summary,
             cell_mismatches=cell_mismatches,
             duplicate_key_summary=duplicate_key_summary,
@@ -370,7 +390,7 @@ class ProcCompareEngine:
         diff = pd.Series(np.nan, index=left.index, dtype="float64")
         abs_diff = pd.Series(np.nan, index=left.index, dtype="float64")
 
-        if self._should_compare_datetime(left, right):
+        if self._should_compare_datetime(col, left, right):
             left_dt = pd.to_datetime(left, errors="coerce")
             right_dt = pd.to_datetime(right, errors="coerce")
             diff = (left_dt - right_dt).dt.total_seconds()
@@ -421,9 +441,28 @@ class ProcCompareEngine:
             return False
         return bool(left_num.notna().all() and right_num.notna().all())
 
-    @staticmethod
-    def _should_compare_datetime(left: pd.Series, right: pd.Series) -> bool:
-        return bool(pd.api.types.is_datetime64_any_dtype(left) or pd.api.types.is_datetime64_any_dtype(right))
+    def _should_compare_datetime(self, col: str, left: pd.Series, right: pd.Series) -> bool:
+        if pd.api.types.is_datetime64_any_dtype(left) or pd.api.types.is_datetime64_any_dtype(right):
+            return True
+        if col in self.config.datetime_cols:
+            return True
+
+        override = self.config.per_column_tolerance.get(col)
+        if isinstance(override, dict) and "datetime_tol_seconds" in override:
+            return True
+        if self.config.datetime_tol_seconds <= 0:
+            return False
+        if self._should_compare_numeric(left, right):
+            return False
+
+        values = pd.concat([left.dropna(), right.dropna()], ignore_index=True)
+        if values.empty:
+            return False
+        text = values.astype("string").str.strip()
+        if not text.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T].*)?$", na=False).all():
+            return False
+        parsed = pd.to_datetime(values, errors="coerce")
+        return bool(parsed.notna().all())
 
     def _column_numeric_tol(self, col: str) -> tuple[float, float]:
         override = self.config.per_column_tolerance.get(col)
@@ -547,7 +586,13 @@ class ProcCompareEngine:
         right_part_df = pd.read_csv(right_part) if right_part.exists() else pd.DataFrame(columns=right_columns)
         left_part_df = self._normalize_missing(left_part_df)
         right_part_df = self._normalize_missing(right_part_df)
-        return self._compare_frames(left_part_df, right_part_df, key_cols, schema_summary=schema_summary)
+        return self._compare_frames(
+            left_part_df,
+            right_part_df,
+            key_cols,
+            schema_summary=schema_summary,
+            keep_internal_stats=True,
+        )
 
     def _partition_input(self, data: pd.DataFrame | str | Path, out_dir: Path, key_cols: list[str]) -> None:
         if isinstance(data, pd.DataFrame):
@@ -589,21 +634,19 @@ class ProcCompareEngine:
             ]
         )
 
-        cols = pd.concat([p.column_summary.assign(_partial=idx) for idx, p in enumerate(partials)], ignore_index=True)
+        cols = pd.concat(
+            [p.column_summary.assign(_partial=idx) for idx, p in enumerate(partials)],
+            ignore_index=True,
+        )
         if len(cols):
-            cols["_diff_sum"] = pd.concat(
-                [
-                    p.column_summary.assign(_partial=idx).get("_diff_sum", pd.Series(dtype=float))
-                    for idx, p in enumerate(partials)
-                ],
-                ignore_index=True,
-            ) if "_diff_sum" in cols.columns else 0.0
             grouped = cols.groupby("column", dropna=False).agg(
                 n_compared=("n_compared", "sum"),
                 n_equal=("n_equal", "sum"),
                 n_mismatch=("n_mismatch", "sum"),
                 n_one_side_null=("n_one_side_null", "sum"),
                 n_both_null=("n_both_null", "sum"),
+                _diff_sum=("_diff_sum", "sum"),
+                _diff_count=("_diff_count", "sum"),
                 max_abs_diff=("max_abs_diff", "max"),
             ).reset_index()
             grouped["pct_mismatch"] = np.where(
@@ -611,7 +654,11 @@ class ProcCompareEngine:
                 grouped["n_mismatch"] / grouped["n_compared"] * 100,
                 0.0,
             )
-            grouped["mean_diff"] = np.nan
+            grouped["mean_diff"] = np.where(
+                grouped["_diff_count"] > 0,
+                grouped["_diff_sum"] / grouped["_diff_count"],
+                np.nan,
+            )
             column_summary = grouped[
                 [
                     "column",
