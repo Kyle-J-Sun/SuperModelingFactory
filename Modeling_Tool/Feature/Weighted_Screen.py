@@ -383,6 +383,28 @@ def _weighted_corr_for_screen(
             if cols:
                 X = woe_ins[cols].to_numpy(dtype=float)
                 return _weighted_pearson_corr_matrix(X, w_ins, nan_policy="pairwise")
+    non_numeric = [v for v in current if not pd.api.types.is_numeric_dtype(ins[v])]
+    if non_numeric:
+        # Raw-value Pearson correlation is undefined for categorical/object
+        # features. Exclude them from the correlation computation but keep
+        # them in the returned matrix as NaN rows/columns: NaN never exceeds
+        # the dedup threshold, so categorical features survive the corr stage
+        # untouched instead of crashing the float cast.
+        warnings.warn(
+            f"raw-value correlation skips {len(non_numeric)} non-numeric "
+            f"feature(s) {non_numeric[:5]}; they are kept through the corr "
+            f"stage. Set corr_use_woe_bins=True to correlate categorical "
+            f"features via their WOE encoding.",
+            UserWarning,
+            stacklevel=2,
+        )
+        corr_full = np.full((len(current), len(current)), np.nan)
+        numeric_idx = [i for i, v in enumerate(current) if v not in set(non_numeric)]
+        if numeric_idx:
+            X_num = ins[[current[i] for i in numeric_idx]].astype(float).to_numpy()
+            corr_num = _weighted_pearson_corr_matrix(X_num, w_ins, nan_policy=corr_nan_policy)
+            corr_full[np.ix_(numeric_idx, numeric_idx)] = corr_num
+        return corr_full
     X = ins[current].astype(float).to_numpy()
     return _weighted_pearson_corr_matrix(X, w_ins, nan_policy=corr_nan_policy)
 

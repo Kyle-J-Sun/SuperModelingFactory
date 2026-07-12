@@ -1231,6 +1231,10 @@ class FeatureValidationPipeline:
                 "missing_rate_ref",
                 cfg.woe_params.get("missing_ref_value", -999999),
             ),
+            # Without this, a selection run that has to fit its own screening
+            # binner (no prefit WOE engine) would bin declared categorical
+            # features as numeric and crash on string levels.
+            "categorical_features": params.get("categorical_features", cfg.categorical_features),
         }
         return screen_config_from_mapping(
             mapping,

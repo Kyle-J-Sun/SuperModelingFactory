@@ -413,7 +413,17 @@ def _weighted_woe_bins_screen(
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
             bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
-            x_ins = ins[var].to_numpy(dtype=float)
+            x_series = ins[var]
+            if pd.api.types.is_numeric_dtype(x_series):
+                x_ins = x_series.to_numpy(dtype=float)
+            else:
+                # Categorical/object feature: IV itself is computed from the
+                # already-assigned bins; ``x`` only feeds np.isfinite() inside
+                # _weighted_iv_from_assigned_bins to derive the weighted
+                # missing rate. A hard float cast crashes on string levels
+                # (e.g. '4.高中'), so encode observed -> 1.0 / missing -> NaN,
+                # matching the notna semantics of _missing_rate_for_series.
+                x_ins = np.where(x_series.notna().to_numpy(), 1.0, np.nan)
             iv_val, n_b, miss = _weighted_iv_from_assigned_bins(y_ins, w_ins, bins_ins, x_ins)
             iv_records.append({
                 "var": var,
