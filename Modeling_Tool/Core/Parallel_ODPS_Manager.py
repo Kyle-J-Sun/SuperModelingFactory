@@ -64,6 +64,26 @@ def _strip_trailing_semicolon(sql: str) -> str:
     return sql.strip().rstrip(";").strip()
 
 
+def _first_error_line(exc: BaseException, limit: int = 200) -> str:
+    """Return ``ExcType: first non-empty message line`` for embedding in a
+    re-raised error message, truncated to ``limit`` chars.
+
+    ODPS errors carry the actionable ``ODPS-XXXXXXX: ...`` description on
+    their first line followed by long instance/traceback detail; only the
+    first line is worth surfacing inline.
+    """
+    for line in str(exc).splitlines():
+        line = line.strip()
+        if line:
+            break
+    else:
+        line = ""
+    text = f"{type(exc).__name__}: {line}" if line else type(exc).__name__
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
 def _pull_one_chunk(
     chunk_spec: dict[str, Any],
     runner: ODPSRunner | None,
@@ -218,8 +238,9 @@ class ParallelODPSManager:
             self.odps_runner.run_sql(probe_sql, to_df=True, n_process=1)
         except Exception as exc:
             raise ValueError(
-                f"unique_key validation failed for pull SQL. "
-                f"Check that unique_key={self.config.unique_key!r} is visible in the SQL scope."
+                f"unique_key validation failed for pull SQL: {_first_error_line(exc)}. "
+                f"Common cause: unique_key={self.config.unique_key!r} not visible in "
+                f"the SQL scope; see the chained exception for the full ODPS error."
             ) from exc
 
     def _build_hash_pull_chunks(
