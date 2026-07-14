@@ -1243,11 +1243,28 @@ class FeatureValidationPipeline:
                         engine.plot_woe_graph(str(base_dir / f"by_{group}"), group_name=group, _df_for_group=train)
             elif hasattr(engine, "plot_bivar_graph"):
                 transformed = engine.transform(train)
-                engine.plot_bivar_graph(transformed, dirname=str(base_dir))
+                # Explicit group=None: WOE_Master.plot_bivar_graph made `group`
+                # optional in 0.6.2; passing it explicitly documents intent and
+                # keeps the call correct even on older WOE_Master builds where
+                # `group` was positional (would raise TypeError there — which
+                # is what the 0.6.2 logger.warning below now surfaces instead
+                # of the pre-0.6.2 silent swallow).
+                engine.plot_bivar_graph(transformed, group=None, dirname=str(base_dir))
                 for group in cfg.woe_plot_groups:
                     if group in transformed.columns:
                         engine.plot_bivar_graph(transformed, group=group, dirname=str(base_dir / f"by_{group}"))
-        except Exception:
+        except Exception as exc:
+            # Never silently swallow: pre-0.6.2 a bare `except: return` here
+            # hid the equal_freq blind-spot for the entire 0.5.x/0.6.0 line.
+            engine_name = adapter.get_engine_name() if adapter is not None else "<unknown>"
+            _logger.warning(
+                "WOE plot generation failed and was skipped. "
+                "engine=%s target=%s output_dir=%s error=%r",
+                engine_name,
+                target,
+                str(base_dir),
+                exc,
+            )
             return
 
     def _build_selection_config(self) -> Any:

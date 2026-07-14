@@ -93,7 +93,7 @@ jobs:
           fi
           pip install scikit-learn seaborn matplotlib openpyxl xgboost pyodps imbalanced-learn -c /tmp/matrix-constraints.txt
 
-      - name: Install test-suite dev deps (pyodps + shap + lime for 0-skip)
+      - name: Install test-suite dev deps (pyodps + shap + lime + statsmodels + PyYAML for 0-skip)
         shell: bash
         run: |
           if [ -f SuperModelingFactory_pytest/requirements-dev.txt ]; then

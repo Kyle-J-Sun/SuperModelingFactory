@@ -426,26 +426,44 @@ class WOE_Master(object):
 
         self.woe_dict.update(new_woe_dict)
 
-    def plot_bivar_graph(self, data, group, dirname, varlist=None):
+    def plot_bivar_graph(self, data, group=None, dirname=None, varlist=None):
         """Plot bivariate WOE comparison graph.
 
         Args:
             data: pandas.DataFrame, data for plotting
-            group: str, grouping variable name for distinguishing curves
-            dirname: str, subdirectory name for saving (under graph_save_dir)
+            group: str or None, grouping variable name for distinguishing curves.
+                When ``None`` a single ungrouped curve per variable is drawn.
+                Prior to 0.6.2 this was a required positional argument, which
+                silently broke ungrouped callers (see `_plot_woe` in
+                `Modeling_Tool.Pipeline.feature_validation`). The underlying
+                ``get_bivar_graph`` primitive has always accepted ``group=None``.
+            dirname: str, subdirectory name for saving (under graph_save_dir).
+                Required in practice; kept keyword-only-in-practice by keeping
+                the ``group`` slot second for backward compatibility with any
+                pre-0.6.2 positional caller.
             varlist: list, variables to plot (default: self.varlist)
         Returns:
             None, saves images directly
         """
+        if dirname is None:
+            raise TypeError("plot_bivar_graph() missing required argument: 'dirname'")
         if varlist is None:
             varlist = self.varlist
+
+        save_dir = os.path.join(self.graph_save_dir, dirname)
+        # matplotlib does not create parent directories on save. Historically
+        # callers were expected to `make_dirs(save_dir)` first; feature_validation
+        # only creates the base `figs/woe/<target>` and misses per-subdirectory
+        # nesting. Since this method already owns the composed path, own the
+        # `mkdir` too — avoids FileNotFoundError on the very first PNG write.
+        os.makedirs(save_dir, exist_ok=True)
 
         get_bivar_graph(data=data,
                         varlist=varlist,
                         sep=self.dep,
                         ref_woe_table=self.get_mapping_table(),
                         group=group,
-                        save_dir=os.path.join(self.graph_save_dir, dirname))
+                        save_dir=save_dir)
 
 
 # =============================================================================
