@@ -139,11 +139,45 @@ class WOEEngineAdapter:
         For both engines, the WOE value is a stable fitted-bin proxy.  This keeps
         the method independent from each engine's private bin-label internals.
         """
-        transformed = self.transform(data, [var], suffix=self.woe_suffix)
-        woe_col = f"{var}{self.woe_suffix}"
-        if woe_col not in transformed.columns:
-            raise KeyError(f"WOE column {woe_col!r} was not produced by {self.engine_name}")
-        return transformed[woe_col].map(lambda x: "__MISSING__" if pd.isna(x) else str(x))
+        bins = self.assign_bins_frame(data, [var])
+        if var not in bins.columns:
+            raise KeyError(f"WOE bins for {var!r} were not produced by {self.engine_name}")
+        return bins[var].rename(f"{var}{self.woe_suffix}")
+
+    def assign_bins_frame(
+        self,
+        data: pd.DataFrame,
+        varlist: list[str],
+        feature_block_size: int | None = 64,
+    ) -> pd.DataFrame:
+        """Assign stable fitted-bin labels for several variables in blocks."""
+        variables = list(dict.fromkeys(varlist or []))
+        if not variables:
+            return pd.DataFrame(index=data.index)
+        if feature_block_size is not None and int(feature_block_size) <= 0:
+            raise ValueError("feature_block_size must be a positive integer or None")
+
+        block_size = len(variables) if feature_block_size is None else int(feature_block_size)
+        frames: list[pd.DataFrame] = []
+        for start in range(0, len(variables), block_size):
+            block = variables[start : start + block_size]
+            transformed = self.transform(data, block, suffix=self.woe_suffix)
+            payload: dict[str, np.ndarray] = {}
+            for var in block:
+                woe_col = f"{var}{self.woe_suffix}"
+                if woe_col not in transformed.columns:
+                    raise KeyError(
+                        f"WOE column {woe_col!r} was not produced by {self.engine_name}"
+                    )
+                series = transformed[woe_col]
+                missing = series.isna().to_numpy()
+                labels = np.empty(len(series), dtype=object)
+                labels[missing] = "__MISSING__"
+                if (~missing).any():
+                    labels[~missing] = series.loc[~missing].astype(str).to_numpy()
+                payload[var] = labels
+            frames.append(pd.DataFrame(payload, index=data.index))
+        return pd.concat(frames, axis=1) if len(frames) > 1 else frames[0]
 
     def get_woe_table(self, varlist: Optional[list[str]] = None) -> pd.DataFrame:
         raise NotImplementedError
@@ -178,7 +212,12 @@ class MonotoneBinnerAdapter(WOEEngineAdapter):
         super().__init__(engine=engine, engine_name="monotone", woe_suffix=woe_suffix)
 
     def transform(self, data: pd.DataFrame, varlist: Optional[list[str]] = None, suffix: str = "_woe") -> pd.DataFrame:
-        transformed = self.engine.apply_woe(data, suffix=suffix, inplace=False)
+        transformed = self.engine.apply_woe(
+            data,
+            suffix=suffix,
+            inplace=False,
+            varlist=varlist,
+        )
         if varlist is None:
             return transformed
         keep = list(data.columns) + [f"{v}{suffix}" for v in varlist if f"{v}{suffix}" in transformed.columns]

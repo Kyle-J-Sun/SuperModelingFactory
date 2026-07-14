@@ -84,12 +84,24 @@ def _screening_summary_from_engine(
     target = data[dep]
     total_bad = max(float((target == 1).sum()), 1.0)
     total_good = max(float((target == 0).sum()), 1.0)
-
-    for var in tqdm(varlist):
-        if var not in data.columns or data[var].nunique(dropna=False) <= 1:
-            continue
+    valid_vars = [
+        var
+        for var in varlist
+        if var in data.columns and data[var].nunique(dropna=False) > 1
+    ]
+    assigned_bins = None
+    assign_bins_frame = getattr(adapter, "assign_bins_frame", None)
+    if callable(assign_bins_frame):
         try:
-            bins = adapter.assign_bins(data, var)
+            assigned_bins = assign_bins_frame(data, valid_vars)
+        except (TypeError, ValueError, KeyError, AttributeError, np.linalg.LinAlgError):
+            # Keep variable-level failure isolation for custom and legacy adapters.
+            # A production adapter normally succeeds here and uses the bulk path.
+            assigned_bins = None
+
+    for var in tqdm(valid_vars):
+        try:
+            bins = assigned_bins[var] if assigned_bins is not None else adapter.assign_bins(data, var)
             tmp = pd.DataFrame({"bin": bins, dep: target})
             grouped = tmp.groupby("bin", dropna=False)[dep].agg(["count", "sum"]).reset_index()
             grouped = grouped.rename(columns={"count": "n", "sum": "n_bad"})
@@ -154,6 +166,7 @@ class PSICalculator:
         binning_engine=None,
         missing_policy: str = "include",
         psi_missing_bucket_policy: str = "smooth_laplace",
+        feature_block_size: int | None = 64,
     ):
         _validate_psi_bucket_policy(psi_missing_bucket_policy, "Feature.PSICalculator.__init__")
         self._base = _BasePSICalculator(
@@ -164,6 +177,7 @@ class PSICalculator:
             precision=precision,
             missing_policy=missing_policy,
             psi_missing_bucket_policy=psi_missing_bucket_policy,
+            feature_block_size=feature_block_size,
         )
         self.buckets = buckets
         self.equal_freq = equal_freq
@@ -172,11 +186,104 @@ class PSICalculator:
         self.precision = precision
         self.missing_policy = missing_policy
         self.psi_missing_bucket_policy = psi_missing_bucket_policy
+        if feature_block_size is not None and int(feature_block_size) <= 0:
+            raise ValueError("feature_block_size must be a positive integer or None")
+        self.feature_block_size = feature_block_size
         self.binning_engine = binning_engine
         self._woe_engine_adapter = as_woe_engine(binning_engine) if binning_engine is not None else None
 
     def __getattr__(self, name):
         return getattr(self._base, name)
+
+    def _prepare_woe_bins(self, expected_df, current_data, varlist):
+        adapter = self._woe_engine_adapter
+        if adapter is None:
+            return None
+        return (
+            adapter.assign_bins_frame(
+                expected_df,
+                varlist,
+                feature_block_size=self.feature_block_size,
+            ),
+            adapter.assign_bins_frame(
+                current_data,
+                varlist,
+                feature_block_size=self.feature_block_size,
+            ),
+        )
+
+    @staticmethod
+    def _group_codes(current_data, resolved_group):
+        if resolved_group is None:
+            return np.zeros(len(current_data), dtype=np.int64), [(None, {})]
+
+        group_cols = [resolved_group] if isinstance(resolved_group, str) else list(resolved_group)
+        group_frame = current_data[group_cols].copy()
+        for col in group_cols:
+            group_frame[col] = group_frame[col].where(group_frame[col].notna(), "__NULL__")
+        group_key = group_cols[0] if len(group_cols) == 1 else group_cols
+        grouped = group_frame.groupby(group_key, dropna=False, sort=True)
+        codes = grouped.ngroup().to_numpy(dtype=np.int64)
+        keys = list(grouped.size().index)
+        groups = []
+        for key in keys:
+            values = key if isinstance(key, tuple) else (key,)
+            groups.append((key, dict(zip(group_cols, values))))
+        return codes, groups
+
+    def _calculate_prebinned(
+        self,
+        expected_bins,
+        current_bins,
+        current_data,
+        varlist,
+        resolved_group,
+        return_details,
+        bucket_policy,
+    ):
+        group_codes, groups = self._group_codes(current_data, resolved_group)
+        n_groups = len(groups)
+        rows = []
+        detail = {}
+
+        for var in varlist:
+            expected_values = expected_bins[var].to_numpy(dtype=object)
+            current_values = current_bins[var].to_numpy(dtype=object)
+            joined = np.concatenate([expected_values, current_values])
+            bin_codes, categories = pd.factorize(joined, sort=False)
+            expected_codes = bin_codes[: len(expected_values)]
+            current_codes = bin_codes[len(expected_values) :]
+            n_bins = len(categories)
+            expected_count_values = np.bincount(expected_codes, minlength=n_bins)
+            current_count_values = np.bincount(
+                group_codes * n_bins + current_codes,
+                minlength=n_groups * n_bins,
+            ).reshape(n_groups, n_bins)
+            expected_count = pd.Series(expected_count_values, index=categories)
+
+            for group_idx, (group_value, group_info) in enumerate(groups):
+                current_count = pd.Series(current_count_values[group_idx], index=categories)
+                _, _, psi_values, _ = _psi_distributions_from_counts(
+                    expected_count,
+                    current_count,
+                    float(expected_count_values.sum()),
+                    float(current_count_values[group_idx].sum()),
+                    content=self.content,
+                    policy=bucket_policy,
+                )
+                row = {"var": var, "psi": round(float(psi_values.sum()), self.precision)}
+                row.update(group_info)
+                rows.append(row)
+                if return_details:
+                    detail_key = var if resolved_group is None else (var, group_value)
+                    exp_total = max(float(expected_count_values.sum()), 1.0)
+                    cur_total = max(float(current_count_values[group_idx].sum()), 1.0)
+                    detail[detail_key] = {
+                        "expected_bins": (expected_count / exp_total).sort_values(ascending=False),
+                        "current_bins": (current_count / cur_total).sort_values(ascending=False),
+                    }
+        result = pd.DataFrame(rows)
+        return (result, detail) if return_details else result
 
     def calculate(
         self,
@@ -208,53 +315,17 @@ class PSICalculator:
                 psi_missing_bucket_policy=effective_bucket_policy,
             )
 
-        detail = {}
-        rows = []
         resolved_group = group_name if group_name is not None else group_by
-        if resolved_group is None:
-            groups = [(None, current_data, {})]
-        else:
-            group_cols = [resolved_group] if isinstance(resolved_group, str) else list(resolved_group)
-            grouped_data = current_data.copy()
-            for col in group_cols:
-                if grouped_data[col].isna().sum() > 0:
-                    grouped_data[col] = grouped_data[col].fillna("__NULL__")
-            group_key = group_cols[0] if len(group_cols) == 1 else group_cols
-            groups = []
-            for grp_value, grp_df in grouped_data.groupby(group_key, dropna=False):
-                if len(group_cols) == 1:
-                    group_info = {group_cols[0]: grp_value}
-                else:
-                    value_tuple = grp_value if isinstance(grp_value, tuple) else (grp_value,)
-                    group_info = dict(zip(group_cols, value_tuple))
-                groups.append((grp_value, grp_df, group_info))
-
-        for var in varlist:
-            expected_bins = adapter.assign_bins(expected_df, var)
-            for grp_value, grp_df, group_info in groups:
-                current_bins = adapter.assign_bins(grp_df, var)
-                row = {
-                    "var": var,
-                    "psi": round(
-                        _psi_from_bins(
-                            expected_bins,
-                            current_bins,
-                            self.content,
-                            effective_bucket_policy,
-                        ),
-                        self.precision,
-                    ),
-                }
-                row.update(group_info)
-                rows.append(row)
-                if return_details:
-                    detail_key = var if resolved_group is None else (var, grp_value)
-                    detail[detail_key] = {
-                        "expected_bins": expected_bins.value_counts(normalize=True, dropna=False),
-                        "current_bins": current_bins.value_counts(normalize=True, dropna=False),
-                    }
-        result = pd.DataFrame(rows)
-        return (result, detail) if return_details else result
+        expected_bins, current_bins = self._prepare_woe_bins(expected_df, current_data, varlist)
+        return self._calculate_prebinned(
+            expected_bins,
+            current_bins,
+            current_data,
+            varlist,
+            resolved_group,
+            return_details,
+            effective_bucket_policy,
+        )
 
 
 class VarExtractionInsights:
@@ -395,6 +466,59 @@ class CorrelationFilter:
         self.woe_engine_params = woe_engine_params or {}
         self.correlated_dict = {}
         self.filtered_varlist = []
+        self._corr_matrix_cache = None
+        self._metric_summary_cache = None
+
+    def _high_corr_pairs(self, varlist):
+        if (
+            self._corr_matrix_cache is None
+            or not set(varlist).issubset(self._corr_matrix_cache.columns)
+        ):
+            self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        matrix = self._corr_matrix_cache.reindex(index=varlist, columns=varlist)
+        values = matrix.to_numpy(dtype=float)
+        row_idx, col_idx = np.triu_indices(len(varlist), k=1)
+        pair_values = values[row_idx, col_idx]
+        keep = np.isfinite(pair_values) & (np.abs(pair_values) > self.corr_cutpoint)
+        names = np.asarray(varlist, dtype=object)
+        return pd.DataFrame(
+            {
+                "VAR1": names[row_idx[keep]],
+                "VAR2": names[col_idx[keep]],
+                "CORR": pair_values[keep],
+            },
+            columns=["VAR1", "VAR2", "CORR"],
+        )
+
+    def _metric_summary(self, varlist):
+        cached_vars = (
+            set(self._metric_summary_cache["var"])
+            if self._metric_summary_cache is not None and "var" in self._metric_summary_cache
+            else set()
+        )
+        if not set(varlist).issubset(cached_vars):
+            insights = VarExtractionInsights(
+                self.data,
+                self.dep,
+                None,
+                chi2_method=self.chi2_method,
+                chi2_p=self.chi2_p,
+                init_equi_bins=self.init_equi_bins,
+                tree_binning=self.tree_binning,
+                seed=self.seed,
+                missing_rate_ref=self.missing_rate_ref,
+                spec_values=self.spec_values,
+                woe_engine=self.woe_engine,
+                woe_binner=self.woe_binner,
+                woe_engine_params=self.woe_engine_params,
+            )
+            self._metric_summary_cache = insights.get_var_analysis_report(
+                self.data,
+                varlist,
+                dep=self.dep,
+                iv_cut=0,
+            )
+        return self._metric_summary_cache
 
     def __getattr__(self, name):
         return getattr(self._base, name)
@@ -408,7 +532,7 @@ class CorrelationFilter:
             return self._base.filter_single_iteration(varlist)
 
         name_mapping = {"iv": "iv", "ks": "ks_in_gains"}
-        high_corr_var = var_corr_filter(self.data, varlist, corr_cutpoint=self.corr_cutpoint, method=self.method)
+        high_corr_var = self._high_corr_pairs(varlist)
         if len(high_corr_var) == 0:
             return varlist
 
@@ -417,17 +541,10 @@ class CorrelationFilter:
         for var in tqdm(high_corr_var["VAR1"].drop_duplicates().tolist()):
             if var in set(removed_varlist + selected_varlist):
                 continue
-            single_var_corr = high_corr_var.query(f"VAR1 == '{var}'")
+            single_var_corr = high_corr_var.loc[high_corr_var["VAR1"].eq(var)]
             correlated_list = [var] + single_var_corr["VAR2"].drop_duplicates().tolist()
-            insights = VarExtractionInsights(
-                self.data, self.dep, None, chi2_method=self.chi2_method,
-                chi2_p=self.chi2_p, init_equi_bins=self.init_equi_bins,
-                tree_binning=self.tree_binning, seed=self.seed,
-                missing_rate_ref=self.missing_rate_ref, spec_values=self.spec_values,
-                woe_engine=self.woe_engine, woe_binner=self.woe_binner,
-                woe_engine_params=self.woe_engine_params,
-            )
-            summary = insights.get_var_analysis_report(self.data, correlated_list, dep=self.dep, iv_cut=0)
+            metric_summary = self._metric_summary(varlist)
+            summary = metric_summary[metric_summary["var"].isin(correlated_list)].copy()
             if summary.empty:
                 continue
             selected = summary.sort_values([name_mapping[self.base_metric.lower()]], ascending=False)["var"].iloc[0]
@@ -445,6 +562,9 @@ class CorrelationFilter:
             self.filtered_varlist = getattr(self._base, "filtered_varlist", [])
             return result
 
+        self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        self._metric_summary_cache = None
+        self._metric_summary(varlist)
         last_keep_list = self.filter_single_iteration(varlist)
         for _ in range(1, max_iterations):
             keep_list = self.filter_single_iteration(last_keep_list)

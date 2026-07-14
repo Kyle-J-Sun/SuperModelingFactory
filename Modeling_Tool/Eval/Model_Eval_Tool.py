@@ -88,51 +88,31 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
                                bin_colnames = ("_bin_num", "_bin_range"),
                                ascending = ascending)
     
-    def _compute_gains_tmp(group):
-        # 计算各项指标
-        min_val = group[score].min()
-        max_val = group[score].max()
-        # NOTE: pandas 2.3+ 起 groupby(...).apply(func) 传入 func 的 group
-        # DataFrame 不再包含分组列,不能再用 group['_bin_num']。
-        # len(group) 与原 .count() 数值等价(_bin_num 为分组主键,不为 NaN)。
-        n = len(group)
-        avg_score = group[score].mean()
-        unique_score = group[score].nunique()
-
-        # dep相关
-        dep_vals = group[dep]
-        
-        grand_total = res.shape[0]
-        grand_perf_cnt = res[dep].count()
-        grand_total_bad = res[dep].sum()
-        grand_total_good = (grand_perf_cnt - grand_total_bad)
-        
-        perf_cnt = dep_vals.count()
-        n_bad = (dep_vals == 1).sum()
-        n_good = (dep_vals == 0).sum()
-        avg_bad = n_bad / dep_vals.count() if dep_vals.count() > 0 else 0  # 避免除以0
-        avg_good = n_good / dep_vals.count() if dep_vals.count() > 0 else 0
-        
-        lift = avg_bad / res[dep].mean()
-        prop = n / grand_total
-
-        # 返回Series
-        return pd.Series({
-            'MIN': min_val,
-            'MAX': max_val,
-            'N': n,
-            'PROP': prop,
-            'PERF_CNT': perf_cnt,
-            'AVG_SCORE': avg_score,
-            'UNIQUE_SCORE': unique_score,
-            'AVG_BAD': avg_bad,
-            'AVG_GOOD': avg_good,
-            'N_BAD': n_bad,
-            'N_GOOD': n_good,
-            'LIFT': lift
-        })
-    
-    gains_table = res.groupby(["_bin_num", "_bin_range"], dropna=False).apply(_compute_gains_tmp)
+    res = res.copy()
+    res["_smf_bad_ind"] = res[dep].eq(1).astype(np.int64)
+    res["_smf_good_ind"] = res[dep].eq(0).astype(np.int64)
+    grouped = res.groupby(["_bin_num", "_bin_range"], dropna=False)
+    gains_table = grouped.agg(
+        MIN=(score, "min"),
+        MAX=(score, "max"),
+        N=(dep, "size"),
+        PERF_CNT=(dep, "count"),
+        AVG_SCORE=(score, "mean"),
+        UNIQUE_SCORE=(score, "nunique"),
+        N_BAD=("_smf_bad_ind", "sum"),
+        N_GOOD=("_smf_good_ind", "sum"),
+    )
+    perf_denom = gains_table["PERF_CNT"].replace(0, np.nan)
+    gains_table["PROP"] = gains_table["N"] / max(len(res), 1)
+    gains_table["AVG_BAD"] = (gains_table["N_BAD"] / perf_denom).fillna(0.0)
+    gains_table["AVG_GOOD"] = (gains_table["N_GOOD"] / perf_denom).fillna(0.0)
+    gains_table["LIFT"] = gains_table["AVG_BAD"] / res[dep].mean()
+    gains_table = gains_table[
+        [
+            "MIN", "MAX", "N", "PROP", "PERF_CNT", "AVG_SCORE",
+            "UNIQUE_SCORE", "AVG_BAD", "AVG_GOOD", "N_BAD", "N_GOOD", "LIFT",
+        ]
+    ]
 
     gains_table["BAD_PCT_IN_EACH_BIN"] = gains_table["N_BAD"] / gains_table["N_BAD"].sum()
     gains_table["GOOD_PCT_IN_EACH_BIN"] = gains_table["N_GOOD"] / gains_table["N_GOOD"].sum()
@@ -146,7 +126,7 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
 
 
     gains_table["TRUE_BAD_SHIFT"] = (gains_table['AVG_BAD'].shift(1) / gains_table['AVG_BAD'] - 1) if not ascending else (gains_table['AVG_BAD'] / gains_table['AVG_BAD'].shift(1) - 1) 
-    gains_table["RANK_ORDER_BUMP"] = gains_table["TRUE_BAD_SHIFT"].apply(lambda x: 1 if x < 0 else 0)
+    gains_table["RANK_ORDER_BUMP"] = gains_table["TRUE_BAD_SHIFT"].lt(0).astype(int)
     
     gains_table["WOE"] = calc_woe(data = gains_table, bad_pct = "BAD_PCT_IN_EACH_BIN", good_pct = "GOOD_PCT_IN_EACH_BIN")
     gains_table["IV"] = calc_iv(data = gains_table, bad_pct = "BAD_PCT_IN_EACH_BIN", good_pct = "GOOD_PCT_IN_EACH_BIN")

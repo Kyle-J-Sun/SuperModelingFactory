@@ -113,6 +113,7 @@ class PSICalculator:
         precision: int = 5,
         missing_policy: str = "include",
         psi_missing_bucket_policy: str = "smooth_laplace",
+        feature_block_size: int | None = 64,
     ):
         """
         Initialize PSICalculator with configuration parameters.
@@ -144,6 +145,8 @@ class PSICalculator:
                 f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
             )
         _validate_psi_bucket_policy(psi_missing_bucket_policy, "PSICalculator.__init__")
+        if feature_block_size is not None and int(feature_block_size) <= 0:
+            raise ValueError("feature_block_size must be a positive integer or None")
         self.buckets = buckets
         self.equal_freq = equal_freq
         self.min_bin_prop = min_bin_prop
@@ -151,6 +154,7 @@ class PSICalculator:
         self.precision = precision
         self.missing_policy = missing_policy
         self.psi_missing_bucket_policy = psi_missing_bucket_policy
+        self.feature_block_size = feature_block_size
     
 #     def _calculate_single_psi(
 #         self,
@@ -1341,6 +1345,22 @@ def calculate_multigroup_psi_two_sets(
         传入 "drop" 可复现 0.5.0 之前的数值，或 "warn_and_drop" 保留旧数值
         同时发出 RuntimeWarning 报告两侧 NaN 数量。
     """
+    if group_name is not None and group_by is None:
+        return _calculate_grouped_psi_fixed_reference(
+            expected_df=expected_df,
+            actual_df=actual_df,
+            varlist=varlist,
+            group_name=group_name,
+            buckets=buckets,
+            equal_freq=equal_freq,
+            min_bin_prop=min_bin_prop,
+            content=content,
+            precision=precision,
+            return_details=return_details,
+            missing_policy=missing_policy,
+            psi_missing_bucket_policy=psi_missing_bucket_policy,
+        )
+
     if group_name is not None:
         if actual_df[group_name].isna().sum() > 0:
             actual_df = actual_df.copy()
@@ -1393,6 +1413,27 @@ def calculate_multigroup_psi_two_sets(
             psi_df = pd.DataFrame(psi_records)
             details_df = pd.concat(detail_records, ignore_index=True) if detail_records else pd.DataFrame(columns=['bin', 'expected_count', 'actual_count', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var'])
             return {'psi': psi_df, 'details': details_df}
+
+        multi_psi_res = []
+        for group, group_data in actual_df.groupby(group_name, dropna=False):
+            group_psi = calculate_multivar_psi_two_sets(
+                expected_df=expected_df,
+                actual_df=group_data,
+                varlist=varlist,
+                group_by=group_by,
+                buckets=buckets,
+                equal_freq=equal_freq,
+                min_bin_prop=min_bin_prop,
+                content=content,
+                precision=precision,
+                missing_policy=missing_policy,
+                psi_missing_bucket_policy=psi_missing_bucket_policy,
+            )
+            group_psi[group_name] = group
+            multi_psi_res.append(group_psi)
+        return pd.concat(multi_psi_res, ignore_index=True) if multi_psi_res else pd.DataFrame(
+            columns=["var", "psi", group_name]
+        )
         
     else:
         # 未指定 group_name 时
@@ -1454,3 +1495,206 @@ def calculate_multigroup_psi_two_sets(
             )
             
             return group_psi
+
+
+def _calculate_grouped_psi_fixed_reference(
+    expected_df: pd.DataFrame,
+    actual_df: pd.DataFrame,
+    varlist: List[str],
+    group_name: str,
+    buckets: int,
+    equal_freq: bool,
+    min_bin_prop: float,
+    content: float,
+    precision: int,
+    return_details: bool,
+    missing_policy: str,
+    psi_missing_bucket_policy: str,
+) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    """Calculate grouped PSI after binning each variable only once."""
+    if missing_policy not in {"include", "drop", "warn_and_drop"}:
+        raise ValueError(
+            "calculate_multigroup_psi_two_sets: missing_policy must be one of "
+            f"'include', 'drop', 'warn_and_drop'; got {missing_policy!r}."
+        )
+    _validate_psi_bucket_policy(
+        psi_missing_bucket_policy,
+        "calculate_multigroup_psi_two_sets",
+    )
+    if group_name not in actual_df.columns:
+        raise KeyError(group_name)
+
+    group_values = actual_df[group_name].where(
+        actual_df[group_name].notna(),
+        "__NULL__",
+    )
+    group_codes, group_levels = pd.factorize(group_values, sort=True)
+    n_groups = len(group_levels)
+    group_sizes = np.bincount(group_codes, minlength=n_groups).astype(float)
+    psi_records = []
+    detail_records = []
+
+    for var in tqdm(varlist, desc=f"Calculating PSI by {group_name}"):
+        expected_series = expected_df[var].reset_index(drop=True)
+        actual_series = actual_df[var].reset_index(drop=True)
+        expected_valid = expected_series.notna().to_numpy()
+        actual_valid = actual_series.notna().to_numpy()
+        n_expected_na = int((~expected_valid).sum())
+        n_actual_na = int((~actual_valid).sum())
+
+        if missing_policy == "warn_and_drop" and (n_expected_na or n_actual_na):
+            warnings.warn(
+                f"calculate_multigroup_psi_two_sets: dropping NaN rows for {var!r}. "
+                f"expected: {n_expected_na}/{len(expected_series)} NaN, "
+                f"actual: {n_actual_na}/{len(actual_series)} NaN.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        expected_clean = expected_series[expected_valid]
+        actual_clean = actual_series[actual_valid]
+        expected_bins, breakpoints = quick_binning(
+            pd.DataFrame({var: expected_clean}),
+            var,
+            labels=None,
+            nbins=buckets,
+            precision=precision,
+            equal_freq=equal_freq,
+            right=True,
+            include_lowest=False,
+            min_bin_prop=min_bin_prop,
+            tree_binning=False,
+            target=None,
+            random_state=42,
+        )
+        actual_bins, _ = quick_binning(
+            pd.DataFrame({var: actual_clean}),
+            var,
+            labels=None,
+            nbins=list(breakpoints),
+            precision=precision,
+            equal_freq=equal_freq,
+            right=True,
+            include_lowest=False,
+            min_bin_prop=min_bin_prop,
+            tree_binning=False,
+            target=None,
+            random_state=42,
+        )
+
+        expected_values = np.empty(len(expected_series), dtype=object)
+        actual_values = np.empty(len(actual_series), dtype=object)
+        expected_values[:] = None
+        actual_values[:] = None
+        expected_values[expected_valid] = expected_bins.astype(object).to_numpy()
+        actual_values[actual_valid] = actual_bins.astype(object).to_numpy()
+        if missing_policy == "include":
+            expected_values[~expected_valid] = _MISSING_BIN
+            actual_values[~actual_valid] = _MISSING_BIN
+
+        expected_values = expected_values[
+            np.ones(len(expected_values), dtype=bool)
+            if missing_policy == "include"
+            else expected_valid
+        ]
+        actual_selected = (
+            actual_values[actual_valid]
+            if missing_policy != "include"
+            else actual_values
+        )
+        # ``value_counts`` on categorical pd.cut output keeps unused interval
+        # categories. Preserve that public PSI smoothing universe even when a
+        # bin has zero observations on both sides.
+        bin_universe = []
+        for binned in (expected_bins, actual_bins):
+            if isinstance(binned.dtype, pd.CategoricalDtype):
+                bin_universe.extend(binned.cat.categories.tolist())
+        universe_values = np.asarray(bin_universe, dtype=object)
+        joined_values = np.concatenate(
+            [universe_values, expected_values, actual_selected]
+        )
+        bin_codes, bin_levels = pd.factorize(joined_values, sort=False)
+        universe_len = len(universe_values)
+        expected_codes = bin_codes[
+            universe_len : universe_len + len(expected_values)
+        ]
+        actual_codes = np.full(len(actual_series), -1, dtype=np.int64)
+        actual_codes[actual_valid if missing_policy != "include" else np.ones(len(actual_series), dtype=bool)] = (
+            bin_codes[universe_len + len(expected_values) :]
+        )
+        n_bins = len(bin_levels)
+
+        expected_counts_values = np.bincount(
+            expected_codes[expected_codes >= 0],
+            minlength=n_bins,
+        ).astype(float)
+        valid_actual_codes = actual_codes >= 0
+        grouped_counts = np.bincount(
+            group_codes[valid_actual_codes] * n_bins + actual_codes[valid_actual_codes],
+            minlength=n_groups * n_bins,
+        ).reshape(n_groups, n_bins).astype(float)
+        expected_count = pd.Series(expected_counts_values, index=bin_levels)
+        if missing_policy == "include":
+            expected_denom = float(len(expected_series)) or 1.0
+            actual_denoms = group_sizes
+        else:
+            expected_denom = float(expected_valid.sum()) or 1.0
+            actual_denoms = np.bincount(
+                group_codes[actual_valid],
+                minlength=n_groups,
+            ).astype(float)
+
+        for group_idx, group_value in enumerate(group_levels):
+            actual_count = pd.Series(grouped_counts[group_idx], index=bin_levels)
+            expected_pct, actual_pct, psi_values, psi_floor = _psi_distributions_from_counts(
+                expected_count,
+                actual_count,
+                expected_denom,
+                float(actual_denoms[group_idx]) or 1.0,
+                content=content,
+                policy=psi_missing_bucket_policy,
+            )
+            psi_records.append(
+                {
+                    group_name: group_value,
+                    "var": var,
+                    "psi": float(psi_values.sum()),
+                }
+            )
+            if return_details:
+                details = pd.DataFrame(
+                    {
+                        "bin": bin_levels,
+                        "expected_count": expected_count.to_numpy(),
+                        "actual_count": actual_count.to_numpy(),
+                        "expected_percent": expected_pct.to_numpy(),
+                        "actual_percent": actual_pct.to_numpy(),
+                        "psi_component": psi_values.to_numpy(),
+                        "psi_component_floor_1e6": psi_floor.to_numpy(),
+                    }
+                )
+                details["bucket_status"] = "common"
+                details.loc[
+                    (details["expected_count"] == 0) & (details["actual_count"] > 0),
+                    "bucket_status",
+                ] = "actual_only"
+                details.loc[
+                    (details["expected_count"] > 0) & (details["actual_count"] == 0),
+                    "bucket_status",
+                ] = "expected_only"
+                details["psi_missing_bucket_policy"] = psi_missing_bucket_policy
+                details[group_name] = group_value
+                details["var"] = var
+                detail_records.append(details)
+
+    psi_df = pd.DataFrame(psi_records, columns=[group_name, "var", "psi"])
+    if not return_details:
+        return psi_df
+    details_df = pd.concat(detail_records, ignore_index=True) if detail_records else pd.DataFrame(
+        columns=[
+            "bin", "expected_count", "actual_count", "expected_percent",
+            "actual_percent", "psi_component", "psi_component_floor_1e6",
+            "bucket_status", "psi_missing_bucket_policy", group_name, "var",
+        ]
+    )
+    return {"psi": psi_df, "details": details_df}

@@ -124,6 +124,7 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     df["_w"] = weight
     df["_bad_w"] = weight * y
     df["_good_w"] = weight * (1.0 - y)
+    df["_score_w"] = weight * s
     grouped = df.groupby(["_bin_num", "_bin_range"], sort=True, dropna=False)
     out = grouped.agg(
         MIN=(score, "min"),
@@ -133,9 +134,19 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         PERF_CNT=("_w", "sum"),
         N_BAD=("_bad_w", "sum"),
         N_GOOD=("_good_w", "sum"),
-        AVG_SCORE=(score, lambda x: safe_weighted_average(x, df.loc[x.index, "_w"])),
+        SCORE_W=("_score_w", "sum"),
+        SCORE_COUNT=(score, "count"),
         UNIQUE_SCORE=(score, "nunique"),
     )
+    out["AVG_SCORE"] = out["SCORE_W"] / out["N"].replace(0, np.nan)
+    out.loc[out["SCORE_COUNT"].ne(out["N_RAW"]), "AVG_SCORE"] = np.nan
+    out = out.drop(columns=["SCORE_W", "SCORE_COUNT"])
+    out = out[
+        [
+            "MIN", "MAX", "N", "N_RAW", "PERF_CNT", "N_BAD",
+            "N_GOOD", "AVG_SCORE", "UNIQUE_SCORE",
+        ]
+    ]
 
     total_weight = float(out["N"].sum()) or 1.0
     total_bad = float(out["N_BAD"].sum()) or 1.0
@@ -155,7 +166,7 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     out["KS"] = out["KS_PER_BIN"]
     out["LIFT"] = out["AVG_BAD"] / overall_bad_rate if overall_bad_rate else np.nan
     out["TRUE_BAD_SHIFT"] = out["AVG_BAD"].shift(1) / out["AVG_BAD"] - 1
-    out["RANK_ORDER_BUMP"] = out["TRUE_BAD_SHIFT"].apply(lambda x: 1 if x < 0 else 0)
+    out["RANK_ORDER_BUMP"] = out["TRUE_BAD_SHIFT"].lt(0).astype(int)
     with np.errstate(divide="ignore", invalid="ignore"):
         out["WOE"] = np.log(out["BAD_PCT_IN_EACH_BIN"] / out["GOOD_PCT_IN_EACH_BIN"])
     out["WOE"] = out["WOE"].replace([np.inf, -np.inf], 0).fillna(0)

@@ -34,6 +34,7 @@ class ScoreConsistencyUATPipelineConfig:
     tol_feat: float = 1e-2
     time_featlist: list[str] = field(default_factory=list)
     tol_time_seconds: float = 60.0
+    comparison_block_size: int = 128
 
     excel_output_path: str | None = None
     excel_font: str = "Arial"
@@ -154,6 +155,7 @@ class ScoreConsistencyUATPipeline:
             info_list=list(cfg.info_list or []),
             time_featlist=list(cfg.time_featlist or []),
             tol_time_seconds=float(cfg.tol_time_seconds),
+            comparison_block_size=int(cfg.comparison_block_size),
         )
 
     def _resolve_excel_output_path(self) -> str:

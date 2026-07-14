@@ -262,6 +262,7 @@ class UATConfig:
 
     time_featlist: List[str] = field(default_factory=list)     # 需时间语义对比的字段（线上线下同名）
     tol_time_seconds: float = 60.0                             # 时间差容差（秒）
+    comparison_block_size: int = 128                           # 宽表逐 flow 比较列块大小
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +289,8 @@ class UATConsistencyChecker:
     def __init__(self, config: UATConfig, sqlrunner) -> None:
         self.cfg = config
         self.sqlrunner = sqlrunner
+        if int(self.cfg.comparison_block_size) <= 0:
+            raise ValueError("comparison_block_size must be a positive integer")
 
         # ── 数据容器 ──────────────────────────────────────────────────────
         self.df_offline:  Optional[pd.DataFrame] = None
@@ -704,7 +707,7 @@ class UATConsistencyChecker:
         logger.info("§8  Per-Flow_ID 汇总报告")
         logger.info("=" * 60)
 
-        df_idx  = self.df_compare.set_index("flow_id")
+        df_idx = self.df_compare.drop_duplicates("flow_id", keep="first").set_index("flow_id")
         off_col = self.offline_score_col
         on_col  = self.online_score_col
         per_flow_columns = ["flow_id"] + list(self._info_cols)
@@ -715,58 +718,78 @@ class UATConsistencyChecker:
                 per_flow_columns.append(f"{s_off}_diff")
         per_flow_columns.extend(["n_feature_mismatch", "mismatch_features"])
         per_flow_columns = list(dict.fromkeys(per_flow_columns))
-        records = []
+        ordered_fids = [fid for fid in sorted(self.common_fids) if fid in df_idx.index]
+        base = df_idx.reindex(ordered_fids)
+        report = pd.DataFrame({"flow_id": ordered_fids})
+        for info_col in self._info_cols:
+            report[info_col] = base[info_col].to_numpy()
 
-        for fid in sorted(self.common_fids):
-            try:
-                row = df_idx.loc[fid]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[0]
-            except KeyError:
+        if off_col and on_col:
+            offline_score = pd.to_numeric(base[off_col], errors="coerce").to_numpy(dtype=float)
+            online_score = pd.to_numeric(base[on_col], errors="coerce").to_numpy(dtype=float)
+            both_missing = np.isnan(offline_score) & np.isnan(online_score)
+            both_observed = np.isfinite(offline_score) & np.isfinite(online_score)
+            score_diff = online_score - offline_score
+            report["main_score_diff"] = score_diff
+            report["main_score_ok"] = both_missing | (
+                both_observed & (np.abs(score_diff) <= self.cfg.tol_score)
+            )
+
+        for sub_off, sub_on in self.cfg.submodel_pairs.items():
+            if sub_off in base.columns and sub_on in base.columns:
+                offline_sub = pd.to_numeric(base[sub_off], errors="coerce").to_numpy(dtype=float)
+                online_sub = pd.to_numeric(base[sub_on], errors="coerce").to_numpy(dtype=float)
+                report[f"{sub_off}_diff"] = online_sub - offline_sub
+
+        valid_pairs = [
+            (f_off, f_on)
+            for f_off, f_on in sorted(self.feature_pairs.items())
+            if f_off in base.columns and f_on in base.columns
+        ]
+        mismatch_count = np.zeros(len(base), dtype=np.int64)
+        mismatch_text = np.full(len(base), "", dtype=object)
+        block_size = int(self.cfg.comparison_block_size)
+        for start in range(0, len(valid_pairs), block_size):
+            block = valid_pairs[start : start + block_size]
+            offline_cols = [pair[0] for pair in block]
+            online_cols = [pair[1] for pair in block]
+            offline_values = base[offline_cols].apply(
+                pd.to_numeric, errors="coerce"
+            ).to_numpy(dtype=float)
+            online_values = base[online_cols].apply(
+                pd.to_numeric, errors="coerce"
+            ).to_numpy(dtype=float)
+            offline_missing = np.isnan(offline_values)
+            online_missing = np.isnan(online_values)
+            mismatch = (offline_missing ^ online_missing) | (
+                (~offline_missing & ~online_missing)
+                & (np.abs(online_values - offline_values) > self.cfg.tol_feat)
+            )
+            mismatch_count += mismatch.sum(axis=1, dtype=np.int64)
+            row_idx, col_idx = np.nonzero(mismatch)
+            if len(row_idx) == 0:
                 continue
+            sparse = pd.DataFrame(
+                {
+                    "row_idx": row_idx,
+                    "feature": np.asarray(offline_cols, dtype=object)[col_idx],
+                }
+            )
+            block_text = sparse.groupby("row_idx", sort=False)["feature"].agg(", ".join)
+            positions = block_text.index.to_numpy(dtype=np.int64)
+            previous = mismatch_text[positions]
+            mismatch_text[positions] = np.where(
+                previous == "",
+                block_text.to_numpy(dtype=object),
+                previous + ", " + block_text.to_numpy(dtype=object),
+            )
 
-            rec: dict = {"flow_id": fid}
-            for _ic in self._info_cols:        # flow_id 之后附加 info_list 字段
-                rec[_ic] = row[_ic]
-
-            # 主模型分差异（单侧为空 → 不一致；两侧皆空 → 无可比较，视为一致）
-            if off_col and on_col:
-                ov = pd.to_numeric(row[off_col], errors="coerce")
-                nv = pd.to_numeric(row[on_col],  errors="coerce")
-                d  = nv - ov if pd.notna(ov) and pd.notna(nv) else float("nan")
-                rec["main_score_diff"] = d
-                if pd.isna(ov) and pd.isna(nv):
-                    rec["main_score_ok"] = True
-                elif pd.isna(ov) ^ pd.isna(nv):
-                    rec["main_score_ok"] = False
-                else:
-                    rec["main_score_ok"] = bool(abs(d) <= self.cfg.tol_score)
-
-            # 子模型分差异（include_submodel_scores=False 时有效）
-            for s_off, s_on in self.cfg.submodel_pairs.items():
-                if s_off in self.df_compare.columns and s_on in self.df_compare.columns:
-                    ov = pd.to_numeric(row[s_off], errors="coerce")
-                    nv = pd.to_numeric(row[s_on],  errors="coerce")
-                    rec[f"{s_off}_diff"] = (
-                        nv - ov if pd.notna(ov) and pd.notna(nv) else float("nan")
-                    )
-
-            # 特征不一致计数（单侧为空亦计为不一致；两侧皆空跳过）
-            feat_bad = []
-            for f_off, f_on in sorted(self.feature_pairs.items()):
-                if f_off in self.df_compare.columns and f_on in self.df_compare.columns:
-                    ov = pd.to_numeric(row[f_off], errors="coerce")
-                    nv = pd.to_numeric(row[f_on],  errors="coerce")
-                    if pd.isna(ov) and pd.isna(nv):
-                        continue
-                    if (pd.isna(ov) ^ pd.isna(nv)) or abs(nv - ov) > self.cfg.tol_feat:
-                        feat_bad.append(f_off)
-
-            rec["n_feature_mismatch"] = len(feat_bad)
-            rec["mismatch_features"]  = ", ".join(feat_bad)
-            records.append(rec)
-
-        self.per_flow_df = pd.DataFrame(records, columns=per_flow_columns)
+        report["n_feature_mismatch"] = mismatch_count
+        report["mismatch_features"] = mismatch_text
+        for column in per_flow_columns:
+            if column not in report.columns:
+                report[column] = np.nan
+        self.per_flow_df = report[per_flow_columns]
         n_issues = int((self.per_flow_df["n_feature_mismatch"] > 0).sum())
         logger.info("Per-flow report: %d flows | %d with feature mismatches",
                     len(self.per_flow_df), n_issues)

@@ -1661,9 +1661,13 @@ class MonotoneWOEBinner:
                 avg_bad_rate   = total_bad_all / (total_bad_all + total_good_all) if (total_bad_all + total_good_all) > 0 else self.eps
 
             wt["pct_n"] = wt["n"] / total_n if total_n > 0 else 0.0
-            wt["lift"]  = wt["bad_rate"].apply(
-                lambda br: round(br / avg_bad_rate, 4) if avg_bad_rate > 0 else 0.0
-            )
+            if avg_bad_rate > 0:
+                wt["lift"] = np.round(
+                    wt["bad_rate"].to_numpy(dtype=float) / float(avg_bad_rate),
+                    4,
+                )
+            else:
+                wt["lift"] = 0.0
 
             # ── 补全可能缺失或 NaN 的列（格式 B 加载时 woe_table 无这些列，
             #    pd.concat 后普通箱行为 NaN）──
@@ -1894,11 +1898,15 @@ class MonotoneWOEBinner:
                         total_bad  = bdf["bad"].sum()
                         total_good = bdf["good"].sum() if "good" in bdf.columns else 0
                         eps = self.eps
-                        def _iv_row(r):
-                            pb = r["bad"]  / (total_bad  + eps)
-                            pg = r["good"] / (total_good + eps) if total_good > 0 else eps
-                            return (pb - pg) * r["woe"]
-                        bdf["iv"] = bdf.apply(_iv_row, axis=1)
+                        pct_bad = bdf["bad"].to_numpy(dtype=float) / (total_bad + eps)
+                        pct_good = (
+                            bdf["good"].to_numpy(dtype=float) / (total_good + eps)
+                            if total_good > 0
+                            else np.full(len(bdf), eps, dtype=float)
+                        )
+                        bdf["iv"] = (
+                            (pct_bad - pct_good) * bdf["woe"].to_numpy(dtype=float)
+                        )
                         if total_iv == 0.0:
                             total_iv = float(bdf["iv"].sum())
 
@@ -2053,6 +2061,7 @@ class MonotoneWOEBinner:
         suffix: str = "_woe",
         inplace: bool = False,
         unseen_category_policy: str = "warn",
+        varlist: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
         将 data 中的特征原始数值转换为 WOE 值，添加 *_woe 列。
@@ -2081,6 +2090,9 @@ class MonotoneWOEBinner:
             ``self._unseen_category_stats`` for programmatic monitoring.
             Pass ``"raise"`` to fail loudly on first unseen category, or
             ``"silent"`` to reproduce the pre-0.5.0 fully-silent behaviour.
+        varlist : list of str, optional
+            Restrict transformation to these fitted features. ``None`` keeps
+            the historical behaviour and transforms every fitted feature.
 
         Attributes populated
         --------------------
@@ -2106,7 +2118,16 @@ class MonotoneWOEBinner:
         # Reset per-call so callers can inspect stats from the *latest* run only.
         self._unseen_category_stats = {}
 
-        for feat, vr in self._results.items():
+        selected_features = (
+            list(self._results)
+            if varlist is None
+            else list(dict.fromkeys(str(feat) for feat in varlist))
+        )
+        for feat in selected_features:
+            vr = self._results.get(feat)
+            if vr is None:
+                logger.info(f"  [WARN] '{feat}' was not fitted, skipping")
+                continue
             if feat not in df.columns:
                 logger.info(f"  [WARN] '{feat}' 不在 data 中，跳过")
                 continue
