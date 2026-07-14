@@ -208,7 +208,7 @@ em.close_workbook()
 
 ## 版本
 
-- **Version**: 0.6.2
+- **Version**: 0.6.3
 - **Author**: Jingkai Sun
 
 ## 许可证

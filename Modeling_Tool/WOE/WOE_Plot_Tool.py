@@ -548,15 +548,25 @@ def get_bivar_graph(data, varlist, sep, ref_woe_table, save_dir, group=None, woe
         plot_woe(woe_df, to_show=False, save_dir=save_dir, fig_name = f"{var}.png")
 
     ################ Group WOE Table Plot ##########################
-    grp_woe_res = get_mapped_woe_summary(data = data,
-                                         ref_woe_table = ref_woe_table,
-                                         tgt_name = sep,
-                                         varlist = varlist,
-                                         grp_name=[group])
-
-    grp_woe_res = align_bin_num(woe_table = ref_woe_table, grp_woe_df = grp_woe_res, grp_name = [group])
-
+    # 0.6.3: the `if group:` guard was moved UP to wrap the summary + align
+    # + plot triplet. Pre-0.6.3 the get_mapped_woe_summary / align_bin_num
+    # calls executed unconditionally with grp_name=[None], causing
+    # data.groupby([None]) → TypeError: 'NoneType' object is not callable
+    # inside get_mapped_woe_summary. The old `if group:` guard only wrapped
+    # the plot loop, so it never got a chance to gate the crash.
+    #
+    # Symptom in 0.6.2 pipelines: equal_freq WOE plot base-call raised
+    # TypeError, the caller's try/except turned it into a logger.warning,
+    # and the subsequent `for group in cfg.woe_plot_groups` loop was
+    # skipped — so by_<group>/*.png was never emitted for equal_freq.
     if group:
+        grp_woe_res = get_mapped_woe_summary(data = data,
+                                             ref_woe_table = ref_woe_table,
+                                             tgt_name = sep,
+                                             varlist = varlist,
+                                             grp_name=[group])
+
+        grp_woe_res = align_bin_num(woe_table = ref_woe_table, grp_woe_df = grp_woe_res, grp_name = [group])
 
         for var in varlist:
             var = var.replace(woe_suffix, "")
