@@ -4,10 +4,10 @@ import numpy as np
 import warnings
 
 from .WOE_Plot_Tool import get_bivar_graph
-from .WOE_Tool import mapping_woe, woe_transform
+from .WOE_Tool import _vectorized_group_slopes, mapping_woe, woe_transform
 
 from Modeling_Tool.Core.Binning_Tool import run_binning, get_bin_range_list
-from Modeling_Tool.Core.utils import calc_woe, calc_iv
+from Modeling_Tool.Core.utils import _calc_woe_iv_values
 from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 def get_overall_woe_table(woe_master, data, varlist=None):
@@ -29,8 +29,9 @@ def get_overall_woe_table(woe_master, data, varlist=None):
         right = first_bin[-1] == ']'
 
         fill_val = woe_master.missing_ref_value
-        data_proc = data.copy()
+        data_proc = data[[var, woe_master.dep]].copy()
         data_proc[var] = data_proc[var].fillna(fill_val)
+        data_proc["_smf_good_n"] = data_proc[woe_master.dep].eq(0).astype(np.int64)
 
         # 使用训练集边界分箱
         binned, _ = run_binning(
@@ -54,14 +55,15 @@ def get_overall_woe_table(woe_master, data, varlist=None):
             N=(var, "count"),
             AVG_BAD=(dep, "mean"),
             N_BAD=(dep, "sum"),
-            N_GOOD=(dep, lambda x: (x == 0).sum())
+            N_GOOD=("_smf_good_n", "sum")
         ).reset_index()
 
         # 计算 WOE / IV / LIFT
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / stats["N_BAD"].sum()
         stats["GOOD_PCT_PER_BIN"] = stats["N_GOOD"] / stats["N_GOOD"].sum()
-        stats["WOE"] = calc_woe(stats, bad_pct="BAD_PCT_PER_BIN", good_pct="GOOD_PCT_PER_BIN")
-        stats["IV"] = calc_iv(stats, bad_pct="BAD_PCT_PER_BIN", good_pct="GOOD_PCT_PER_BIN")
+        stats["WOE"], stats["IV"] = _calc_woe_iv_values(
+            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
+        )
         stats["LIFT"] = stats["AVG_BAD"] / stats["AVG_BAD"].mean()
         stats["VAR"] = var
 
@@ -95,8 +97,9 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         right = first_bin[-1] == ']'
         fill_val = woe_master.missing_ref_value
 
-        data_proc = data.copy()
+        data_proc = data[[group, var, woe_master.dep]].copy()
         data_proc[var] = data_proc[var].fillna(fill_val)
+        data_proc["_smf_good_n"] = data_proc[woe_master.dep].eq(0).astype(np.int64)
 
         binned, _ = run_binning(
             data=data_proc,
@@ -120,7 +123,7 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
             N=(var, "count"),
             AVG_BAD=(dep, "mean"),
             N_BAD=(dep, "sum"),
-            N_GOOD=(dep, lambda x: (x == 0).sum())
+            N_GOOD=("_smf_good_n", "sum")
         ).reset_index()
 
         # 计算各分箱内 WOE（全局分母）
@@ -128,8 +131,9 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         total_good = stats["N_GOOD"].sum()
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / total_bad
         stats["GOOD_PCT_PER_BIN"] = stats["N_GOOD"] / total_good
-        stats["WOE"] = calc_woe(stats, bad_pct="BAD_PCT_PER_BIN", good_pct="GOOD_PCT_PER_BIN")
-        stats["IV"] = calc_iv(stats, bad_pct="BAD_PCT_PER_BIN", good_pct="GOOD_PCT_PER_BIN")
+        stats["WOE"], stats["IV"] = _calc_woe_iv_values(
+            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
+        )
         stats["LIFT"] = stats["AVG_BAD"] / stats["AVG_BAD"].mean()
         stats["VAR"] = var
 
@@ -147,10 +151,12 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         ).reset_index()
 
         # 计算单调性斜率（可选）
-        from Modeling_Tool.Core.Slope_Tool import calculate_slope_manual
-        slopes = stats.groupby(group).apply(lambda x: calculate_slope_manual(x, "AVG_BAD"))
+        slopes = _vectorized_group_slopes(stats, group, "AVG_BAD")
         sum_grp["SLOPE"] = sum_grp[group].map(slopes)
-        sum_grp["direction"] = sum_grp["SLOPE"].apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0)
+        slope_values = sum_grp["SLOPE"].to_numpy()
+        sum_grp["direction"] = np.select(
+            [slope_values > 0, slope_values < 0], [1, -1], default=0
+        )
         sum_grp["VAR"] = var
 
         summaries.append(sum_grp)
@@ -364,7 +370,14 @@ class WOE_Master(object):
             varlist = self.varlist
 
         woe_mapping_table = self.get_mapping_table()
-        data_woe = mapping_woe(data, varlist, woe_mapping_table, suffix=self.woe_suffix, drop_bin_info=True)
+        data_woe = mapping_woe(
+            data,
+            varlist,
+            woe_mapping_table,
+            suffix=self.woe_suffix,
+            drop_bin_info=True,
+            missing_ref_value=self.missing_ref_value,
+        )
         return data_woe
 
     def update_woe(self, varlist, nbins=10, equal_freq=True, tree_binning_seed=None, chi2_config=None,

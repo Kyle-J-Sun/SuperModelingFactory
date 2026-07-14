@@ -1688,6 +1688,19 @@ def parse_sql_file(sql_path:str=None,
 
 
 
+def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
+    """Calculate WOE and IV together with one vectorized logarithm."""
+    if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
+        bad_values = data[bad_pct]
+        good_values = data[good_pct]
+        woe = np.log(bad_values / good_values)
+        iv = (bad_values - good_values) * woe
+    else:
+        woe = 0 if fillwoe else np.nan
+        iv = 0 if filliv else np.nan
+    return woe, iv
+
+
 def calc_woe(data, bad_pct, good_pct, fillwoe=True):
     """
     计算WOE（Weight of Evidence）值。
@@ -1716,15 +1729,7 @@ def calc_woe(data, bad_pct, good_pct, fillwoe=True):
     >>> calc_woe(df, 'bad_pct', 'good_pct')
     """
     
-    if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
-        woe = np.log(data[bad_pct] / data[good_pct])
-    else:
-        if fillwoe:
-            woe = 0
-        else:
-            woe = np.nan
-
-    return woe
+    return _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=fillwoe)[0]
 
 
 def calc_iv(data, bad_pct, good_pct, filliv=True):
@@ -1755,15 +1760,7 @@ def calc_iv(data, bad_pct, good_pct, filliv=True):
     >>> calc_iv(df, 'bad_pct', 'good_pct')
     """
     
-    if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
-        iv = (data[bad_pct] - data[good_pct]) * np.log(data[bad_pct] / data[good_pct])
-    else:
-        if filliv:
-            iv = 0
-        else:
-            iv = np.nan
-
-    return iv
+    return _calc_woe_iv_values(data, bad_pct, good_pct, filliv=filliv)[1]
 
 
 def save_model(model, filename):
@@ -2413,9 +2410,13 @@ class WOEIVCalculator:
         -------
         tuple
         """
-        woe = self.calc_woe(fillna)
-        iv = self.calc_iv(fillna)
-        return woe, iv
+        return _calc_woe_iv_values(
+            self.data,
+            self.bad_pct_col,
+            self.good_pct_col,
+            fillwoe=fillna,
+            filliv=fillna,
+        )
 
 
 def get_feature_names(model, model_type=None):

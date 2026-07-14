@@ -706,6 +706,46 @@ def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', righ
     return res
 
 
+def _materialize_bin_columns(data, binned, bin_range_list, bin_num_col, bin_range_col):
+    """Attach categorical bin numbers and labels without Python row callbacks."""
+    codes = binned.cat.codes.to_numpy(dtype=np.intp, copy=False)
+    range_values = np.empty(len(codes), dtype=object)
+    range_values[:] = np.nan
+    valid = codes >= 0
+    if valid.any():
+        labels = np.asarray(bin_range_list, dtype=object)
+        if codes[valid].max() >= len(labels):
+            raise ValueError("Binning category codes do not match bin range labels")
+        range_values[valid] = np.take(labels, codes[valid])
+
+    data[bin_num_col] = binned.astype(object)
+    data[bin_range_col] = range_values
+    return data
+
+
+def _parse_bin_range_bounds(data, col="_bin_range"):
+    """Parse interval labels into numeric left and right bounds vectorially."""
+    if col not in data.columns:
+        raise KeyError(f"Column {col!r} is not present in the bin mapping table")
+
+    ranges = data[col].astype("string").str.strip()
+    bounds = ranges.str.extract(
+        r"^[\[\(]\s*([^,]+?)\s*,\s*([^\]\)]+?)\s*[\]\)]$",
+        expand=True,
+    )
+    invalid = bounds.isna().any(axis=1)
+    if invalid.any():
+        examples = ranges.loc[invalid].dropna().head(3).tolist()
+        raise ValueError(f"Unable to parse bin range labels in {col!r}: {examples}")
+
+    try:
+        left = bounds.iloc[:, 0].str.strip().astype(float).to_numpy()
+        right = bounds.iloc[:, 1].str.strip().astype(float).to_numpy()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Bin range column {col!r} contains non-numeric bounds") from exc
+    return left, right
+
+
 def get_bin_range_list(data, col = "_bin_range"):
     """
     将分箱区间字符串列转换为边界值列表。
@@ -730,21 +770,8 @@ def get_bin_range_list(data, col = "_bin_range"):
     >>> unique_range = get_bin_range_list(data, col="bin_range")
     """
     
-    data["bin_value_list"] = data[col].apply(lambda x: x.replace("[", "")\
-                                                                  .replace("]", "")\
-                                                                  .replace("(", "")\
-                                                                  .replace(")", "")\
-                                                      .split(","))
-    bin_range = [np.inf if v.strip() == 'inf' else -np.inf if v.strip() == '-inf' else float(v.strip()) for x in data["bin_value_list"].tolist() for v in x]
-
-    unique_range = []
-    for x in bin_range:
-        if x not in unique_range:
-            unique_range.append(x)
-
-    unique_range.sort()
-        
-    return unique_range
+    left, right = _parse_bin_range_bounds(data, col=col)
+    return np.unique(np.concatenate([left, right])).tolist()
 
 
 def chi2_auto_binning(df_pvt, max_bins, min_cnt_in_bin, p=0.95):
@@ -1165,9 +1192,8 @@ class Binning:
         bin_num_col = self.bin_colnames[0]
         bin_range_col = self.bin_colnames[1]
         
-        self.data[bin_num_col] = binned.astype(object)
-        self.data[bin_range_col] = self.data[bin_num_col].apply(
-            lambda x: bin_range_list[int(x)] if self.include_missing else bin_range_list[int(x - 1)]
+        self.data = _materialize_bin_columns(
+            self.data, binned, bin_range_list, bin_num_col, bin_range_col
         )
         
         self.result = self.data
@@ -1237,9 +1263,8 @@ class Binning:
         bin_num_col = self.bin_colnames[0]
         bin_range_col = self.bin_colnames[1]
         
-        self.data[bin_num_col] = binned.astype(object)
-        self.data[bin_range_col] = self.data[bin_num_col].apply(
-            lambda x: bin_range_list[int(x)] if self.include_missing else bin_range_list[int(x - 1)]
+        self.data = _materialize_bin_columns(
+            self.data, binned, bin_range_list, bin_num_col, bin_range_col
         )
         
         self.bin_edges = sorted([np.inf if str(x).lower() == 'inf' else -np.inf if str(x).lower() == '-inf' else x for x in bin_edges])
@@ -1385,10 +1410,9 @@ def chi2_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, t
     binned = binning_series
     rename_catlist = [i for i in range(1, len(bin_range_list) + 1)] if not include_missing else [i for i in range(0, len(bin_range_list))]
     binned = binned.cat.rename_categories(rename_catlist)
-    data[bin_num_col] = binned.astype(object)
-#     print(bin_range_list)
-#     print(data[bin_num_col])
-    data[bin_range_col] = data[bin_num_col].apply(lambda x: bin_range_list[int(x)] if include_missing else bin_range_list[int(x - 1)])
+    data = _materialize_bin_columns(
+        data, binned, bin_range_list, bin_num_col, bin_range_col
+    )
     
     fnl_res = data
     
@@ -1399,7 +1423,7 @@ def chi2_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, t
 
 def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, include_missing = True, equal_freq = True, 
                 bin_colnames = ("bin_num", "bin_range"), ascending = False, right = True, include_lowest = False, 
-                tree_binning = False, target = None, random_state=42, spec_values = []):
+                tree_binning = False, target = None, random_state=42, spec_values = [], fillna = -999999):
     """
     通用分箱函数，支持等频或等距分箱。
     
@@ -1437,6 +1461,8 @@ def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, in
         随机种子
     spec_values : list, default []
         特殊值列表
+    fillna : scalar, default -999999
+        `include_missing=True` 时用于承载缺失值的分箱哨兵。
     
     Returns
     -------
@@ -1481,7 +1507,8 @@ def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, in
                                       ascending = ascending,
                                       include_missing = include_missing,
                                       random_state = random_state,
-                                      spec_values = spec_values)
+                                      spec_values = spec_values,
+                                      fillna = fillna)
     
     left_sign='[' if include_lowest else '('
     right_sign=']' if right else ')'
@@ -1489,8 +1516,9 @@ def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, in
     
     rename_catlist = [i for i in range(1, len(bin_range_list) + 1)] if not include_missing else [i for i in range(0, len(bin_range_list))]
     binned = binned.cat.rename_categories(rename_catlist)
-    data[bin_num_col] = binned.astype(object)
-    data[bin_range_col] = data[bin_num_col].apply(lambda x: bin_range_list[int(x)] if include_missing else bin_range_list[int(x - 1)])
+    data = _materialize_bin_columns(
+        data, binned, bin_range_list, bin_num_col, bin_range_col
+    )
         
     return data, bin_edges
 
