@@ -57,13 +57,7 @@ class kSeries(Series):
         """
         Scale the model scores (for internt segment of MCI model)
         """
-        data = self.copy()
-        def app_func(x):
-            scores = x * 1.112
-            if (scores > 0.9999999):
-                return 0.9999999
-            return scores
-        return data.apply(app_func)
+        return (self * 1.112).clip(upper=0.9999999)
     
     def proc_freq(self) -> pd.DataFrame:
         """
@@ -128,8 +122,12 @@ class kDataFrame(DataFrame):
             data = self
         else:
             data = self.copy()
-        import re
-        data[vintage_colname] = data[by].apply(lambda x: re.search("\d{4}-\d{2}", x).group().replace('-', ''))
+        data[vintage_colname] = (
+            data[by]
+            .astype("string")
+            .str.extract(r"(\d{4}-\d{2})", expand=False)
+            .str.replace("-", "", regex=False)
+        )
         if inplace:
             self = data
         return data
@@ -165,13 +163,7 @@ class kDataFrame(DataFrame):
         """
         Scale the model scores (for internt segment of MCI model)
         """
-        data = self.copy()
-        def app_func(x):
-            scores = x * 1.112
-            if (scores > 0.9999999):
-                return 0.9999999
-            return scores
-        return data[pb_score].apply(app_func)
+        return (self[pb_score] * 1.112).clip(upper=0.9999999)
     
     def proc_freq(self, var: str):
         """

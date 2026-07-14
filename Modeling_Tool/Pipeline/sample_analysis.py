@@ -208,16 +208,19 @@ class SampleAnalysisPipeline:
         cfg = self.config
         rows = []
         for target in cfg.target_cols:
-            mature = data[data[target].notna()].copy()
+            mature = data[data[target].notna()]
             time_values = sorted(mature[cfg.oot_time_dim].dropna().unique())
             if not time_values:
                 continue
             for oot_window in cfg.oot_windows:
                 oot_values = set(time_values[-int(oot_window):])
-                oot = mature[mature[cfg.oot_time_dim].isin(oot_values)].copy()
-                ins_oos_pool = mature[~mature[cfg.oot_time_dim].isin(oot_values)].copy()
-                if len(oot) == 0 or len(ins_oos_pool) == 0:
+                oot_mask = mature[cfg.oot_time_dim].isin(oot_values)
+                oot_index = mature.index[oot_mask]
+                pool_index = mature.index[~oot_mask]
+                if len(oot_index) == 0 or len(pool_index) == 0:
                     continue
+                pool_target = mature.loc[pool_index, target]
+                br_oot = mature.loc[oot_index, target].mean()
 
                 for ins_ratio in cfg.ins_oos_ratios:
                     for seed in list(cfg.random_seeds):
@@ -227,18 +230,23 @@ class SampleAnalysisPipeline:
                             stratify=True,
                         )
                         try:
-                            ins, oos = splitter.split_df(ins_oos_pool, target=target)
+                            ins_index, oos_index = splitter.split_indices(
+                                pool_index,
+                                pool_target,
+                            )
                         except ValueError:
                             splitter = SampleSplitter(
                                 test_size=1 - float(ins_ratio),
                                 random_state=int(seed),
                                 stratify=False,
                             )
-                            ins, oos = splitter.split_df(ins_oos_pool, target=target)
+                            ins_index, oos_index = splitter.split_indices(
+                                pool_index,
+                                pool_target,
+                            )
 
-                        br_ins = ins[target].mean()
-                        br_oos = oos[target].mean()
-                        br_oot = oot[target].mean()
+                        br_ins = mature.loc[ins_index, target].mean()
+                        br_oos = mature.loc[oos_index, target].mean()
                         rows.append(
                             {
                                 "target_col": target,
@@ -250,9 +258,9 @@ class SampleAnalysisPipeline:
                                 "ins_ratio": float(ins_ratio),
                                 "oos_ratio": 1 - float(ins_ratio),
                                 "seed": int(seed),
-                                "n_ins": len(ins),
-                                "n_oos": len(oos),
-                                "n_oot": len(oot),
+                                "n_ins": len(ins_index),
+                                "n_oos": len(oos_index),
+                                "n_oot": len(oot_index),
                                 "bad_rate_ins": br_ins,
                                 "bad_rate_oos": br_oos,
                                 "bad_rate_oot": br_oot,
@@ -263,7 +271,7 @@ class SampleAnalysisPipeline:
                                     abs(br_ins - br_oot),
                                     abs(br_oos - br_oot),
                                 ),
-                                "oot_sample_pct": len(oot) / len(mature) if len(mature) else np.nan,
+                                "oot_sample_pct": len(oot_index) / len(mature) if len(mature) else np.nan,
                             }
                         )
         return pd.DataFrame(rows)
@@ -313,57 +321,20 @@ class SampleAnalysisPipeline:
                 }
             ]
 
-        try:
-            from Modeling_Tool import EvaluationPipeline
-
-            class _EvalDataHolder:
-                def __init__(self, frame: pd.DataFrame):
-                    self.data = frame
-
-            def _bad_rate_eval(current_data: pd.DataFrame) -> pd.DataFrame:
-                return pd.DataFrame(
-                    {
-                        "n": [len(current_data)],
-                        "bad_rate": [current_data[target].mean()],
-                    }
-                )
-
-            pipeline = EvaluationPipeline(_EvalDataHolder(data))
-            for col in group_cols:
-                pipeline = pipeline.group_by(col, min_size=1, group_var_name=col)
-            grouped_summary = pipeline.apply(_bad_rate_eval)
-            if isinstance(grouped_summary, pd.DataFrame) and not grouped_summary.empty:
-                rows = []
-                for _, row in grouped_summary.iterrows():
-                    rows.append(
-                        {
-                            "target_col": target,
-                            "group_type": group_type,
-                            "group_cols": " x ".join(group_cols),
-                            "group_value": " x ".join(str(row[col]) for col in group_cols),
-                            "n": int(row["n"]),
-                            "bad_rate": float(row["bad_rate"]),
-                        }
-                    )
-                return rows
-        except Exception:
-            pass
-
-        rows = []
-        for key, sub in data.groupby(group_cols, dropna=False):
-            if not isinstance(key, tuple):
-                key = (key,)
-            rows.append(
-                {
-                    "target_col": target,
-                    "group_type": group_type,
-                    "group_cols": " x ".join(group_cols),
-                    "group_value": " x ".join(str(x) for x in key),
-                    "n": len(sub),
-                    "bad_rate": sub[target].mean(),
-                }
-            )
-        return rows
+        summary = data.groupby(group_cols, dropna=False, sort=True).agg(
+            n=(target, "size"),
+            bad_rate=(target, "mean"),
+        ).reset_index()
+        group_value = summary[group_cols[0]].astype(str)
+        for col in group_cols[1:]:
+            group_value = group_value.str.cat(summary[col].astype(str), sep=" x ")
+        summary["target_col"] = target
+        summary["group_type"] = group_type
+        summary["group_cols"] = " x ".join(group_cols)
+        summary["group_value"] = group_value
+        return summary[
+            ["target_col", "group_type", "group_cols", "group_value", "n", "bad_rate"]
+        ].to_dict("records")
 
     def _summarize_profile(
         self,
@@ -372,45 +343,97 @@ class SampleAnalysisPipeline:
         group_cols: list[str],
         group_type: str,
     ) -> list[dict[str, Any]]:
-        rows = []
-        if not group_cols:
-            groups = [(("ALL",), data)]
-            group_cols_label = "global"
-        else:
-            groups = data.groupby(group_cols, dropna=False)
-            group_cols_label = " x ".join(group_cols)
+        profile_cols = [col for col in self.config.profile_cols if col in data.columns]
+        work_cols = list(dict.fromkeys(group_cols + [target] + profile_cols))
+        work = data[work_cols].copy()
+        internal_group_cols = list(group_cols)
+        if not internal_group_cols:
+            global_col = "_smf_profile_global"
+            work[global_col] = "ALL"
+            internal_group_cols = [global_col]
 
-        for key, sub in groups:
-            if not isinstance(key, tuple):
-                key = (key,)
-            row = {
-                "target_col": target,
-                "group_type": group_type,
-                "group_cols": group_cols_label,
-                "group_value": " x ".join(str(x) for x in key),
-                "n": len(sub),
-                "bad_rate": sub[target].mean(),
-            }
-            for col in self.config.profile_cols:
-                series = sub[col]
-                row[f"{col}_missing_rate"] = float(series.isna().mean()) if len(series) else np.nan
-                if pd.api.types.is_numeric_dtype(series):
-                    row[f"{col}_mean"] = series.mean()
-                    row[f"{col}_median"] = series.median()
-                    continue
-
-                non_missing = series.dropna()
-                modes = non_missing.mode(dropna=True)
-                top_value = modes.iloc[0] if len(modes) else None
-                top_count = int(non_missing.eq(top_value).sum()) if top_value is not None else 0
-                row[f"{col}_nunique"] = int(non_missing.nunique(dropna=True))
-                row[f"{col}_top"] = top_value
-                row[f"{col}_top_count"] = top_count
-                row[f"{col}_top_rate"] = (
-                    float(top_count) / float(len(non_missing)) if len(non_missing) else np.nan
+        named_aggs: dict[str, tuple[str, str]] = {
+            "n": (target, "size"),
+            "bad_rate": (target, "mean"),
+        }
+        categorical_cols = []
+        desired_profile_cols = []
+        for idx, col in enumerate(profile_cols):
+            missing_col = f"_smf_profile_missing_{idx}"
+            work[missing_col] = work[col].isna().astype(float)
+            named_aggs[f"{col}_missing_rate"] = (missing_col, "mean")
+            desired_profile_cols.append(f"{col}_missing_rate")
+            if pd.api.types.is_numeric_dtype(work[col]):
+                named_aggs[f"{col}_mean"] = (col, "mean")
+                named_aggs[f"{col}_median"] = (col, "median")
+                desired_profile_cols.extend([f"{col}_mean", f"{col}_median"])
+            else:
+                categorical_cols.append(col)
+                named_aggs[f"{col}_nunique"] = (col, "nunique")
+                named_aggs[f"{col}_non_missing"] = (col, "count")
+                desired_profile_cols.extend(
+                    [f"{col}_nunique", f"{col}_top", f"{col}_top_count", f"{col}_top_rate"]
                 )
-            rows.append(row)
-        return rows
+
+        summary = (
+            work.groupby(internal_group_cols, dropna=False, sort=True)
+            .agg(**named_aggs)
+            .reset_index()
+        )
+        for col in categorical_cols:
+            if col in internal_group_cols:
+                non_missing = summary[f"{col}_non_missing"].to_numpy(dtype=float)
+                summary[f"{col}_top"] = summary[col].where(non_missing > 0, None)
+                summary[f"{col}_top_count"] = non_missing.astype(int)
+            else:
+                counts = (
+                    work.dropna(subset=[col])
+                    .groupby(internal_group_cols + [col], dropna=False, sort=True)
+                    .size()
+                    .rename(f"{col}_top_count")
+                    .reset_index()
+                )
+                if counts.empty:
+                    summary[f"{col}_top"] = None
+                    summary[f"{col}_top_count"] = 0
+                else:
+                    counts["_smf_value_sort"] = counts[col].astype(str)
+                    counts = counts.sort_values(
+                        internal_group_cols + [f"{col}_top_count", "_smf_value_sort"],
+                        ascending=[True] * len(internal_group_cols) + [False, True],
+                        kind="mergesort",
+                    ).drop_duplicates(internal_group_cols, keep="first")
+                    top = counts[
+                        internal_group_cols + [col, f"{col}_top_count"]
+                    ].rename(columns={col: f"{col}_top"})
+                    summary = summary.merge(top, on=internal_group_cols, how="left", sort=False)
+                    summary[f"{col}_top_count"] = summary[f"{col}_top_count"].fillna(0).astype(int)
+            denominator = summary[f"{col}_non_missing"].to_numpy(dtype=float)
+            summary[f"{col}_top_rate"] = np.divide(
+                summary[f"{col}_top_count"].to_numpy(dtype=float),
+                denominator,
+                out=np.full(len(summary), np.nan),
+                where=denominator > 0,
+            )
+            summary = summary.drop(columns=f"{col}_non_missing")
+
+        if group_cols:
+            group_value = summary[group_cols[0]].astype(str)
+            for col in group_cols[1:]:
+                group_value = group_value.str.cat(summary[col].astype(str), sep=" x ")
+            group_cols_label = " x ".join(group_cols)
+        else:
+            group_value = pd.Series("ALL", index=summary.index)
+            group_cols_label = "global"
+        summary["target_col"] = target
+        summary["group_type"] = group_type
+        summary["group_cols"] = group_cols_label
+        summary["group_value"] = group_value
+        output_cols = [
+            "target_col", "group_type", "group_cols", "group_value", "n", "bad_rate",
+            *desired_profile_cols,
+        ]
+        return summary.reindex(columns=output_cols).to_dict("records")
 
     def _write_outputs(self, tables: dict[str, pd.DataFrame]) -> dict[str, str]:
         cfg = self.config

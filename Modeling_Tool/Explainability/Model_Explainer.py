@@ -185,6 +185,20 @@ class ModelExplainer:
             return proba[:, -1] if proba.ndim == 2 else proba
         return np.asarray(estimator.predict(frame)).ravel()
 
+    def _predict_proba_pos_batched(self, X, prediction_batch_size=100000):
+        """Predict in bounded row batches while preserving input order."""
+        frame = self._as_frame(X)
+        if prediction_batch_size is None:
+            return np.asarray(self._predict_proba_pos(frame)).ravel()
+        batch_size = int(prediction_batch_size)
+        if batch_size <= 0:
+            raise ValueError("prediction_batch_size must be a positive integer or None")
+        outputs = [
+            np.asarray(self._predict_proba_pos(frame.iloc[start : start + batch_size])).ravel()
+            for start in range(0, len(frame), batch_size)
+        ]
+        return np.concatenate(outputs) if outputs else np.asarray([], dtype=float)
+
     def _predict_log_odds(self, X, eps=1e-6):
         """Log-odds prediction callable for reason-code style explanations."""
         p = np.asarray(self._predict_proba_pos(X)).ravel()
@@ -721,23 +735,48 @@ class ModelExplainer:
     # ------------------------------------------------------------------ #
     # PDP / ICE
     # ------------------------------------------------------------------ #
-    def partial_dependence(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None):
+    def partial_dependence(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, prediction_batch_size=100000):
         """Compute one-way partial dependence for a numeric feature."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
+        if len(frame) == 0:
+            raise ValueError("partial_dependence requires at least one input row")
+        batch_size = (
+            len(frame) * max(len(grid), 1)
+            if prediction_batch_size is None
+            else int(prediction_batch_size)
+        )
+        if batch_size <= 0:
+            raise ValueError("prediction_batch_size must be a positive integer or None")
+        grids_per_batch = max(1, batch_size // len(frame))
         averages = []
-        for value in grid:
-            tmp = frame.copy()
-            tmp[feature] = value
-            averages.append(float(np.mean(self._predict_proba_pos(tmp))))
+        for start in range(0, len(grid), grids_per_batch):
+            grid_block = grid[start : start + grids_per_batch]
+            stacked = pd.concat(
+                [frame.assign(**{feature: value}) for value in grid_block],
+                ignore_index=True,
+            )
+            predictions = self._predict_proba_pos_batched(
+                stacked,
+                prediction_batch_size=prediction_batch_size,
+            ).reshape(len(grid_block), len(frame))
+            averages.extend(predictions.mean(axis=1).astype(float).tolist())
         return pd.DataFrame({"feature": feature, "grid_value": grid, "average_prediction": averages})
 
-    def pdp_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, show=True, save_path=None):
+    def pdp_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, show=True, save_path=None, prediction_batch_size=100000):
         """Plot one-way partial dependence for a numeric feature."""
         import matplotlib.pyplot as plt
 
-        df = self.partial_dependence(X, feature, grid_resolution, percentiles, sample_size, random_state)
+        df = self.partial_dependence(
+            X,
+            feature,
+            grid_resolution,
+            percentiles,
+            sample_size,
+            random_state,
+            prediction_batch_size,
+        )
         fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
         ax.plot(df["grid_value"], df["average_prediction"], color="#336699", linewidth=2)
         ax.set_xlabel(str(df["feature"].iloc[0]))
@@ -746,29 +785,48 @@ class ModelExplainer:
         ax.grid(alpha=0.25)
         return self._finalize_plot(plt, show, save_path)
 
-    def ice(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=200, random_state=None, centered=False):
+    def ice(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=200, random_state=None, centered=False, prediction_batch_size=100000):
         """Compute individual conditional expectation curves."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
-        records = []
-        for value in grid:
-            tmp = frame.copy()
-            tmp[feature] = value
-            preds = np.asarray(self._predict_proba_pos(tmp)).ravel()
-            records.append(pd.DataFrame({"sample_index": frame.index, "grid_value": value, "prediction": preds}))
-        out = pd.concat(records, ignore_index=True)
-        out.insert(0, "feature", feature)
+        stacked = pd.concat(
+            [frame.assign(**{feature: value}) for value in grid],
+            ignore_index=True,
+        )
+        predictions = self._predict_proba_pos_batched(
+            stacked,
+            prediction_batch_size=prediction_batch_size,
+        )
+        out = pd.DataFrame(
+            {
+                "feature": feature,
+                "sample_index": np.tile(frame.index.to_numpy(), len(grid)),
+                "grid_value": np.repeat(grid, len(frame)),
+                "prediction": predictions,
+            }
+        )
         if centered:
-            base = out.groupby("sample_index")["prediction"].transform("first")
-            out["prediction"] = out["prediction"] - base
+            prediction_matrix = predictions.reshape(len(grid), len(frame))
+            out["prediction"] = (
+                prediction_matrix - prediction_matrix[0:1, :]
+            ).reshape(-1)
         return out
 
-    def ice_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=100, random_state=None, centered=False, show=True, save_path=None):
+    def ice_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=100, random_state=None, centered=False, show=True, save_path=None, prediction_batch_size=100000):
         """Plot ICE curves for a numeric feature."""
         import matplotlib.pyplot as plt
 
-        df = self.ice(X, feature, grid_resolution, percentiles, sample_size, random_state, centered)
+        df = self.ice(
+            X,
+            feature,
+            grid_resolution,
+            percentiles,
+            sample_size,
+            random_state,
+            centered,
+            prediction_batch_size,
+        )
         fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
         for _, group in df.groupby("sample_index"):
             ax.plot(group["grid_value"], group["prediction"], color="#336699", alpha=0.18, linewidth=0.8)
@@ -784,7 +842,7 @@ class ModelExplainer:
     # ------------------------------------------------------------------ #
     # ALE
     # ------------------------------------------------------------------ #
-    def ale(self, X, feature, bins=20, sample_size=None, random_state=None):
+    def ale(self, X, feature, bins=20, sample_size=None, random_state=None, prediction_batch_size=100000):
         """Compute first-order accumulated local effects for a numeric feature."""
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
@@ -805,9 +863,11 @@ class ModelExplainer:
         bin_ids = np.searchsorted(edges, values.to_numpy(), side="right") - 1
         bin_ids = np.clip(bin_ids, 0, len(edges) - 2)
 
-        effects = []
+        effects = np.zeros(len(edges) - 1, dtype=float)
         counts = []
         centers = []
+        prediction_frames = []
+        prediction_segments = []
         for idx in range(len(edges) - 1):
             mask = bin_ids == idx
             subset = work.loc[mask].copy()
@@ -815,13 +875,26 @@ class ModelExplainer:
             left, right = float(edges[idx]), float(edges[idx + 1])
             centers.append((left + right) / 2.0)
             if subset.empty:
-                effects.append(0.0)
                 continue
             low = subset.copy()
             high = subset.copy()
             low[feature] = left
             high[feature] = right
-            effects.append(float(np.mean(self._predict_proba_pos(high) - self._predict_proba_pos(low))))
+            prediction_segments.append((idx, len(subset)))
+            prediction_frames.extend([low, high])
+
+        if prediction_frames:
+            stacked = pd.concat(prediction_frames, ignore_index=True)
+            predictions = self._predict_proba_pos_batched(
+                stacked,
+                prediction_batch_size=prediction_batch_size,
+            )
+            offset = 0
+            for idx, count in prediction_segments:
+                low_pred = predictions[offset : offset + count]
+                high_pred = predictions[offset + count : offset + 2 * count]
+                effects[idx] = float(np.mean(high_pred - low_pred))
+                offset += 2 * count
 
         ale_values = np.cumsum(effects)
         counts_arr = np.asarray(counts, dtype=float)
@@ -832,11 +905,18 @@ class ModelExplainer:
 
         return pd.DataFrame({"feature": feature, "bin_left": edges[:-1], "bin_right": edges[1:], "bin_center": centers, "ale_value": ale_values, "n": counts})
 
-    def ale_plot(self, X, feature, bins=20, sample_size=None, random_state=None, show=True, save_path=None):
+    def ale_plot(self, X, feature, bins=20, sample_size=None, random_state=None, show=True, save_path=None, prediction_batch_size=100000):
         """Plot first-order ALE for a numeric feature."""
         import matplotlib.pyplot as plt
 
-        df = self.ale(X, feature, bins=bins, sample_size=sample_size, random_state=random_state)
+        df = self.ale(
+            X,
+            feature,
+            bins=bins,
+            sample_size=sample_size,
+            random_state=random_state,
+            prediction_batch_size=prediction_batch_size,
+        )
         fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
         ax.plot(df["bin_center"], df["ale_value"], color="#336699", marker="o", linewidth=2)
         ax.axhline(0, color="#999999", linewidth=1, linestyle="--")

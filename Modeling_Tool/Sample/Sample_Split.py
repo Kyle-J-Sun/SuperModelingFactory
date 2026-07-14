@@ -167,6 +167,35 @@ class SampleSplitter:
             random_state=self.random_state,
             stratify=stratify_param
         )
+
+    def split_indices(
+        self,
+        index: Union[pd.Index, np.ndarray, List[Any]],
+        y: Union[pd.Series, np.ndarray],
+        test_size: Optional[float] = None,
+        stratify: Optional[bool] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Split index labels without copying the underlying feature frame."""
+        resolved_test_size = test_size if test_size is not None else self.test_size
+        resolved_stratify = self.stratify if stratify is None else bool(stratify)
+        index_values = np.asarray(index)
+        y_values = np.asarray(y)
+        if len(index_values) != len(y_values):
+            raise ValueError("index and y must have the same length")
+        stratify_values = (
+            y_values
+            if resolved_stratify and len(pd.unique(y_values)) > 1
+            else None
+        )
+        train_idx, test_idx = train_test_split(
+            index_values,
+            test_size=resolved_test_size,
+            random_state=self.random_state,
+            stratify=stratify_values,
+        )
+        self.train_index_ = np.asarray(train_idx)
+        self.test_index_ = np.asarray(test_idx)
+        return self.train_index_, self.test_index_
     
     def split_df(self, df: pd.DataFrame, target: str,
                 exclude_cols: Optional[List[str]] = None,
@@ -221,11 +250,11 @@ class SampleSplitter:
         # Split on the index so that we can reindex the full frame afterwards.
         # This preserves every column (features, target, and exclude_cols)
         # on both output frames.
-        train_idx, test_idx = train_test_split(
+        train_idx, test_idx = self.split_indices(
             df.index,
+            strat if strat is not None else y,
             test_size=test_size,
-            random_state=self.random_state,
-            stratify=strat
+            stratify=self.stratify,
         )
 
         train_df = df.loc[train_idx].copy()

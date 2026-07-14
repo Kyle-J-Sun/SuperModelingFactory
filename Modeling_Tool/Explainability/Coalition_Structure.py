@@ -8,6 +8,7 @@ accepted by ``shap.maskers.Partition``.
 """
 from __future__ import annotations
 
+from collections import Counter
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -248,7 +249,7 @@ def validate_groups(groups: Mapping[str, Sequence[str]], features: Sequence[str]
     feature_set = set(features)
     missing = feature_set - set(all_assigned)
     unknown = set(all_assigned) - feature_set
-    duplicated = {feat for feat in all_assigned if all_assigned.count(feat) > 1}
+    duplicated = {feat for feat, count in Counter(all_assigned).items() if count > 1}
     ok = not missing and not duplicated and not unknown
     if not ok and raise_error:
         parts = []
@@ -316,10 +317,9 @@ def groups_to_shap_clustering(
 
     for feats in groups.values():
         idxs = [feat_idx[feat] for feat in feats if feat in feat_idx]
-        for i in idxs:
-            for j in idxs:
-                if i != j:
-                    dist_mat[i, j] = float(intra_dist)
+        if idxs:
+            dist_mat[np.ix_(idxs, idxs)] = float(intra_dist)
+            dist_mat[idxs, idxs] = 0.0
 
     condensed = squareform(dist_mat, checks=False)
     return linkage(condensed, method="complete")

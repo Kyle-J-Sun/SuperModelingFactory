@@ -413,45 +413,67 @@ class WOETransformer:
         >>> transformer = WOETransformer(nbins=10)
         >>> result = transformer.transform(df, ['var1', 'var2'], 'target')
         """
-        fnl_res = {}
-        for i, var in enumerate(varlist):
+        train_base = train_df.copy()
+        oot_base = oot_df.copy() if oot_df is not None else None
+        train_outputs = []
+        oot_outputs = []
+        table_outputs = []
+
+        for var in varlist:
             woe_res = self.transform_single(
-                train_df=train_df,
+                train_df=train_base,
                 var=var,
                 dep=dep,
-                oot_df=oot_df,
-                check_monotonicity_flag=check_monotonicity_flag
+                oot_df=oot_base,
+                check_monotonicity_flag=check_monotonicity_flag,
             )
-
-            train_df = woe_res[0]
-            if oot_df is not None:
-                oot_df = woe_res[1]
-
-            if i == 0:
-                train_woe_table = woe_res[-1]
-                train_woe_table["VAR"] = var
-                train_woe_table = train_woe_table.rename(columns={
-                    f"_bin_num_{var}": "BIN_NUM",
-                    f"_bin_range_{var}": "BIN_RANGE"
-                })
+            if self.ret_woe_table:
+                if oot_base is None:
+                    train_part, table_part = woe_res
+                    oot_part = None
+                else:
+                    train_part, oot_part, table_part = woe_res
+                table_part = table_part.copy()
+                table_part["VAR"] = var
+                table_outputs.append(
+                    table_part.rename(
+                        columns={
+                            f"_bin_num_{var}": "BIN_NUM",
+                            f"_bin_range_{var}": "BIN_RANGE",
+                        }
+                    )
+                )
+            elif oot_base is None:
+                train_part = woe_res
+                oot_part = None
             else:
-                train_woe_table_append = woe_res[-1]
-                train_woe_table_append["VAR"] = var
-                train_woe_table_append = train_woe_table_append.rename(columns={
-                    f"_bin_num_{var}": "BIN_NUM",
-                    f"_bin_range_{var}": "BIN_RANGE"
-                })
+                train_part, oot_part = woe_res
 
-            if i > 0:
-                train_woe_table = pd.concat([train_woe_table, train_woe_table_append])
+            train_cols = [f"{var}_woe"]
+            if not self.drop_bin_info:
+                train_cols = [f"_bin_num_{var}", f"_bin_range_{var}", *train_cols]
+            train_outputs.append(train_part[train_cols])
+            if oot_part is not None:
+                oot_outputs.append(oot_part[[f"{var}_woe"]])
 
-        fnl_res["TRAIN"] = train_df
-        if oot_df is not None:
-            fnl_res["OOT"] = oot_df
+        def _combine(base, outputs):
+            if not outputs:
+                return base.copy()
+            output_frame = pd.concat(outputs, axis=1)
+            clean_base = base.drop(columns=list(output_frame.columns), errors="ignore")
+            return pd.concat([clean_base, output_frame], axis=1)
+
+        fnl_res = {"TRAIN": _combine(train_base, train_outputs)}
+        if oot_base is not None:
+            fnl_res["OOT"] = _combine(oot_base, oot_outputs)
 
         if self.ret_woe_table:
+            train_woe_table = (
+                pd.concat(table_outputs, ignore_index=True)
+                if table_outputs
+                else pd.DataFrame()
+            )
             return fnl_res, train_woe_table
-
         return fnl_res
 
 
@@ -617,10 +639,35 @@ class WOEMappingTransformer:
         >>> transformer = WOEMappingTransformer(woe_mapping_table)
         >>> result = transformer.transform(df, ['var1', 'var2'])
         """
-        res = data.copy()
-        for var in varlist:
-            res = self.transform_single(res, var)
-        return res
+        output_names = [var if self.rename_orig_var else var + self.suffix for var in varlist]
+        outputs = {}
+        for var, output_name in zip(varlist, output_names):
+            values = convert_single_var_woe(
+                data,
+                var,
+                self.woe_mapping_table,
+                self.missing_ref,
+                self.ret_bin_no,
+            )
+            if not self.ret_category:
+                values = values.astype(float)
+            outputs[output_name] = np.asarray(values)
+
+        output_frame = pd.DataFrame(outputs, index=data.index)
+        if self.rename_orig_var:
+            rename_map = {var: var + self.suffix for var in varlist}
+            base = data.rename(columns=rename_map).copy()
+        else:
+            base = data.copy()
+
+        base = base.drop(columns=[col for col in output_names if col in base.columns])
+        result = pd.concat([base, output_frame], axis=1)
+        if not self.rename_orig_var:
+            final_order = list(data.columns) + [col for col in output_names if col not in data.columns]
+            result = result.reindex(columns=final_order)
+        elif not self.suffix:
+            result = result.reindex(columns=list(data.columns))
+        return result
 
 
 def woe_transform_cdaml(data, varlist, woe_mapping_path, missing_ref=None,

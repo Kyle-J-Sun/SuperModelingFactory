@@ -342,8 +342,12 @@ def convert_to_vintage(data, vintage_colname = 'VINTAGE', by = 'TRAN_TMS', retur
     >>> df = pd.DataFrame({'TRAN_TMS': ['2025-03-15 10:00:00', '2025-03-20 11:00:00']})
     >>> convert_to_vintage(df)
     """
-    import re
-    data[vintage_colname] = data[by].apply(lambda x: re.search("\\d{4}-\\d{2}", x).group().replace('-', ''))
+    data[vintage_colname] = (
+        data[by]
+        .astype("string")
+        .str.extract(r"(\d{4}-\d{2})", expand=False)
+        .str.replace("-", "", regex=False)
+    )
 
     if return_kDF:
         return kDataFrame(data)
@@ -1052,10 +1056,9 @@ def bool_to_str(data):
     >>> bool_to_str(df)
     """
     dfc = data.copy()
-    type_dict = data.dtypes.to_dict()
-    for k,v in type_dict.items():
-        if str(v).lower() == 'bool':
-            dfc = dfc.astype({k: str})
+    bool_cols = [col for col in data.columns if pd.api.types.is_bool_dtype(data[col])]
+    if bool_cols:
+        dfc[bool_cols] = dfc[bool_cols].astype(str)
     return dfc
 
 

@@ -648,25 +648,46 @@ def __agg(df):
         sum_score=pd.NamedAgg(column='y_score', aggfunc='sum'),
         ).reset_index()
     df_agg[['n', 'sum_true', 'sum_score']] = df_agg[['n', 'sum_true', 'sum_score']].fillna(0)
-    df_agg.loc[:, 'proportion'] = [x / N for x in df_agg['n']]
-    df_agg.loc[:, 'capture_rate'] = [x / N1 for x in df_agg['sum_true']]
+    df_agg.loc[:, 'proportion'] = np.divide(
+        df_agg['n'].to_numpy(dtype=float),
+        float(N),
+        out=np.full(len(df_agg), np.nan),
+        where=N > 0,
+    )
+    df_agg.loc[:, 'capture_rate'] = np.divide(
+        df_agg['sum_true'].to_numpy(dtype=float),
+        float(N1),
+        out=np.full(len(df_agg), np.nan),
+        where=N1 > 0,
+    )
 
     if 'y_group' in df_agg.columns:
-        gs = list(set(df_agg['y_group']))
-        for g in gs:
-            g_idx = (df_agg['y_group'] == g)
-            df_agg.loc[g_idx, 'cumsum_n'] = np.cumsum(df_agg.loc[g_idx, 'n'])
-            df_agg.loc[g_idx, 'cumsum_proportion'] = np.cumsum(df_agg.loc[g_idx, 'proportion'])
-            df_agg.loc[g_idx, 'cumsum_true'] = np.cumsum(df_agg.loc[g_idx, 'sum_true'])
-            df_agg.loc[g_idx, 'cumsum_score'] = np.cumsum(df_agg.loc[g_idx, 'sum_score'])
+        cumulative = df_agg.groupby('y_group', sort=False)[
+            ['n', 'proportion', 'sum_true', 'sum_score']
+        ].cumsum()
+        cumulative.columns = [
+            'cumsum_n', 'cumsum_proportion', 'cumsum_true', 'cumsum_score'
+        ]
+        df_agg.loc[:, cumulative.columns] = cumulative.to_numpy()
     else:
         df_agg.loc[:, 'cumsum_n'] = np.cumsum(df_agg['n'])
         df_agg.loc[:, 'cumsum_proportion'] = np.cumsum(df_agg['proportion'])
         df_agg.loc[:, 'cumsum_true'] = np.cumsum(df_agg['sum_true'])
         df_agg.loc[:, 'cumsum_score'] = np.cumsum(df_agg['sum_score'])
 
-    df_agg.loc[:, 'cumavg_true'] = [x / y if y>0 else np.nan for x,y in zip(df_agg['cumsum_true'], df_agg['cumsum_n'])]
-    df_agg.loc[:, 'cumavg_score'] = [x / y if y>0 else np.nan for x,y in zip(df_agg['cumsum_score'], df_agg['cumsum_n'])]
+    cumulative_n = df_agg['cumsum_n'].to_numpy(dtype=float)
+    df_agg.loc[:, 'cumavg_true'] = np.divide(
+        df_agg['cumsum_true'].to_numpy(dtype=float),
+        cumulative_n,
+        out=np.full(len(df_agg), np.nan),
+        where=cumulative_n > 0,
+    )
+    df_agg.loc[:, 'cumavg_score'] = np.divide(
+        df_agg['cumsum_score'].to_numpy(dtype=float),
+        cumulative_n,
+        out=np.full(len(df_agg), np.nan),
+        where=cumulative_n > 0,
+    )
     
     columns = group_cols + ['min_score', 'max_score', 'n', 'proportion', 'sum_true', 'sum_score', 'avg_true', 'avg_score', 'capture_rate',
                             'cumsum_n', 'cumsum_proportion', 'cumsum_true', 'cumsum_score', 'cumavg_true', 'cumavg_score', ]
@@ -794,20 +815,28 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sampl
     binsize = int(size / bins) # 向下取整
     indices = np.argsort(y_score) if ascending else np.argsort(y_score)[::-1] 
     
-    thresholds = np.array([0]*size)
-    thresholds_percentile = [100 * (i+1) / bins for i in range(bins)]
-    for i in range(bins):
-        s = i*binsize
-        e = (i+1)*binsize if i < bins-1 else np.max([size, (i+1)*binsize]) # 严格排序
-        thresholds[indices[s:e]] = thresholds_percentile[i]
-    if bool(y_group):
+    # Keep the historical integer percentile labels while assigning them in
+    # one pass. For bin counts that do not divide 100, the legacy code
+    # truncated labels during assignment to its integer array.
+    thresholds = np.zeros(size, dtype=int)
+    if binsize > 0:
+        sorted_bin = np.minimum(np.arange(size) // binsize, bins - 1)
+    else:
+        sorted_bin = np.full(size, bins - 1, dtype=int)
+    thresholds[indices] = 100.0 * (sorted_bin + 1) / bins
+    if y_group is not None:
         df = pd.DataFrame({'y_true': y_true, 'y_score': y_score, 'y_group': y_group, 'thresholds': thresholds})
     else:
         df = pd.DataFrame({'y_true': y_true, 'y_score': y_score, 'thresholds': thresholds})
     pct_df = __agg(df)
 
     avg_true = np.mean(y_true)
-    pct_df['lift'] = [x / avg_true for x in pct_df['cumavg_true']]
+    pct_df['lift'] = np.divide(
+        pct_df['cumavg_true'].to_numpy(dtype=float),
+        float(avg_true),
+        out=np.full(len(pct_df), np.nan),
+        where=avg_true != 0,
+    )
     pct_df['gain'] = np.cumsum(pct_df['capture_rate'])
 
     return pct_df
