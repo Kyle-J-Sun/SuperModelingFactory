@@ -59,6 +59,7 @@ class FeatureScreenConfig:
     corr_max_iterations: int = 10
     corr_use_woe_bins: bool = False
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise"
+    corr_block_size: int = 256
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn"
     missing_rate_threshold: float | None = None
     missing_rate_ref: float | int = -999999
@@ -108,6 +109,7 @@ def screen_config_from_mapping(
         corr_max_iterations=int(cfg.get("corr_max_iterations", 10)),
         corr_use_woe_bins=bool(cfg.get("corr_use_woe_bins", False)),
         corr_nan_policy=str(cfg.get("corr_nan_policy", "pairwise")),  # type: ignore[arg-type]
+        corr_block_size=int(cfg.get("corr_block_size", 256)),
         on_empty_stage=str(cfg.get("on_empty_stage", "keep_all_warn")),  # type: ignore[arg-type]
         missing_rate_threshold=cfg.get("missing_rate_threshold"),
         missing_rate_ref=cfg.get("missing_rate_ref", -999999),
@@ -368,22 +370,32 @@ def _weighted_woe_bins_screen(
         )
     adapter = as_woe_engine(binner)
 
+    # Assign fitted bins once per split. PSI and IV both consume these labels;
+    # doing it here avoids a full WOE transform for every feature and stage.
+    bin_frames: dict[str, pd.DataFrame] = {
+        "ins": adapter.assign_bins_frame(ins, current),
+    }
+    if config.psi_enabled and "oos" in config.psi_compare_splits and len(oos) > 0:
+        bin_frames["oos"] = adapter.assign_bins_frame(oos, current)
+    if config.psi_enabled and "oot" in config.psi_compare_splits and len(oot) > 0:
+        bin_frames["oot"] = adapter.assign_bins_frame(oot, current)
+
     psi_records: list[dict] = []
     if config.psi_enabled:
         for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
-            bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
+            bins_ins = _bins_to_numpy(bin_frames["ins"][var])
             exp_dist = _weighted_bin_distribution(bins_ins, w_ins, config.content)
             row: dict[str, Any] = {"var": var, "psi_ins_oos": np.nan, "psi_ins_oot": np.nan}
             if "oos" in config.psi_compare_splits and len(oos) > 0:
                 w_oos = resolve_sample_weight(data=oos, weight_col=weight_col, expected_len=len(oos))
-                bins_oos = _bins_to_numpy(adapter.assign_bins(oos, var))
+                bins_oos = _bins_to_numpy(bin_frames["oos"][var])
                 act = _weighted_bin_distribution(bins_oos, w_oos, config.content)
                 row["psi_ins_oos"] = _psi_from_distributions(exp_dist, act, config.content)
             if "oot" in config.psi_compare_splits and len(oot) > 0:
                 w_oot = resolve_sample_weight(data=oot, weight_col=weight_col, expected_len=len(oot))
-                bins_oot = _bins_to_numpy(adapter.assign_bins(oot, var))
+                bins_oot = _bins_to_numpy(bin_frames["oot"][var])
                 act = _weighted_bin_distribution(bins_oot, w_oot, config.content)
                 row["psi_ins_oot"] = _psi_from_distributions(exp_dist, act, config.content)
             psi_records.append(row)
@@ -412,7 +424,7 @@ def _weighted_woe_bins_screen(
         for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
-            bins_ins = _bins_to_numpy(adapter.assign_bins(ins, var))
+            bins_ins = _bins_to_numpy(bin_frames["ins"][var])
             x_series = ins[var]
             if pd.api.types.is_numeric_dtype(x_series):
                 x_ins = x_series.to_numpy(dtype=float)
@@ -452,6 +464,7 @@ def _weighted_woe_bins_screen(
             ins, current, w_ins,
             corr_use_woe_bins=config.corr_use_woe_bins,
             corr_nan_policy=config.corr_nan_policy,
+            corr_block_size=config.corr_block_size,
             adapter=adapter,
             binner=binner,
         )
@@ -520,6 +533,7 @@ def feature_screen(
             precision=cfg.precision,
             corr_use_woe_bins=cfg.corr_use_woe_bins,
             corr_nan_policy=cfg.corr_nan_policy,
+            corr_block_size=cfg.corr_block_size,
             on_empty_stage=cfg.on_empty_stage,
             prefit_woe_engine=prefit_woe_engine,
             missing_rate_threshold=cfg.missing_rate_threshold,

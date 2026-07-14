@@ -249,6 +249,7 @@ _FIELD_LABELS = {
     "submodel_pairs": "子模型字段映射",
     "numeric_coercion_mode": "数值转换模式",
     "numeric_coercion_min_ratio": "安全数值转换阈值",
+    "comparison_block_size": "一致性比较列块大小",
     "input_type": "输入类型",
     "csv_read_kwargs": "CSV 读取参数",
     "enable_batch": "启用 CSV 分批",
@@ -337,6 +338,7 @@ _FIELD_DESCRIPTIONS = {
     "feature_batch_size": "CSV 宽表模式下每批分析的新特征数量。",
     "feature_batches": "显式指定每批新特征列表；优先级高于 feature_batch_size。",
     "batch_corr_mode": "within_batch 只算批内相关性，block_pairwise 会额外读 CSV 计算跨批相关性。",
+    "comparison_block_size": "UAT 宽表逐 flow 比较时每个向量化列块包含的字段数；值越小峰值内存越低。",
     "applied_sample": "1 输出全量申请，0 只输出通过样本。",
 }
 
@@ -384,6 +386,7 @@ _FIELD_RANGES = {
     "min_sample_size": (1, 1_000_000, 100),
     "min_group_size": (1, 1_000_000, 10),
     "group_min_size": (1, 1_000_000, 10),
+    "comparison_block_size": (1, 10_000, 1),
 }
 
 
@@ -411,6 +414,7 @@ _NESTED_FIELDS = {
         _nested("iv_threshold", "IV 保留阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
         _nested("corr_enabled", "是否运行相关性筛选。", "toggle"),
         _nested("corr_threshold", "相关性阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("corr_block_size", "加权相关性矩阵每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
     ],
     "woe_params": [
         _nested("nbins", "分箱数量。", "slider", min_val=2, max_val=50, step=1),
@@ -433,12 +437,15 @@ _NESTED_FIELDS = {
         _nested("buckets", "PSI 分箱数量。", "slider", min_val=2, max_val=50, step=1),
         _nested("equal_freq", "PSI 是否等频分箱。", "toggle"),
         _nested("min_bin_prop", "PSI 最小箱占比。", "slider", min_val=0.0, max_val=0.5, step=0.005),
+        _nested("feature_block_size", "WOE 分箱与分组 PSI 每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
     ],
     "ivks_params": [
         _nested("iv_cut", "IV 输出过滤阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("feature_block_size", "复用 WOE 分箱时每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
     ],
     "distribution_params": [
         _nested("q", "分布分位点列表。", "textarea"),
+        _nested("feature_block_size", "宽表分布统计每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
     ],
     "ri_method_params": [
         _nested("simple_augment", "simple augment 参数字典。", "json"),
@@ -1091,6 +1098,8 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("main_model_score_col 不能为空。")
         if vals.get("numeric_coercion_mode") not in (None, "safe", "aggressive", "off"):
             errors.append("numeric_coercion_mode 必须是 safe/aggressive/off。")
+        if int(vals.get("comparison_block_size", 128) or 0) <= 0:
+            errors.append("comparison_block_size 必须为正整数。")
     elif entry.key == "sample_analysis":
         if missing("target_cols"):
             errors.append("target_cols 不能为空。")

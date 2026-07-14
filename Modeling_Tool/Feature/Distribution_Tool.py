@@ -30,7 +30,14 @@ class proc_means:
     >>> result = pm()
     """
     
-    def __init__(self, data, varlist, groupby, spec_missing_value=None):
+    def __init__(
+        self,
+        data,
+        varlist,
+        groupby,
+        spec_missing_value=None,
+        feature_block_size=128,
+    ):
         """初始化proc_means对象。
         
         Parameters
@@ -46,8 +53,11 @@ class proc_means:
         """
         self.data = data
         self.varlist = varlist
-        self.groupby = groupby
+        self.groupby = [groupby] if isinstance(groupby, str) else list(groupby or [])
         self.spec_missing_value = spec_missing_value
+        if feature_block_size is not None and int(feature_block_size) <= 0:
+            raise ValueError("feature_block_size must be a positive integer or None")
+        self.feature_block_size = feature_block_size
 
     def treat_spec_missing(self):
         """处理特定的缺失值。
@@ -82,17 +92,46 @@ class proc_means:
         if q is None:
             q = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
 
-        data_w_varlist = self.data[self.groupby + self.varlist]
+        block_size = self.feature_block_size or max(len(self.varlist), 1)
+        frames = []
+        numeric_vars = [
+            var for var in self.varlist if pd.api.types.is_numeric_dtype(self.data[var])
+        ]
+        categorical_vars = [var for var in self.varlist if var not in numeric_vars]
 
-        grouped_data = data_w_varlist\
-            .melt(id_vars=self.groupby,
-                  value_vars=self.varlist,
-                  var_name="attribute",
-                  value_name="value")\
-            .groupby(self.groupby + ["attribute"])
-        res_describe = grouped_data.describe(percentiles=q)
-        res_describe = res_describe.droplevel(level=0, axis=1)
-        return res_describe
+        for start in range(0, len(numeric_vars), block_size):
+            block = numeric_vars[start : start + block_size]
+            if self.groupby:
+                described = self.data.groupby(self.groupby, sort=True)[block].describe(
+                    percentiles=q
+                )
+                try:
+                    part = described.stack(level=0, future_stack=True)
+                except TypeError:  # pandas < 2.1
+                    part = described.stack(level=0)
+                part.index = part.index.set_names(self.groupby + ["attribute"])
+            else:
+                part = self.data[block].describe(percentiles=q).T
+                part.index.name = "attribute"
+            frames.append(part)
+
+        for start in range(0, len(categorical_vars), block_size):
+            block = categorical_vars[start : start + block_size]
+            long_block = self.data[self.groupby + block].melt(
+                id_vars=self.groupby,
+                value_vars=block,
+                var_name="attribute",
+                value_name="value",
+            )
+            described = long_block.groupby(
+                self.groupby + ["attribute"],
+                dropna=False,
+                sort=True,
+            ).describe(percentiles=q)
+            frames.append(described.droplevel(level=0, axis=1))
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, axis=0).sort_index()
 
     def group_sum(self):
         """计算每组的样本数量。
@@ -104,17 +143,21 @@ class proc_means:
         pd.DataFrame
             包含每组样本数量的聚合结果
         """
-        data = self.data.copy()
-        data["_sum_ind"] = 1
-        data = data[self.groupby + self.varlist + ["_sum_ind"]]
-        grouped_data = data\
-            .melt(id_vars=self.groupby + ["_sum_ind"],
-                  value_vars=self.varlist,
-                  var_name="attribute",
-                  value_name="value")\
-            .groupby(self.groupby + ["attribute"])
-        res_sum = grouped_data.agg(sum_all=("_sum_ind", "sum"))
-        return res_sum
+        if not self.groupby:
+            index = pd.Index(sorted(self.varlist), name="attribute")
+            return pd.DataFrame({"sum_all": len(self.data)}, index=index)
+
+        group_sizes = self.data.groupby(self.groupby, sort=True).size()
+        index = pd.MultiIndex.from_tuples(
+            [
+                (*((group,) if len(self.groupby) == 1 else tuple(group)), attribute)
+                for group in group_sizes.index
+                for attribute in sorted(self.varlist)
+            ],
+            names=self.groupby + ["attribute"],
+        )
+        values = np.repeat(group_sizes.to_numpy(), len(self.varlist))
+        return pd.DataFrame({"sum_all": values}, index=index)
 
     def __call__(self, q=None):
         """执行完整的分组统计分析。
@@ -146,7 +189,14 @@ class proc_means:
         return res_fnl
 
 
-def proc_means_by_grp(data, varlist, groupby=None, spec_missing_value=None, q=None):
+def proc_means_by_grp(
+    data,
+    varlist,
+    groupby=None,
+    spec_missing_value=None,
+    q=None,
+    feature_block_size=128,
+):
     """按分组计算变量统计报告。
     
     对指定变量按分组计算描述性统计量，返回包含样本数、均值、分位数和缺失率的报告。
@@ -179,7 +229,13 @@ def proc_means_by_grp(data, varlist, groupby=None, spec_missing_value=None, q=No
     if q is None:
         q = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
 
-    means = proc_means(data, varlist, groupby=groupby, spec_missing_value=spec_missing_value)
+    means = proc_means(
+        data,
+        varlist,
+        groupby=groupby,
+        spec_missing_value=spec_missing_value,
+        feature_block_size=feature_block_size,
+    )
     means_rpt = means(q=q)
     means_rpt = means_rpt.reset_index(drop=False)
 
@@ -189,7 +245,13 @@ def proc_means_by_grp(data, varlist, groupby=None, spec_missing_value=None, q=No
 _SCREENING_MEANS_COLS = ["attribute", "N_ALL", "N", "MISSING_RATE", "MIN", "MEAN", "MAX"]
 
 
-def proc_means_for_screening(data, varlist, spec_missing_value=None, q=None):
+def proc_means_for_screening(
+    data,
+    varlist,
+    spec_missing_value=None,
+    q=None,
+    feature_block_size=128,
+):
     """Build a uniform means table for IV screening reports.
 
     ``proc_means_by_grp`` returns object stats (unique/top/freq) when numeric and
@@ -204,10 +266,24 @@ def proc_means_for_screening(data, varlist, spec_missing_value=None, q=None):
     frames = []
 
     if numeric:
-        frames.append(proc_means_by_grp(data, numeric, spec_missing_value=spec_missing_value, q=q))
+        frames.append(
+            proc_means_by_grp(
+                data,
+                numeric,
+                spec_missing_value=spec_missing_value,
+                q=q,
+                feature_block_size=feature_block_size,
+            )
+        )
 
     for var in other:
-        part = proc_means_by_grp(data, [var], spec_missing_value=spec_missing_value, q=q)
+        part = proc_means_by_grp(
+            data,
+            [var],
+            spec_missing_value=spec_missing_value,
+            q=q,
+            feature_block_size=feature_block_size,
+        )
         for col in ("MIN", "MEAN", "MAX"):
             if col not in part.columns:
                 part[col] = np.nan

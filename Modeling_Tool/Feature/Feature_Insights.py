@@ -3,6 +3,7 @@
 提供变量分析、IV计算、WOE绑图和相关性过滤功能
 """
 
+import numpy as np
 import pandas as pd
 import warnings
 from tqdm import tqdm
@@ -343,19 +344,18 @@ def var_corr_filter(data, varlist, corr_cutpoint=0.8, method='pearson'):
 
     corr_matrix = data[varlist].corr(method=method)
 
-    corr_list = []
-    for i in range(len(varlist)):
-        for j in range(i + 1, len(varlist)):
-            var1, var2 = varlist[i], varlist[j]
-            corr_value = corr_matrix.iloc[i, j]
-            if abs(corr_value) > corr_cutpoint:
-                corr_list.append({
-                    'VAR1': var1,
-                    'VAR2': var2,
-                    'CORR': corr_value
-                })
-
-    return pd.DataFrame(corr_list)
+    values = corr_matrix.to_numpy(dtype=float)
+    row_idx, col_idx = np.triu_indices(len(varlist), k=1)
+    pair_values = values[row_idx, col_idx]
+    keep = np.isfinite(pair_values) & (np.abs(pair_values) > corr_cutpoint)
+    return pd.DataFrame(
+        {
+            "VAR1": np.asarray(varlist, dtype=object)[row_idx[keep]],
+            "VAR2": np.asarray(varlist, dtype=object)[col_idx[keep]],
+            "CORR": pair_values[keep],
+        },
+        columns=["VAR1", "VAR2", "CORR"],
+    )
 
 
 
@@ -416,6 +416,60 @@ class CorrelationFilter:
         
         self.correlated_dict = {}
         self.filtered_varlist = []
+        self._corr_matrix_cache = None
+        self._metric_summary_cache = None
+
+    def _high_corr_pairs(self, varlist):
+        if (
+            self._corr_matrix_cache is None
+            or not set(varlist).issubset(self._corr_matrix_cache.columns)
+        ):
+            self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        matrix = self._corr_matrix_cache.reindex(index=varlist, columns=varlist)
+        values = matrix.to_numpy(dtype=float)
+        row_idx, col_idx = np.triu_indices(len(varlist), k=1)
+        pair_values = values[row_idx, col_idx]
+        keep = np.isfinite(pair_values) & (np.abs(pair_values) > self.corr_cutpoint)
+        names = np.asarray(varlist, dtype=object)
+        return pd.DataFrame(
+            {
+                "VAR1": names[row_idx[keep]],
+                "VAR2": names[col_idx[keep]],
+                "CORR": pair_values[keep],
+            },
+            columns=["VAR1", "VAR2", "CORR"],
+        )
+
+    def _metric_summary(self, varlist):
+        cached_vars = (
+            set(self._metric_summary_cache["var"])
+            if self._metric_summary_cache is not None and "var" in self._metric_summary_cache
+            else set()
+        )
+        if not set(varlist).issubset(cached_vars):
+            insights = VarExtractionInsights(
+                data=self.data,
+                dep=self.dep,
+                plot_path=None,
+                nbins=10,
+                equal_freq=True,
+                min_bin_prop=0.05,
+                precision=5,
+                chi2_method=self.chi2_method,
+                chi2_p=self.chi2_p,
+                init_equi_bins=self.init_equi_bins,
+                tree_binning=self.tree_binning,
+                include_missing=True,
+                seed=self.seed,
+                missing_rate_ref=self.missing_rate_ref,
+            )
+            self._metric_summary_cache = insights.get_var_analysis_report(
+                data=self.data,
+                varlist=varlist,
+                dep=self.dep,
+                iv_cut=0,
+            )
+        return self._metric_summary_cache
     
     def filter_single_iteration(self, varlist):
         """单次迭代过滤高相关变量。
@@ -439,11 +493,7 @@ class CorrelationFilter:
             "ks": "ks_in_gains"
         }
         
-        high_corr_var = var_corr_filter(
-            self.data, varlist,
-            corr_cutpoint=self.corr_cutpoint,
-            method=self.method
-        )
+        high_corr_var = self._high_corr_pairs(varlist)
         
         if len(high_corr_var) == 0:
             return varlist
@@ -455,26 +505,19 @@ class CorrelationFilter:
         removed_varlist = []
         for var in tqdm(base_varlist):
             if var not in set(removed_varlist + selected_varlist):                
-                single_var_corr = high_corr_var.query(f""" VAR1 == '{var}'""")                
+                single_var_corr = high_corr_var.loc[high_corr_var["VAR1"].eq(var)]
                 correlated_list = [var] + single_var_corr['VAR2'].drop_duplicates().tolist()
     
-                varInsights = VarExtractionInsights(data = self.data,
-                                                    dep = self.dep, 
-                                                    plot_path = None, 
-                                                    nbins = 10, 
-                                                    equal_freq = True, 
-                                                    min_bin_prop = 0.05, 
-                                                    precision = 5, 
-                                                    chi2_method = self.chi2_method, 
-                                                    chi2_p = self.chi2_p, 
-                                                    init_equi_bins = self.init_equi_bins, 
-                                                    tree_binning = self.tree_binning, 
-                                                    include_missing = True, 
-                                                    seed = self.seed, 
-                                                    missing_rate_ref = self.missing_rate_ref)
-
-                fnl_summary = varInsights.get_var_analysis_report(data = self.data, varlist = correlated_list, dep = self.dep, iv_cut = 0)
-                fnl_selected_var = fnl_summary.sort_values([name_mapping[base_metric]], ascending = False)['var'][0]
+                metric_summary = self._metric_summary(varlist)
+                fnl_summary = metric_summary[
+                    metric_summary["var"].isin(correlated_list)
+                ].copy()
+                if fnl_summary.empty:
+                    continue
+                fnl_selected_var = fnl_summary.sort_values(
+                    [name_mapping[base_metric]],
+                    ascending=False,
+                )["var"].iloc[0]
                 
                 if fnl_selected_var not in selected_varlist:
                     selected_varlist.append(fnl_selected_var)
@@ -518,6 +561,9 @@ class CorrelationFilter:
         >>> filter_analyzer = CorrelationFilter(df, 'target')
         >>> keep_vars = filter_analyzer.remove_highly_correlated(['var1', 'var2', 'var3'])
         """
+        self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        self._metric_summary_cache = None
+        self._metric_summary(varlist)
         last_keep_list = self.filter_single_iteration(varlist)
         
         for i in range(1, max_iterations):

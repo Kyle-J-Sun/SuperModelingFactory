@@ -292,11 +292,14 @@ def _weighted_pearson_corr_matrix(
     w: np.ndarray,
     *,
     nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+    corr_block_size: int = 256,
 ) -> np.ndarray:
     if X.shape[1] == 0:
         return np.empty((0, 0))
     w = np.asarray(w, dtype=float)
     k = X.shape[1]
+    if int(corr_block_size) <= 0:
+        raise ValueError("corr_block_size must be a positive integer")
 
     if nan_policy == "raise" and np.any(~np.isfinite(X)):
         raise ValueError(
@@ -308,17 +311,63 @@ def _weighted_pearson_corr_matrix(
     nan_fraction = float(nan_mask.sum()) / float(X.size) if X.size else 0.0
 
     if nan_policy == "pairwise":
-        corr = np.eye(k, dtype=float)
-        insufficient_pairs = 0
+        valid = np.isfinite(X)
+        values = np.where(valid, X, 0.0).astype(float, copy=False)
+        valid_float = valid.astype(float)
+        weighted_valid = valid_float * w[:, None]
+        weighted_values = values * w[:, None]
+        weighted_squares = values * values * w[:, None]
+        corr = np.zeros((k, k), dtype=float)
+        overlap_counts = np.zeros((k, k), dtype=np.int64)
+
+        for start in range(0, k, int(corr_block_size)):
+            stop = min(start + int(corr_block_size), k)
+            block_valid = valid_float[:, start:stop]
+            block_values = values[:, start:stop]
+            block_weighted_values = weighted_values[:, start:stop]
+            block_weighted_squares = weighted_squares[:, start:stop]
+
+            pair_weight = block_valid.T @ weighted_valid
+            sum_left = block_weighted_values.T @ valid_float
+            sum_right = block_valid.T @ weighted_values
+            sum_product = block_values.T @ weighted_values
+            sum_sq_left = block_weighted_squares.T @ valid_float
+            sum_sq_right = block_valid.T @ weighted_squares
+            overlap_counts[start:stop] = (
+                block_valid.T @ valid_float
+            ).astype(np.int64)
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                covariance = sum_product - (sum_left * sum_right / pair_weight)
+                variance_left = sum_sq_left - (sum_left * sum_left / pair_weight)
+                variance_right = sum_sq_right - (sum_right * sum_right / pair_weight)
+                denominator = np.sqrt(
+                    np.maximum(variance_left, 0.0) * np.maximum(variance_right, 0.0)
+                )
+                block_corr = np.divide(
+                    covariance,
+                    denominator,
+                    out=np.zeros_like(covariance),
+                    where=(pair_weight > 0) & (denominator > 0),
+                )
+
+            zero_weight_pairs = np.argwhere(pair_weight <= 0)
+            for local_i, j in zero_weight_pairs:
+                global_i = start + int(local_i)
+                block_corr[local_i, j] = _weighted_corr_pair(
+                    X[:, global_i],
+                    X[:, j],
+                    w,
+                )
+            corr[start:stop] = block_corr
+
+        corr = (corr + corr.T) / 2.0
+        np.fill_diagonal(corr, 1.0)
+        upper_i, upper_j = np.triu_indices(k, k=1)
+        insufficient_pairs = int(
+            np.sum(overlap_counts[upper_i, upper_j] < 2)
+        )
         total_pairs = k * (k - 1) // 2
-        for i in range(k):
-            for j in range(i + 1, k):
-                c = _weighted_corr_pair(X[:, i], X[:, j], w)
-                corr[i, j] = c
-                corr[j, i] = c
-                overlap = int((np.isfinite(X[:, i]) & np.isfinite(X[:, j])).sum())
-                if overlap < 2:
-                    insufficient_pairs += 1
         if total_pairs > 0 and insufficient_pairs / total_pairs > 0.01:
             warnings.warn(
                 f"[feature_screen] weighted corr: >1% of feature pairs have insufficient "
@@ -368,6 +417,7 @@ def _weighted_corr_for_screen(
     *,
     corr_use_woe_bins: bool,
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"],
+    corr_block_size: int = 256,
     adapter: Any | None = None,
     binner: Any | None = None,
 ) -> np.ndarray:
@@ -382,7 +432,12 @@ def _weighted_corr_for_screen(
             cols = [f"{v}{suffix}" for v in current if f"{v}{suffix}" in woe_ins.columns]
             if cols:
                 X = woe_ins[cols].to_numpy(dtype=float)
-                return _weighted_pearson_corr_matrix(X, w_ins, nan_policy="pairwise")
+                return _weighted_pearson_corr_matrix(
+                    X,
+                    w_ins,
+                    nan_policy="pairwise",
+                    corr_block_size=corr_block_size,
+                )
     non_numeric = [v for v in current if not pd.api.types.is_numeric_dtype(ins[v])]
     if non_numeric:
         # Raw-value Pearson correlation is undefined for categorical/object
@@ -402,11 +457,21 @@ def _weighted_corr_for_screen(
         numeric_idx = [i for i, v in enumerate(current) if v not in set(non_numeric)]
         if numeric_idx:
             X_num = ins[[current[i] for i in numeric_idx]].astype(float).to_numpy()
-            corr_num = _weighted_pearson_corr_matrix(X_num, w_ins, nan_policy=corr_nan_policy)
+            corr_num = _weighted_pearson_corr_matrix(
+                X_num,
+                w_ins,
+                nan_policy=corr_nan_policy,
+                corr_block_size=corr_block_size,
+            )
             corr_full[np.ix_(numeric_idx, numeric_idx)] = corr_num
         return corr_full
     X = ins[current].astype(float).to_numpy()
-    return _weighted_pearson_corr_matrix(X, w_ins, nan_policy=corr_nan_policy)
+    return _weighted_pearson_corr_matrix(
+        X,
+        w_ins,
+        nan_policy=corr_nan_policy,
+        corr_block_size=corr_block_size,
+    )
 
 
 def _missing_rate_for_series(
@@ -522,13 +587,18 @@ def _apply_stage_keep(
 
 
 def _high_corr_pairs(varlist: list[str], corr: np.ndarray, threshold: float) -> pd.DataFrame:
-    rows = []
-    for i in range(len(varlist)):
-        for j in range(i + 1, len(varlist)):
-            c = corr[i, j]
-            if abs(c) > threshold:
-                rows.append({"var_a": varlist[i], "var_b": varlist[j], "corr": float(c)})
-    return pd.DataFrame(rows)
+    row_idx, col_idx = np.triu_indices(len(varlist), k=1)
+    values = np.asarray(corr, dtype=float)[row_idx, col_idx]
+    keep = np.isfinite(values) & (np.abs(values) > threshold)
+    names = np.asarray(varlist, dtype=object)
+    return pd.DataFrame(
+        {
+            "var_a": names[row_idx[keep]],
+            "var_b": names[col_idx[keep]],
+            "corr": values[keep],
+        },
+        columns=["var_a", "var_b", "corr"],
+    )
 
 
 def _corr_dedup_weighted(
@@ -724,6 +794,7 @@ def _weighted_screen_impl(
     precision: int,
     corr_use_woe_bins: bool = False,
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+    corr_block_size: int = 256,
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
     prefit_woe_engine: Any | None = None,
     missing_rate_threshold: float | None = None,
@@ -837,6 +908,7 @@ def _weighted_screen_impl(
             ins, current, w_ins,
             corr_use_woe_bins=corr_use_woe_bins,
             corr_nan_policy=corr_nan_policy,
+            corr_block_size=corr_block_size,
             binner=prefit_woe_engine,
         )
         iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
@@ -890,6 +962,7 @@ def weighted_feature_screen(
     monotone_woe_params: dict[str, Any] | None = None,
     prefit_woe_engine: Any | None = None,
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
+    corr_block_size: int = 256,
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
 ) -> WeightedScreenResult:
     """Run PSI -> IV -> correlation screening with optional sample weights.
@@ -934,6 +1007,7 @@ def weighted_feature_screen(
         precision=precision,
         min_bin_prop=min_bin_prop,
         corr_nan_policy=corr_nan_policy,
+        corr_block_size=corr_block_size,
         on_empty_stage=on_empty_stage,
     )
     return feature_screen_from_dataframe(

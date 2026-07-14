@@ -34,6 +34,7 @@ class ProcCompareConfig:
     chunk_size: int = 200_000
     n_partitions: int = 16
     backend: CompareBackend = "sequential"
+    compare_block_size: int = 64
 
     numeric_tol: float = 1e-8
     numeric_rtol: float = 0.0
@@ -107,6 +108,8 @@ class ProcCompareEngine:
             raise ValueError("chunk_size must be a positive integer.")
         if cfg.n_partitions <= 0:
             raise ValueError("n_partitions must be a positive integer.")
+        if cfg.compare_block_size <= 0:
+            raise ValueError("compare_block_size must be a positive integer.")
         if cfg.numeric_tol < 0 or cfg.numeric_rtol < 0 or cfg.datetime_tol_seconds < 0:
             raise ValueError("tolerance values must be non-negative.")
         if cfg.top_n <= 0:
@@ -294,44 +297,54 @@ class ProcCompareEngine:
         mismatch_frames = []
         mismatch_cols_by_row: dict[int, list[str]] = {}
 
-        for col in compare_cols:
-            left_col = f"{col}_left"
-            right_col = f"{col}_right"
-            comp = self._compare_series(col, merged[left_col], merged[right_col], common_mask)
-            mismatch_mask = comp["mismatch"]
-            n_mismatch = int(mismatch_mask.sum())
-            if n_mismatch:
-                mismatch_indexes = merged.index[mismatch_mask]
-                for idx in mismatch_indexes:
+        common_values = common_mask.to_numpy(dtype=bool)
+        n_compared = int(common_values.sum())
+        block_size = int(self.config.compare_block_size)
+        for start in range(0, len(compare_cols), block_size):
+            block_cols = compare_cols[start : start + block_size]
+            comp = self._compare_column_block(merged, block_cols, common_values)
+            mismatch_matrix = comp["mismatch"]
+            one_null_matrix = comp["one_null"]
+            both_null_matrix = comp["both_null"]
+            diff_matrix = comp["diff"]
+            abs_diff_matrix = comp["abs_diff"]
+            left_values = comp["left_values"]
+            right_values = comp["right_values"]
+
+            for col_idx, col in enumerate(block_cols):
+                mismatch_positions = np.flatnonzero(mismatch_matrix[:, col_idx])
+                n_mismatch = int(len(mismatch_positions))
+                for idx in mismatch_positions:
                     mismatch_cols_by_row.setdefault(int(idx), []).append(col)
-                if self.config.detail_mode != "none":
-                    detail = merged.loc[mismatch_mask, key_cols].copy()
+                if n_mismatch and self.config.detail_mode != "none":
+                    detail = merged.iloc[mismatch_positions][key_cols].copy()
                     detail["column"] = col
-                    detail["left_value"] = merged.loc[mismatch_mask, left_col].to_numpy()
-                    detail["right_value"] = merged.loc[mismatch_mask, right_col].to_numpy()
-                    detail["diff"] = comp["diff"].loc[mismatch_mask].to_numpy()
-                    detail["abs_diff"] = comp["abs_diff"].loc[mismatch_mask].to_numpy()
+                    detail["left_value"] = left_values[mismatch_positions, col_idx]
+                    detail["right_value"] = right_values[mismatch_positions, col_idx]
+                    detail["diff"] = diff_matrix[mismatch_positions, col_idx]
+                    detail["abs_diff"] = abs_diff_matrix[mismatch_positions, col_idx]
                     mismatch_frames.append(detail)
 
-            n_compared = int(common_mask.sum())
-            n_one_null = int(comp["one_null"].sum())
-            n_both_null = int(comp["both_null"].sum())
-            n_equal = n_compared - n_mismatch
-            column_rows.append(
-                {
-                    "column": col,
-                    "n_compared": n_compared,
-                    "n_equal": n_equal,
-                    "n_mismatch": n_mismatch,
-                    "pct_mismatch": round(n_mismatch / n_compared * 100, 6) if n_compared else 0.0,
-                    "n_one_side_null": n_one_null,
-                    "n_both_null": n_both_null,
-                    "mean_diff": comp["diff"].mean(skipna=True),
-                    "max_abs_diff": comp["abs_diff"].max(skipna=True),
-                    "_diff_sum": comp["diff"].sum(skipna=True),
-                    "_diff_count": int(comp["diff"].notna().sum()),
-                }
-            )
+                diff_values = diff_matrix[:, col_idx]
+                abs_diff_values = abs_diff_matrix[:, col_idx]
+                diff_valid = np.isfinite(diff_values)
+                diff_sum = float(np.nansum(diff_values)) if diff_valid.any() else 0.0
+                diff_count = int(diff_valid.sum())
+                column_rows.append(
+                    {
+                        "column": col,
+                        "n_compared": n_compared,
+                        "n_equal": n_compared - n_mismatch,
+                        "n_mismatch": n_mismatch,
+                        "pct_mismatch": round(n_mismatch / n_compared * 100, 6) if n_compared else 0.0,
+                        "n_one_side_null": int(one_null_matrix[:, col_idx].sum()),
+                        "n_both_null": int(both_null_matrix[:, col_idx].sum()),
+                        "mean_diff": diff_sum / diff_count if diff_count else np.nan,
+                        "max_abs_diff": float(np.nanmax(abs_diff_values)) if np.isfinite(abs_diff_values).any() else np.nan,
+                        "_diff_sum": diff_sum,
+                        "_diff_count": diff_count,
+                    }
+                )
 
         for idx, cols in mismatch_cols_by_row.items():
             row_summary.loc[idx, "n_cell_mismatch"] = len(cols)
@@ -375,6 +388,146 @@ class ProcCompareEngine:
             duplicate_key_summary=duplicate_key_summary,
         )
 
+    def _compare_column_block(
+        self,
+        merged: pd.DataFrame,
+        columns: list[str],
+        common_mask: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Compare a bounded field block with vectorized type-specific kernels."""
+        n_rows = len(merged)
+        n_cols = len(columns)
+        left_series = [self._normalize_series_missing(merged[f"{col}_left"]) for col in columns]
+        right_series = [self._normalize_series_missing(merged[f"{col}_right"]) for col in columns]
+        left_values = np.column_stack([series.to_numpy(dtype=object) for series in left_series])
+        right_values = np.column_stack([series.to_numpy(dtype=object) for series in right_series])
+        mismatch = np.zeros((n_rows, n_cols), dtype=bool)
+        one_null = np.zeros((n_rows, n_cols), dtype=bool)
+        both_null = np.zeros((n_rows, n_cols), dtype=bool)
+        diff = np.full((n_rows, n_cols), np.nan, dtype=float)
+        abs_diff = np.full((n_rows, n_cols), np.nan, dtype=float)
+
+        datetime_idx = [
+            idx
+            for idx, col in enumerate(columns)
+            if self._should_compare_datetime(col, left_series[idx], right_series[idx])
+        ]
+        datetime_set = set(datetime_idx)
+        numeric_idx = [
+            idx
+            for idx in range(n_cols)
+            if idx not in datetime_set
+            and self._should_compare_numeric(left_series[idx], right_series[idx])
+        ]
+        numeric_set = set(numeric_idx)
+        string_idx = [
+            idx
+            for idx in range(n_cols)
+            if idx not in datetime_set and idx not in numeric_set
+        ]
+        common = common_mask[:, None]
+
+        if datetime_idx:
+            left_dt = np.column_stack(
+                [self._datetime_seconds(left_series[idx]) for idx in datetime_idx]
+            )
+            right_dt = np.column_stack(
+                [self._datetime_seconds(right_series[idx]) for idx in datetime_idx]
+            )
+            block_diff = left_dt - right_dt
+            block_abs = np.abs(block_diff)
+            left_null = ~np.isfinite(left_dt)
+            right_null = ~np.isfinite(right_dt)
+            tolerances = np.asarray(
+                [self._column_datetime_tol(columns[idx]) for idx in datetime_idx],
+                dtype=float,
+            )
+            block_one = (left_null ^ right_null) & common
+            block_both = left_null & right_null & common
+            block_mismatch = (block_abs > tolerances[None, :]) | block_one
+            if not self.config.both_null_equal:
+                block_mismatch |= block_both
+            block_mismatch &= common
+            diff[:, datetime_idx] = block_diff
+            abs_diff[:, datetime_idx] = block_abs
+            one_null[:, datetime_idx] = block_one
+            both_null[:, datetime_idx] = block_both
+            mismatch[:, datetime_idx] = block_mismatch
+
+        if numeric_idx:
+            left_num = np.column_stack(
+                [pd.to_numeric(left_series[idx], errors="coerce").to_numpy(dtype=float, na_value=np.nan) for idx in numeric_idx]
+            )
+            right_num = np.column_stack(
+                [pd.to_numeric(right_series[idx], errors="coerce").to_numpy(dtype=float, na_value=np.nan) for idx in numeric_idx]
+            )
+            block_diff = left_num - right_num
+            block_abs = np.abs(block_diff)
+            left_null = ~np.isfinite(left_num)
+            right_null = ~np.isfinite(right_num)
+            tolerances = np.asarray(
+                [self._column_numeric_tol(columns[idx]) for idx in numeric_idx],
+                dtype=float,
+            )
+            limit = tolerances[:, 0][None, :] + tolerances[:, 1][None, :] * np.abs(right_num)
+            block_one = (left_null ^ right_null) & common
+            block_both = left_null & right_null & common
+            block_mismatch = (block_abs > limit) | block_one
+            if not self.config.both_null_equal:
+                block_mismatch |= block_both
+            block_mismatch &= common
+            diff[:, numeric_idx] = block_diff
+            abs_diff[:, numeric_idx] = block_abs
+            one_null[:, numeric_idx] = block_one
+            both_null[:, numeric_idx] = block_both
+            mismatch[:, numeric_idx] = block_mismatch
+
+        if string_idx:
+            left_null = np.column_stack([left_series[idx].isna().to_numpy() for idx in string_idx])
+            right_null = np.column_stack([right_series[idx].isna().to_numpy() for idx in string_idx])
+            left_text = np.column_stack(
+                [left_series[idx].astype("string").fillna("").astype(str).to_numpy() for idx in string_idx]
+            )
+            right_text = np.column_stack(
+                [right_series[idx].astype("string").fillna("").astype(str).to_numpy() for idx in string_idx]
+            )
+            block_one = (left_null ^ right_null) & common
+            block_both = left_null & right_null & common
+            block_mismatch = (left_text != right_text) | block_one
+            if self.config.both_null_equal:
+                block_mismatch &= ~block_both
+            else:
+                block_mismatch |= block_both
+            block_mismatch &= common
+            one_null[:, string_idx] = block_one
+            both_null[:, string_idx] = block_both
+            mismatch[:, string_idx] = block_mismatch
+
+        return {
+            "mismatch": mismatch,
+            "one_null": one_null,
+            "both_null": both_null,
+            "diff": diff,
+            "abs_diff": abs_diff,
+            "left_values": left_values,
+            "right_values": right_values,
+        }
+
+    @staticmethod
+    def _datetime_seconds(series: pd.Series) -> np.ndarray:
+        values = ProcCompareEngine._to_datetime_series(series)
+        missing = values.isna().to_numpy()
+        result = values.astype("int64").to_numpy(dtype=float) / 1_000_000_000.0
+        result[missing] = np.nan
+        return result
+
+    @staticmethod
+    def _to_datetime_series(series: pd.Series) -> pd.Series:
+        try:
+            return pd.to_datetime(series, errors="coerce", format="mixed")
+        except (TypeError, ValueError):
+            return pd.to_datetime(series, errors="coerce")
+
     def _compare_series(
         self,
         col: str,
@@ -391,8 +544,8 @@ class ProcCompareEngine:
         abs_diff = pd.Series(np.nan, index=left.index, dtype="float64")
 
         if self._should_compare_datetime(col, left, right):
-            left_dt = pd.to_datetime(left, errors="coerce")
-            right_dt = pd.to_datetime(right, errors="coerce")
+            left_dt = self._to_datetime_series(left)
+            right_dt = self._to_datetime_series(right)
             diff = (left_dt - right_dt).dt.total_seconds()
             abs_diff = diff.abs()
             tol = self._column_datetime_tol(col)

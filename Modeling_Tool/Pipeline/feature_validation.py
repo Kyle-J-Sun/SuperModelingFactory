@@ -686,9 +686,7 @@ class FeatureValidationPipeline:
         all_cols = self._dedupe([col for matrix in matrices for col in matrix.columns])
         merged = pd.DataFrame(np.nan, index=all_cols, columns=all_cols)
         for matrix in matrices:
-            for row in matrix.index:
-                for col in matrix.columns:
-                    merged.loc[row, col] = matrix.loc[row, col]
+            merged.loc[matrix.index, matrix.columns] = matrix.to_numpy()
         return merged
 
     def _run_block_pairwise_correlation(self, csv_path: Path, feature_batches: list[list[str]]) -> pd.DataFrame:
@@ -707,23 +705,32 @@ class FeatureValidationPipeline:
                         right_numeric = [col for col in right_cols if col in numeric_cols]
                         if not left_numeric or not right_numeric:
                             continue
-                        corr = data[numeric_cols].corr(method=method)
-                        for var1 in left_numeric:
-                            for var2 in right_numeric:
-                                value = corr.loc[var1, var2]
-                                if pd.notna(value) and abs(value) > threshold:
-                                    rows.append(
-                                        {
-                                            "var1": var1,
-                                            "var2": var2,
-                                            "corr": value,
-                                            "abs_corr": abs(value),
-                                            "pair_type": "new_new_cross_batch",
-                                            "corr_method": method,
-                                            "batch_left": left_idx,
-                                            "batch_right": right_idx,
-                                        }
-                                    )
+                        corr_block = data[numeric_cols].corr(method=method).loc[
+                            left_numeric,
+                            right_numeric,
+                        ]
+                        values = corr_block.to_numpy(dtype=float)
+                        row_idx, col_idx = np.nonzero(
+                            np.isfinite(values) & (np.abs(values) > threshold)
+                        )
+                        if len(row_idx):
+                            left_names = np.asarray(left_numeric, dtype=object)
+                            right_names = np.asarray(right_numeric, dtype=object)
+                            selected = values[row_idx, col_idx]
+                            rows.extend(
+                                pd.DataFrame(
+                                    {
+                                        "var1": left_names[row_idx],
+                                        "var2": right_names[col_idx],
+                                        "corr": selected,
+                                        "abs_corr": np.abs(selected),
+                                        "pair_type": "new_new_cross_batch",
+                                        "corr_method": method,
+                                        "batch_left": left_idx,
+                                        "batch_right": right_idx,
+                                    }
+                                ).to_dict("records")
+                            )
         return pd.DataFrame(rows)
 
     def _cross_batch_correlated_detail(
@@ -748,11 +755,6 @@ class FeatureValidationPipeline:
         read_cols = self._dedupe(pair_features + target_cols)
         data = self._read_csv(csv_path, usecols=read_cols)
 
-        pair_meta = {}
-        for row in cross_pairs.to_dict("records"):
-            key = tuple(sorted([str(row.get("var1")), str(row.get("var2"))]))
-            pair_meta[key] = row
-
         rows = []
         for target in target_cols:
             if target not in data.columns:
@@ -760,65 +762,56 @@ class FeatureValidationPipeline:
             observed = data[data[target].notna()].copy()
             if len(observed) < cfg.min_group_size or observed[target].nunique() < 2:
                 continue
-            for _, pair in cross_pairs.iterrows():
-                features = [pair.get("var1"), pair.get("var2")]
-                features = [str(feature) for feature in features if pd.notna(feature) and str(feature) in observed.columns]
-                if len(features) < 2:
+            params = dict(cfg.corr_params or {})
+            params.pop("max_iterations", None)
+            corr_method = params.get("method", "pearson")
+            filt = CorrelationFilter(data=observed, dep=target, **params)
+            gains = filt._metric_summary(pair_features)
+            metric_cols = [
+                col
+                for col in ["var", "iv", "ks_in_gains", "lift_in_gains"]
+                if col in gains.columns
+            ]
+            metric_map = (
+                gains[metric_cols].set_index("var").to_dict("index")
+                if "var" in gains.columns
+                else {}
+            )
+            for pair in cross_pairs.to_dict("records"):
+                var1 = str(pair.get("var1"))
+                var2 = str(pair.get("var2"))
+                if var1 not in observed.columns or var2 not in observed.columns:
                     continue
-                params = dict(cfg.corr_params or {})
-                max_iterations = int(params.pop("max_iterations", 10))
-                corr_method = params.get("method", "pearson")
-                filt = CorrelationFilter(data=observed, dep=target, **params)
-                keep = filt.remove_highly_correlated(features, max_iterations=max_iterations)
-                removed = [feature for feature in features if feature not in keep]
-                for anchor, payload in getattr(filt, "correlated_dict", {}).items():
-                    corr = payload.get("corr", pd.DataFrame()).copy()
-                    gains = payload.get("gains", pd.DataFrame()).copy()
-                    metric_cols = [col for col in ["var", "iv", "ks_in_gains", "lift_in_gains"] if col in gains.columns]
-                    metric_map = gains[metric_cols].set_index("var").to_dict("index") if "var" in gains.columns else {}
-                    for _, corr_row in corr.iterrows():
-                        key = tuple(sorted([str(corr_row.get("VAR1")), str(corr_row.get("VAR2"))]))
-                        meta = pair_meta.get(key, {})
-                        row_corr_method = meta.get("corr_method", corr_method)
-                        for var in [corr_row.get("VAR1"), corr_row.get("VAR2")]:
-                            metrics = metric_map.get(var, {})
-                            rows.append(
-                                {
-                                    "target": target,
-                                    "anchor_var": anchor,
-                                    "var": var,
-                                    "corr_var1": corr_row.get("VAR1"),
-                                    "corr_var2": corr_row.get("VAR2"),
-                                    "corr": corr_row.get("CORR"),
-                                    "recommended_action": "keep" if var in keep else "remove",
-                                    "iv": metrics.get("iv"),
-                                    "ks_in_gains": metrics.get("ks_in_gains"),
-                                    "lift_in_gains": metrics.get("lift_in_gains"),
-                                    **self._corr_detail_fields(
-                                        corr_row.get("VAR1"),
-                                        corr_row.get("VAR2"),
-                                        var,
-                                        row_corr_method,
-                                        "cross_batch",
-                                    ),
-                                    "pair_type": "new_new_cross_batch",
-                                    "batch_left": meta.get("batch_left"),
-                                    "batch_right": meta.get("batch_right"),
-                                }
-                            )
-                if not getattr(filt, "correlated_dict", {}) and removed:
+                metric_name = (
+                    "ks_in_gains"
+                    if str(params.get("base_metric", "iv")).lower() == "ks"
+                    else "iv"
+                )
+                metric1 = metric_map.get(var1, {}).get(metric_name)
+                metric2 = metric_map.get(var2, {}).get(metric_name)
+                keep_var = var1
+                if pd.notna(metric2) and (pd.isna(metric1) or float(metric2) > float(metric1)):
+                    keep_var = var2
+                row_corr_method = pair.get("corr_method", corr_method)
+                for var in (var1, var2):
+                    metrics = metric_map.get(var, {})
                     rows.append(
                         {
                             "target": target,
-                            "var": ",".join(removed),
-                            "corr_var1": features[0],
-                            "corr_var2": features[1],
-                            "recommended_action": "remove",
+                            "anchor_var": var1,
+                            "var": var,
+                            "corr_var1": var1,
+                            "corr_var2": var2,
+                            "corr": pair.get("corr"),
+                            "recommended_action": "keep" if var == keep_var else "remove",
+                            "iv": metrics.get("iv"),
+                            "ks_in_gains": metrics.get("ks_in_gains"),
+                            "lift_in_gains": metrics.get("lift_in_gains"),
                             **self._corr_detail_fields(
-                                features[0],
-                                features[1],
-                                ",".join(removed),
-                                pair.get("corr_method", params.get("method", "pearson")),
+                                var1,
+                                var2,
+                                var,
+                                row_corr_method,
                                 "cross_batch",
                             ),
                             "pair_type": "new_new_cross_batch",
@@ -838,11 +831,14 @@ class FeatureValidationPipeline:
         if high_corr_pairs.empty or not {"var1", "var2"}.issubset(high_corr_pairs.columns):
             return high_corr_pairs
         result = high_corr_pairs.copy()
-        pair_keys = result.apply(
-            lambda row: tuple(sorted([str(row.get("var1")), str(row.get("var2"))])),
-            axis=1,
+        var1 = result["var1"].astype(str).to_numpy()
+        var2 = result["var2"].astype(str).to_numpy()
+        left = np.where(var1 <= var2, var1, var2)
+        right = np.where(var1 <= var2, var2, var1)
+        result["_pair_key"] = np.char.add(
+            np.char.add(left, "||"),
+            right,
         )
-        result["_pair_key"] = pair_keys
         result = result.sort_values("abs_corr", ascending=False, na_position="last")
         result = result.drop_duplicates("_pair_key").drop(columns="_pair_key")
         return result.reset_index(drop=True)
@@ -1064,6 +1060,7 @@ class FeatureValidationPipeline:
 
         q = self.config.distribution_params.get("q")
         spec_missing_value = self.config.distribution_params.get("spec_missing_value")
+        feature_block_size = self.config.distribution_params.get("feature_block_size", 128)
         numeric_features = [col for col in features if pd.api.types.is_numeric_dtype(data[col])]
         categorical_features = [col for col in features if col not in numeric_features]
         tables: dict[str, pd.DataFrame] = {}
@@ -1076,6 +1073,7 @@ class FeatureValidationPipeline:
                     groupby=valid_group_cols,
                     spec_missing_value=spec_missing_value,
                     q=q,
+                    feature_block_size=feature_block_size,
                 )
                 table.insert(0, "group_spec", name)
                 tables[f"numeric_{name}"] = table
@@ -1376,16 +1374,32 @@ class FeatureValidationPipeline:
         engines = self._psi_engines(target_cols, woe_artifacts)
         for target_key, engine in engines.items():
             calc = PSICalculator(binning_engine=engine, **cfg.psi_params) if cfg.psi_use_woe_bins and engine is not None else PSICalculator(**cfg.psi_params)
+            prepared_bins = (
+                calc._prepare_woe_bins(reference, combined, features)
+                if cfg.psi_use_woe_bins and engine is not None
+                else None
+            )
             for group_col in group_cols or [None]:
                 try:
-                    result = calc.calculate(
-                        reference,
-                        combined,
-                        features,
-                        group_by=None,
-                        group_name=group_col,
-                        return_details=True,
-                    )
+                    if prepared_bins is not None:
+                        result = calc._calculate_prebinned(
+                            prepared_bins[0],
+                            prepared_bins[1],
+                            combined,
+                            features,
+                            group_col,
+                            True,
+                            calc.psi_missing_bucket_policy,
+                        )
+                    else:
+                        result = calc.calculate(
+                            reference,
+                            combined,
+                            features,
+                            group_by=None,
+                            group_name=group_col,
+                            return_details=True,
+                        )
                     if isinstance(result, dict) and "psi" in result:
                         if "details" in result:
                             details[f"{target_key}:{group_col}"] = result["details"]
@@ -1439,19 +1453,68 @@ class FeatureValidationPipeline:
             data = combined[combined[target].notna()].copy()
             if len(data) < self.config.min_group_size:
                 continue
+            binner = None
+            if self.config.ivks_use_woe_bins:
+                binner = woe_artifacts.get("by_target", {}).get(target, {}).get("engine")
+            bins_frame = None
+            if binner is not None:
+                from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+                adapter = as_woe_engine(binner)
+                if adapter is not None:
+                    feature_block_size = (self.config.ivks_params or {}).get(
+                        "feature_block_size", 64
+                    )
+                    bins_frame = adapter.assign_bins_frame(
+                        data,
+                        features,
+                        feature_block_size=feature_block_size,
+                    )
             group_specs = self._ivks_group_specs()
             for group_name, group_cols in group_specs.items():
                 valid_group_cols = [col for col in group_cols if col in data.columns]
                 if not valid_group_cols:
-                    rows.append(self._single_ivks(data, features, target, "global", {}, woe_artifacts))
+                    if bins_frame is not None:
+                        rows.append(
+                            self._ivks_from_assigned_bins(
+                                data, bins_frame, features, target, "global", {}
+                            )
+                        )
+                    else:
+                        rows.append(self._single_ivks(data, features, target, "global", {}, woe_artifacts))
+                elif bins_frame is not None:
+                    rows.append(
+                        self._ivks_from_assigned_bins_grouped(
+                            data,
+                            bins_frame,
+                            features,
+                            target,
+                            group_name,
+                            valid_group_cols,
+                        )
+                    )
                 else:
-                    for group_value, sub in data.groupby(valid_group_cols, dropna=False):
+                    grouped = data.groupby(valid_group_cols, dropna=False, sort=True)
+                    for group_value, positions in grouped.indices.items():
+                        sub = data.iloc[positions]
                         if len(sub) < self.config.min_group_size:
                             continue
                         if not isinstance(group_value, tuple):
                             group_value = (group_value,)
                         group_info = dict(zip(valid_group_cols, group_value))
-                        rows.append(self._single_ivks(sub, features, target, group_name, group_info, woe_artifacts))
+                        if bins_frame is not None:
+                            rows.append(
+                                self._ivks_from_assigned_bins(
+                                    sub,
+                                    bins_frame.iloc[positions],
+                                    features,
+                                    target,
+                                    group_name,
+                                    group_info,
+                                )
+                            )
+                        else:
+                            rows.append(self._single_ivks(sub, features, target, group_name, group_info, woe_artifacts))
         frames = [df for df in rows if isinstance(df, pd.DataFrame) and not df.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -1493,6 +1556,7 @@ class FeatureValidationPipeline:
                 report[key] = value
             return report
         params = dict(cfg.ivks_params or {})
+        params.pop("feature_block_size", None)
         iv_cut = float(params.pop("iv_cut", 0.0))
         insights = VarExtractionInsights(
             data=data,
@@ -1518,6 +1582,36 @@ class FeatureValidationPipeline:
         adapter = as_woe_engine(binner)
         if adapter is None:
             return pd.DataFrame()
+        feature_block_size = (self.config.ivks_params or {}).get("feature_block_size", 64)
+        assign_bins_frame = getattr(adapter, "assign_bins_frame", None)
+        if callable(assign_bins_frame):
+            bins_frame = assign_bins_frame(
+                data,
+                features,
+                feature_block_size=feature_block_size,
+            )
+        else:
+            # Custom adapters written against the original protocol may only
+            # expose assign_bins(). Keep them compatible without slowing the
+            # built-in block transform path.
+            bins_frame = pd.DataFrame(
+                {var: adapter.assign_bins(data, var) for var in features},
+                index=data.index,
+            )
+        report = self._ivks_from_assigned_bins(
+            data, bins_frame, features, target, "global", {}
+        )
+        return report.drop(columns=["target", "group_spec"], errors="ignore")
+
+    def _ivks_from_assigned_bins(
+        self,
+        data: pd.DataFrame,
+        bins_frame: pd.DataFrame,
+        features: list[str],
+        target: str,
+        group_spec: str,
+        group_info: dict[str, Any],
+    ) -> pd.DataFrame:
         target_series = data[target].astype(int)
         total_bad = max(float((target_series == 1).sum()), 1.0)
         total_good = max(float((target_series == 0).sum()), 1.0)
@@ -1527,7 +1621,7 @@ class FeatureValidationPipeline:
             if var not in data.columns or data[var].nunique(dropna=False) <= 1:
                 continue
             try:
-                bins = adapter.assign_bins(data, var)
+                bins = bins_frame[var]
                 # Cast bins to object dtype and replace NaN with an explicit sentinel to
                 # avoid mixed Interval + NaN sort issues under older pandas/numpy combos
                 # (pandas <2.0 raises TypeError when groupby(sort=True) sees such a mix).
@@ -1573,7 +1667,136 @@ class FeatureValidationPipeline:
             return pd.DataFrame()
         report = pd.DataFrame(rows).round(4)
         iv_cut = float((self.config.ivks_params or {}).get("iv_cut", 0.0))
-        return report[report["iv"] >= iv_cut].reset_index(drop=True)
+        report = report[report["iv"] >= iv_cut].reset_index(drop=True)
+        report.insert(0, "target", target)
+        report.insert(1, "group_spec", group_spec)
+        for key, value in group_info.items():
+            report[key] = value
+        return report
+
+    def _ivks_from_assigned_bins_grouped(
+        self,
+        data: pd.DataFrame,
+        bins_frame: pd.DataFrame,
+        features: list[str],
+        target: str,
+        group_spec: str,
+        group_cols: list[str],
+    ) -> pd.DataFrame:
+        """Aggregate group x bin x target counts once for each feature."""
+        if not group_cols:
+            return self._ivks_from_assigned_bins(
+                data, bins_frame, features, target, group_spec, {}
+            )
+
+        group_key = group_cols[0] if len(group_cols) == 1 else group_cols
+        grouped = data.groupby(group_key, dropna=False, sort=True)
+        group_codes = grouped.ngroup().to_numpy(dtype=np.int64)
+        group_values = list(grouped.size().index)
+        group_positions = [
+            np.flatnonzero(group_codes == group_idx)
+            for group_idx in range(len(group_values))
+        ]
+        eligible_groups = [
+            group_idx
+            for group_idx, positions in enumerate(group_positions)
+            if len(positions) >= self.config.min_group_size
+        ]
+        if not eligible_groups:
+            return pd.DataFrame()
+
+        target_values = data[target].astype(int).to_numpy()
+        feature_counts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        n_groups = len(group_values)
+        for var in features:
+            if var not in data.columns or data[var].nunique(dropna=False) <= 1:
+                continue
+            bin_values = bins_frame[var].to_numpy(dtype=object)
+            bin_values = np.where(pd.isna(bin_values), "__MISSING__", bin_values)
+            bin_codes, categories = pd.factorize(bin_values, sort=False)
+            n_bins = len(categories)
+            flat_codes = group_codes * n_bins + bin_codes
+            counts = np.bincount(
+                flat_codes,
+                minlength=n_groups * n_bins,
+            ).reshape(n_groups, n_bins)
+            bad_counts = np.bincount(
+                flat_codes,
+                weights=target_values,
+                minlength=n_groups * n_bins,
+            ).reshape(n_groups, n_bins)
+            feature_counts[var] = (counts, bad_counts)
+
+        rows = []
+        for group_idx in eligible_groups:
+            positions = group_positions[group_idx]
+            raw_group_value = group_values[group_idx]
+            value_tuple = (
+                raw_group_value
+                if isinstance(raw_group_value, tuple)
+                else (raw_group_value,)
+            )
+            group_info = dict(zip(group_cols, value_tuple))
+            group_target = target_values[positions]
+            overall_bad = max(float(group_target.mean()), 1e-6)
+
+            for var, (counts_matrix, bad_matrix) in feature_counts.items():
+                counts = counts_matrix[group_idx].astype(float, copy=False)
+                observed = counts > 0
+                counts = counts[observed]
+                bad_counts = bad_matrix[group_idx][observed]
+                good_counts = counts - bad_counts
+                total_bad = max(float(bad_counts.sum()), 1.0)
+                total_good = max(float(good_counts.sum()), 1.0)
+                bad_pct = bad_counts / total_bad
+                good_pct = good_counts / total_good
+                woe = np.log((bad_pct + 1e-6) / (good_pct + 1e-6))
+                iv = float(np.sum((bad_pct - good_pct) * woe))
+                bad_rate = np.divide(
+                    bad_counts,
+                    counts,
+                    out=np.full_like(bad_counts, np.nan, dtype=float),
+                    where=counts > 0,
+                )
+                order = np.argsort(-np.nan_to_num(bad_rate, nan=-np.inf))
+                ks = float(
+                    np.max(
+                        np.abs(
+                            np.cumsum(bad_pct[order])
+                            - np.cumsum(good_pct[order])
+                        )
+                    )
+                )
+                lift_values = bad_rate / overall_bad
+                lift = float(np.nanmax(lift_values)) if len(lift_values) else np.nan
+
+                series = data[var].iloc[positions]
+                is_numeric = pd.api.types.is_numeric_dtype(series)
+                row = {
+                    "var": var,
+                    "n_all": len(series),
+                    "n": int(series.notna().sum()),
+                    "ks_in_gains": ks,
+                    "lift_in_gains": lift,
+                    "iv": iv,
+                    "n_bump": int(observed.sum()),
+                    "missing_rate": float(series.isna().mean()),
+                    "min": float(series.min()) if is_numeric else np.nan,
+                    "mean": float(series.mean()) if is_numeric else np.nan,
+                    "max": float(series.max()) if is_numeric else np.nan,
+                    "n_bins": int(observed.sum()),
+                }
+                row.update(group_info)
+                rows.append(row)
+
+        if not rows:
+            return pd.DataFrame()
+        report = pd.DataFrame(rows).round(4)
+        iv_cut = float((self.config.ivks_params or {}).get("iv_cut", 0.0))
+        report = report[report["iv"] >= iv_cut].reset_index(drop=True)
+        report.insert(0, "target", target)
+        report.insert(1, "group_spec", group_spec)
+        return report
 
     def _run_correlation(
         self,
