@@ -7,7 +7,14 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from ._common import as_list, make_dirs, normalize_group_specs, safe_to_csv, write_basic_excel
+from ._common import (
+    as_list,
+    make_dirs,
+    normalize_group_specs,
+    normalize_split_values,
+    safe_to_csv,
+    write_basic_excel,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -287,6 +294,8 @@ class ScoreComparisonPipeline:
                     data.loc[missing_mask, col] = pd.NA
                 elif cfg.include_missing:
                     data.loc[missing_mask, col] = "[Missing]"
+        if cfg.split_col and cfg.split_col in data.columns:
+            data[cfg.split_col] = normalize_split_values(data[cfg.split_col])
 
     def _resolve_scores(self, data: pd.DataFrame) -> list[str]:
         cfg = self.config
@@ -314,10 +323,9 @@ class ScoreComparisonPipeline:
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
         if cfg.split_col:
-            values = data[cfg.split_col].dropna().astype(str).str.strip().str.lower()
-            invalid = sorted(set(values) - {"ins", "oos", "oot"})
-            if invalid:
-                raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
+            values = normalize_split_values(data[cfg.split_col]).dropna()
+            if values.empty:
+                raise ValueError(f"split_col {cfg.split_col!r} must contain at least one non-empty value")
 
     def _custom_metrics_func(self, sub_df: pd.DataFrame) -> pd.Series:
         cfg = self.config

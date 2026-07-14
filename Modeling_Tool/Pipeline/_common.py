@@ -55,6 +55,12 @@ def as_list(value: Any | Iterable[Any] | None, default: list[Any] | None = None)
     return list(value)
 
 
+def normalize_split_values(values: pd.Series) -> pd.Series:
+    """Normalize declared split labels for case-insensitive pipeline routing."""
+    normalized = values.astype("string").str.strip().str.lower()
+    return normalized.mask(normalized.eq(""), pd.NA)
+
+
 def normalize_group_specs(
     value: Any,
     *,

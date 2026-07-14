@@ -17,6 +17,7 @@ from ._common import (
     as_list,
     make_dirs,
     normalize_group_specs,
+    normalize_split_values,
     safe_to_csv,
     split_oot_by_flag,
     validate_woe_fit_query_columns,
@@ -132,6 +133,7 @@ class FeatureValidationPipelineResult:
     selected_features: list[str] = field(default_factory=list)
     selection_summary: dict[str, Any] = field(default_factory=dict)
     screening_artifact: Any | None = None
+    config_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 class FeatureValidationPipeline:
@@ -180,6 +182,12 @@ class FeatureValidationPipeline:
         incumbent_features = self._resolve_incumbent_features(work, new_features)
         target_cols = [col for col in as_list(cfg.target_cols) if col in work.columns]
         self._validate_input(work, new_features, incumbent_features, target_cols)
+        config_snapshot = self._build_config_snapshot(
+            new_features,
+            incumbent_features,
+            target_cols,
+            batch_mode=False,
+        )
 
         output_dir = Path(cfg.output_dir)
         if cfg.write_outputs or cfg.write_excel:
@@ -224,6 +232,7 @@ class FeatureValidationPipeline:
                 incumbent_features=incumbent_features,
                 target_cols=target_cols,
                 woe_artifacts=woe_artifacts,
+                config_snapshot=config_snapshot,
             )
         validation_summary = self._build_validation_summary(
             data=combined,
@@ -270,6 +279,7 @@ class FeatureValidationPipeline:
             selected_features=selected_features,
             selection_summary=selection_summary,
             screening_artifact=screening_artifact,
+            config_snapshot=config_snapshot,
         )
 
     def _resolve_input_type(self, data: pd.DataFrame | str | Path) -> str:
@@ -407,6 +417,7 @@ class FeatureValidationPipeline:
             selected_features=list(result.selected_features),
             selection_summary=dict(result.selection_summary or {}),
             screening_artifact=result.screening_artifact,
+            config_snapshot=dict(result.config_snapshot or {}),
         )
 
     def _validate_batch_config(self, new_features: list[str]) -> None:
@@ -496,6 +507,10 @@ class FeatureValidationPipeline:
         return self._dedupe([col for col in candidates if col and col in header_set])
 
     def _stable_split_labels(self, base_df: pd.DataFrame, splits: dict[str, pd.DataFrame]) -> pd.Series:
+        cfg = self.config
+        if cfg.split_col and cfg.split_col in base_df.columns:
+            return normalize_split_values(base_df[cfg.split_col])
+
         labels = pd.Series("ins", index=base_df.index, dtype=object)
         oos_ids = set(splits.get("oos", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
         oot_ids = set(splits.get("oot", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
@@ -503,6 +518,11 @@ class FeatureValidationPipeline:
         row_ids = base_df["_smf_batch_row_id"]
         labels.loc[row_ids.isin(oos_ids)] = "oos"
         labels.loc[row_ids.isin(unique_oot_ids)] = "oot"
+        for name, frame in splits.items():
+            if name in {"ins", "oos", "oot"}:
+                continue
+            ids = set(frame.get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
+            labels.loc[row_ids.isin(ids)] = name
         return labels
 
     def _merge_batch_results(
@@ -554,6 +574,12 @@ class FeatureValidationPipeline:
         selected_features = self._dedupe(
             [feat for res in batch_results for feat in as_list(res.selected_features)]
         )
+        config_snapshot = self._build_config_snapshot(
+            new_features,
+            incumbent_features,
+            target_cols,
+            batch_mode=True,
+        )
         selection_summary: dict[str, Any] = {}
         screening_artifact = None
         if self.config.selection_enabled and target_cols:
@@ -561,12 +587,7 @@ class FeatureValidationPipeline:
                 "initial_features": list(new_features),
                 "final_features": selected_features,
                 "target_col": target_cols[0],
-                "config_snapshot": {
-                    "selection_enabled": True,
-                    "selection_params": dict(self.config.selection_params or {}),
-                    "weight_col": self.config.weight_col,
-                    "batch_mode": True,
-                },
+                "config_snapshot": config_snapshot,
             }
             if selected_features:
                 from .screening_artifact import FeatureScreeningArtifact
@@ -619,6 +640,7 @@ class FeatureValidationPipeline:
             selected_features=selected_features,
             selection_summary=selection_summary,
             screening_artifact=screening_artifact,
+            config_snapshot=config_snapshot,
         )
 
     @staticmethod
@@ -854,6 +876,30 @@ class FeatureValidationPipeline:
         ]
         return pd.DataFrame(rows)
 
+    def _build_config_snapshot(
+        self,
+        new_features: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+        *,
+        batch_mode: bool,
+    ) -> dict[str, Any]:
+        cfg = self.config
+        return {
+            "selection_enabled": bool(cfg.selection_enabled),
+            "selection_params": dict(cfg.selection_params or {}),
+            "weight_col": cfg.weight_col,
+            "target_col": target_cols[0] if target_cols else None,
+            "target_cols": list(target_cols),
+            "new_feature_cols": list(new_features),
+            "incumbent_feature_cols": list(incumbent_features),
+            "woe_engine": cfg.woe_engine,
+            "woe_fit_query": cfg.woe_fit_query,
+            "woe_params": dict(cfg.woe_params or {}),
+            "monotone_woe_params": dict(cfg.monotone_woe_params or {}),
+            "batch_mode": bool(batch_mode),
+        }
+
     def _validate_input(
         self,
         data: pd.DataFrame,
@@ -864,6 +910,8 @@ class FeatureValidationPipeline:
         cfg = self.config
         missing = [col for col in [cfg.id_col, cfg.apply_time_col] if col and col not in data.columns]
         missing += [col for col in new_features + incumbent_features + target_cols if col not in data.columns]
+        if cfg.weight_col and cfg.weight_col not in data.columns:
+            missing.append(cfg.weight_col)
         if missing:
             raise KeyError(f"Missing required columns: {sorted(set(missing))}")
         if not new_features:
@@ -917,18 +965,20 @@ class FeatureValidationPipeline:
             raise KeyError(f"Missing split_col {cfg.split_col!r}")
         if sample_col in work.columns:
             raw_split = work[sample_col]
-            lower = raw_split.astype(str).str.strip().str.lower()
-            if cfg.split_col:
-                invalid = sorted(set(raw_split.dropna().astype(str).str.strip().str.lower()) - {"ins", "oos", "oot"})
-                if invalid:
-                    raise ValueError(f"split_col {cfg.split_col!r} only supports ins/oos/oot values, got {invalid}")
-            ins = work[lower == "ins"].copy()
-            oos = work[lower == "oos"].copy()
-            oot = work[lower == "oot"].copy()
+            normalized = normalize_split_values(raw_split)
+            ins = work[normalized.eq("ins").fillna(False)].copy()
+            oos = work[normalized.eq("oos").fillna(False)].copy()
+            oot = work[normalized.eq("oot").fillna(False)].copy()
             if len(ins) and len(oos):
                 if not len(oot):
                     oot = oos.copy()
-                return {"ins": ins, "oos": oos, "oot": oot}
+                splits = {"ins": ins, "oos": oos, "oot": oot}
+                if cfg.split_col:
+                    reserved = set(splits)
+                    for label in normalized.dropna().drop_duplicates().tolist():
+                        if label not in reserved:
+                            splits[str(label)] = work[normalized.eq(label).fillna(False)].copy()
+                return splits
             if cfg.split_col:
                 raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
 
@@ -1251,6 +1301,7 @@ class FeatureValidationPipeline:
         incumbent_features: list[str],
         target_cols: list[str],
         woe_artifacts: dict[str, Any],
+        config_snapshot: dict[str, Any],
     ) -> tuple[list[str], dict[str, Any], Any | None]:
         from Modeling_Tool.Feature.Feature_Screen import feature_screen
         from .screening_artifact import FeatureScreeningArtifact, screen_result_to_summary
@@ -1274,24 +1325,22 @@ class FeatureValidationPipeline:
             config=screen_cfg,
             prefit_woe_engine=engine,
         )
-        config_snapshot = {
-            "selection_enabled": True,
-            "selection_params": dict(cfg.selection_params or {}),
+        selection_config_snapshot = dict(config_snapshot)
+        selection_config_snapshot.update({
             "missing_rate_threshold": screen_cfg.missing_rate_threshold,
-            "weight_col": cfg.weight_col,
             "psi_use_woe_bins": screen_cfg.psi_use_woe_bins,
             "iv_use_woe_bins": screen_cfg.iv_use_woe_bins,
             "corr_use_woe_bins": screen_cfg.corr_use_woe_bins,
             "n_incumbent_features": len(incumbent_features),
-        }
+        })
         selection_summary = {
             "initial_features": list(new_features),
             "final_features": list(result.selected_features),
             "target_col": target,
-            "config_snapshot": config_snapshot,
+            "config_snapshot": selection_config_snapshot,
         }
         selection_summary.update(screen_result_to_summary(result, new_features))
-        selection_summary["config_snapshot"] = config_snapshot
+        selection_summary["config_snapshot"] = selection_config_snapshot
         artifact = FeatureScreeningArtifact.from_screen_result(
             result,
             initial_features=list(new_features),
@@ -1299,7 +1348,7 @@ class FeatureValidationPipeline:
             weight_col=cfg.weight_col,
             woe_artifacts=woe_artifacts,
             source="fvp",
-            config_snapshot=config_snapshot,
+            config_snapshot=selection_config_snapshot,
         )
         return list(result.selected_features), selection_summary, artifact
 

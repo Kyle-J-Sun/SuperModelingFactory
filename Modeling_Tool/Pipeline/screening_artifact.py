@@ -81,24 +81,47 @@ class FeatureScreeningArtifact:
         result: Any,
         *,
         target_col: str | None = None,
+        weight_col: str | None = None,
     ) -> FeatureScreeningArtifact:
         if getattr(result, "screening_artifact", None) is not None:
             return result.screening_artifact
+        summary = dict(getattr(result, "selection_summary", {}) or {})
+        summary_snapshot = dict(summary.get("config_snapshot", {}) or {})
+        result_snapshot = dict(getattr(result, "config_snapshot", {}) or {})
+        config_snapshot = {**summary_snapshot, **result_snapshot}
         resolved_target = target_col
         if not resolved_target:
-            summary = getattr(result, "selection_summary", {}) or {}
             resolved_target = summary.get("target_col")
         if not resolved_target:
+            resolved_target = config_snapshot.get("target_col")
+        if not resolved_target:
+            target_cols = list(config_snapshot.get("target_cols") or [])
+            resolved_target = target_cols[0] if target_cols else None
+        if not resolved_target:
             raise ValueError("target_col is required when building artifact from FVP result.")
-        summary = dict(getattr(result, "selection_summary", {}) or {})
-        config_snapshot = dict(summary.get("config_snapshot", {}) or {})
+        selected_features = list(getattr(result, "selected_features", []) or [])
+        if not selected_features and config_snapshot.get("selection_enabled") is False:
+            selected_features = list(config_snapshot.get("new_feature_cols") or [])
+        if not summary and config_snapshot.get("selection_enabled") is False:
+            summary = {
+                "initial_features": list(selected_features),
+                "final_features": list(selected_features),
+                "target_col": str(resolved_target),
+                "selection_skipped": True,
+                "config_snapshot": config_snapshot,
+            }
+        resolved_weight_col = (
+            config_snapshot["weight_col"]
+            if "weight_col" in config_snapshot
+            else weight_col
+        )
         return cls(
-            selected_features=list(getattr(result, "selected_features", []) or []),
+            selected_features=selected_features,
             selection_summary=summary,
             woe_artifacts=getattr(result, "woe_artifacts", None),
             source="fvp",
             target_col=str(resolved_target),
-            weight_col=config_snapshot.get("weight_col"),
+            weight_col=resolved_weight_col,
             config_snapshot=config_snapshot,
             created_at=datetime.now(timezone.utc).isoformat(),
         )

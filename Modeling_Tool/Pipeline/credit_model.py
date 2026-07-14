@@ -446,6 +446,7 @@ class CreditModelPipeline:
             return FeatureScreeningArtifact.from_fvp_result(
                 cfg.feature_validation_result,
                 target_col=cfg.target_col,
+                weight_col=cfg.weight_col,
             )
         return None
 
