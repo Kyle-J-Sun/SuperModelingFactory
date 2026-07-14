@@ -833,8 +833,11 @@ class FeatureValidationPipeline:
         result = high_corr_pairs.copy()
         var1 = result["var1"].astype(str).to_numpy()
         var2 = result["var2"].astype(str).to_numpy()
-        left = np.where(var1 <= var2, var1, var2)
-        right = np.where(var1 <= var2, var2, var1)
+        # NumPy 1.x keeps ``np.where`` string results as object arrays and
+        # rejects mixing them with the Unicode separator in ``np.char.add``.
+        # Normalize both sides to the same string dtype before composing keys.
+        left = np.asarray(np.where(var1 <= var2, var1, var2), dtype=np.str_)
+        right = np.asarray(np.where(var1 <= var2, var2, var1), dtype=np.str_)
         result["_pair_key"] = np.char.add(
             np.char.add(left, "||"),
             right,
