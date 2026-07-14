@@ -432,11 +432,16 @@ class WOE_Master(object):
         Args:
             data: pandas.DataFrame, data for plotting
             group: str or None, grouping variable name for distinguishing curves.
-                When ``None`` a single ungrouped curve per variable is drawn.
-                Prior to 0.6.2 this was a required positional argument, which
-                silently broke ungrouped callers (see `_plot_woe` in
-                `Modeling_Tool.Pipeline.feature_validation`). The underlying
-                ``get_bivar_graph`` primitive has always accepted ``group=None``.
+                When ``None`` a single ungrouped curve per variable is drawn
+                and no ``by_<group>`` output is produced. Prior to 0.6.2 this
+                was a required positional argument, which silently broke
+                ungrouped callers (see `_plot_woe` in
+                `Modeling_Tool.Pipeline.feature_validation`). 0.6.3 also
+                fixes ``WOE_Plot_Tool.get_bivar_graph``: the ``if group:``
+                guard there was moved up to wrap the summary/align/plot
+                triplet — the guard used to sit *after* an unconditional
+                ``data.groupby([None])`` that raised TypeError on ungrouped
+                calls.
             dirname: str, subdirectory name for saving (under graph_save_dir).
                 Required in practice; kept keyword-only-in-practice by keeping
                 the ``group`` slot second for backward compatibility with any
