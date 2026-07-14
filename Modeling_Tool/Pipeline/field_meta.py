@@ -321,6 +321,7 @@ _FIELD_DESCRIPTIONS = {
     "weight_col": "样本权重列名。None 表示等权。",
     "write_outputs": "是否落地 CSV、图表、模型路径等文件。",
     "write_excel": "是否生成 ExcelMaster/Excel 报告。",
+    "plot_outputs": "是否生成 Pipeline 自动分析图；仍受 write_outputs 总开关控制，不影响 CSV 或 Excel 输出。",
     "write_ri_datasets": "是否写出各 RI 方法的增强样本集，宽表场景可能很大。",
     "screening_artifact": "FeatureValidationPipeline 产出的 Python artifact 对象，不适合 GUI/YAML 直接编辑。",
     "feature_validation_result": "FeatureValidationPipelineResult 对象，不适合 GUI/YAML 直接编辑。",

@@ -112,6 +112,7 @@ class FeatureValidationPipelineConfig:
 
     write_outputs: bool = True
     write_excel: bool = True
+    plot_outputs: bool = True
 
 
 @dataclass
@@ -191,7 +192,9 @@ class FeatureValidationPipeline:
 
         output_dir = Path(cfg.output_dir)
         if cfg.write_outputs or cfg.write_excel:
-            make_dirs(output_dir, output_dir / "figs" / "woe")
+            make_dirs(output_dir)
+        if cfg.write_outputs and cfg.plot_outputs:
+            make_dirs(output_dir / "figs" / "woe")
 
         splits = self._split_data(work, target_cols[0] if target_cols else None)
         combined = self._combine_splits(splits)
@@ -1228,7 +1231,7 @@ class FeatureValidationPipeline:
 
     def _plot_woe(self, engine: Any, adapter: Any, train: pd.DataFrame, features: list[str], target: str) -> None:
         cfg = self.config
-        if not cfg.write_outputs:
+        if not (cfg.write_outputs and cfg.plot_outputs):
             return
         base_dir = Path(cfg.output_dir) / "figs" / "woe" / target
         make_dirs(base_dir)
