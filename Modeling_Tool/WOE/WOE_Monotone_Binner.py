@@ -2708,9 +2708,9 @@ class MonotoneWOEBinner:
         graph_path     : 图片保存目录（自动创建）
         group_name     : 分组列名（如 "month"），None = 画整体图
         _df_for_group  : 含原始特征+target+group_name 的 DataFrame（group 模式必填）
-        dpi            : 图片分辨率，默认 150
-        figsize        : 图片尺寸，默认 (9, 6)。small_multiples 模式下为单个 panel
-                         的基准尺寸，整图按子图网格自动放大
+        dpi            : 图片分辨率，默认 150；clustered by-group 模式固定为 200
+        figsize        : 图片尺寸，默认 (9, 6)；clustered by-group 模式固定为 (16, 6)。
+                         small_multiples 模式下为单个 panel 的基准尺寸，整图按子图网格自动放大
         bar_mode       : 分组图柱样式，"pooled" | "clustered" | "small_multiples"，
                          默认 "clustered"。group_name=None（整体图）时此参数忽略
         """
@@ -2720,6 +2720,9 @@ class MonotoneWOEBinner:
             raise ValueError(
                 f"bar_mode 必须是 {_valid_bar_modes} 之一，收到: {bar_mode!r}"
             )
+        is_clustered_group = group_name is not None and bar_mode == "clustered"
+        plot_figsize = (16, 6) if is_clustered_group else figsize
+        plot_dpi = 200 if is_clustered_group else dpi
         os.makedirs(graph_path, exist_ok=True)
         bins_dict = self.get_final_bins()
 
@@ -2761,7 +2764,7 @@ class MonotoneWOEBinner:
                 )
                 continue
 
-            fig, ax_bar = plt.subplots(figsize=figsize)
+            fig, ax_bar = plt.subplots(figsize=plot_figsize)
             ax_woe = ax_bar.twinx()
 
             pct_bad_n  = normal_df["pct_bad"].values  if n_normal > 0 else np.array([])
@@ -3128,7 +3131,7 @@ class MonotoneWOEBinner:
             safe_feat  = feat.replace("/", "_").replace("\\", "_")
             suffix_str = f"_by_{group_name}" if group_name else ""
             out_file   = os.path.join(graph_path, f"{safe_feat}{suffix_str}.png")
-            plt.savefig(out_file, dpi=dpi, bbox_inches="tight")
+            plt.savefig(out_file, dpi=plot_dpi, bbox_inches="tight")
             plt.close(fig)
             logger.info(f"  [plot_woe_graph] {out_file}")
 
