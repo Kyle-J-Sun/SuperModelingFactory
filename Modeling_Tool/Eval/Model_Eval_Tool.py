@@ -2362,15 +2362,24 @@ class PerformanceEvaluator:
                 for name, data in self.datasets.items():
                     if data is None:
                         continue
+                    wc = self.dataset_weight_cols.get(name) or active_weight_col
                     work_data = data.copy()
                     scr_name = self.scr_name
                     if scr_name is None:
                         scr_name = "_mdl_scr"
                         work_data[scr_name] = self.model.predict_proba(work_data.loc[:, self.feature_cols])[:, 1]
-                    eval_datasets[name] = {
+                    payload = {
                         "y_true": work_data[self.tgt_name],
                         "y_score": work_data[scr_name],
                     }
+                    resolved_weight = _weighted_eval.resolve_weights(
+                        work_data,
+                        weight_col=wc,
+                        expected_len=len(work_data),
+                    )
+                    if resolved_weight is not None:
+                        payload["sample_weight"] = resolved_weight
+                    eval_datasets[name] = payload
                 if eval_datasets:
                     evaluate_performance(
                         datasets=eval_datasets,

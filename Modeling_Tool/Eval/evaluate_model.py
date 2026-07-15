@@ -554,7 +554,49 @@ def __plot_kde_axes_base(ax, fontdicts):
     ax.set_ylabel('Density', fontdict=fontdicts['axislabel'])
 
 
-def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts):
+def _plot_weighted_kde_line(values, weights, ax, color, label):
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+    values = values[mask]
+    weights = weights[mask]
+    if values.size == 0:
+        return
+    if values.size < 2 or np.unique(values).size < 2:
+        ax.axvline(
+            np.average(values, weights=weights),
+            color=color,
+            linewidth=1.5,
+            label=label,
+        )
+        return
+
+    try:
+        sns.kdeplot(
+            x=values,
+            weights=weights,
+            ax=ax,
+            color=color,
+            label=label,
+            bw_adjust=0.5,
+            common_norm=False,
+            warn_singular=False,
+        )
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+        # Older seaborn/scipy combinations may reject weighted KDE. A
+        # weighted density line still preserves the intended population.
+        n_bins = max(5, min(50, int(np.sqrt(values.size))))
+        density, edges = np.histogram(
+            values,
+            bins=n_bins,
+            weights=weights,
+            density=True,
+        )
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        ax.plot(centers, density, color=color, linewidth=1.5, label=label)
+
+
+def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts, sample_weight=None):
     """在axes上绘制单个kde图.
     
     Parameters
@@ -572,16 +614,56 @@ def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts):
     """
     __plot_kde_axes_base(ax, fontdicts)
 
-    sns.distplot(y_score, bins=bins, hist=True, kde=False, ax=ax,
-                 hist_kws={'density': True, 'rwidth': 0.95, 'color': palette['ClassicBlueRedGrey'][2], 'alpha': 1, 'label': 'Total'}, )
-    sns.distplot(y_score[np.where(y_true==0)], bins=bins, hist=False, kde=True, 
-                 kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][0], 'label': 'Neg KDE'}, )
-    sns.distplot(y_score[np.where(y_true==1)], hist=False, kde=True,
-                 kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][1], 'label': 'Pos KDE'}, )
-    ax.axvline(x=np.mean(y_true), linestyle='-', linewidth=1, color=palette['ClassicGreyRed'][0],label='True')
-    ax.axvline(x=np.mean(y_score), linestyle='--', linewidth=1, color=palette['ClassicGreyRed'][1], label='Score')
+    if sample_weight is None:
+        sns.distplot(y_score, bins=bins, hist=True, kde=False, ax=ax,
+                     hist_kws={'density': True, 'rwidth': 0.95, 'color': palette['ClassicBlueRedGrey'][2], 'alpha': 1, 'label': 'Total'}, )
+        sns.distplot(y_score[np.where(y_true==0)], bins=bins, hist=False, kde=True,
+                     kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][0], 'label': 'Neg KDE'}, )
+        sns.distplot(y_score[np.where(y_true==1)], hist=False, kde=True,
+                     kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][1], 'label': 'Pos KDE'}, )
+        true_mean = np.mean(y_true)
+        score_mean = np.mean(y_score)
+        title = 'N={0:,}  True={1:.2%}  Score={2:.2%}'.format(
+            len(y_true), true_mean, score_mean
+        )
+    else:
+        sample_weight = np.asarray(sample_weight, dtype=float)
+        ax.hist(
+            y_score,
+            bins=bins,
+            weights=sample_weight,
+            density=True,
+            rwidth=0.95,
+            color=palette['ClassicBlueRedGrey'][2],
+            alpha=1,
+            label='Total (Weighted)',
+        )
+        neg_mask = y_true == 0
+        pos_mask = y_true == 1
+        _plot_weighted_kde_line(
+            y_score[neg_mask],
+            sample_weight[neg_mask],
+            ax,
+            palette['ClassicBlueRedGrey'][0],
+            'Neg KDE (Weighted)',
+        )
+        _plot_weighted_kde_line(
+            y_score[pos_mask],
+            sample_weight[pos_mask],
+            ax,
+            palette['ClassicBlueRedGrey'][1],
+            'Pos KDE (Weighted)',
+        )
+        true_mean = _weighted_eval.safe_weighted_average(y_true, sample_weight)
+        score_mean = _weighted_eval.safe_weighted_average(y_score, sample_weight)
+        title = 'N={0:,.2f}  Raw={1:,}  True={2:.2%}  Score={3:.2%}'.format(
+            np.sum(sample_weight), len(y_true), true_mean, score_mean
+        )
 
-    ax.set_title('N={0:,}  True={1:.2%}  Score={2:.2%}'.format(len(y_true), np.mean(y_true), np.mean(y_score)), fontdict=fontdicts['subtitle'])
+    ax.axvline(x=true_mean, linestyle='-', linewidth=1, color=palette['ClassicGreyRed'][0],label='True')
+    ax.axvline(x=score_mean, linestyle='--', linewidth=1, color=palette['ClassicGreyRed'][1], label='Score')
+
+    ax.set_title(title, fontdict=fontdicts['subtitle'])
     ax.legend(loc=1, fontsize=fontdicts['legend']['size'])
 
 
@@ -1553,6 +1635,66 @@ def __plot_multi_gain_axes(pct_dfs, ax, fontdicts):
         Y = np.insert(Y, 0, 0)
         ax.plot(X, Y, color=palette['MorandiDark'][i], linewidth=2, marker='.', markersize=5, label='{0} avgTrue'.format(md))
 
+
+def _weighted_gains_to_plot_frames(weighted_gains):
+    """Convert weighted gains output into the plotting helpers' long schema."""
+    if weighted_gains is None or weighted_gains.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    required = {"N", "N_BAD", "AVG_SCORE", "AVG_BAD", "PROP"}
+    missing = sorted(required.difference(weighted_gains.columns))
+    if missing:
+        raise KeyError(f"Weighted gains table missing plotting columns: {missing}")
+
+    descending = weighted_gains.reset_index(drop=True).copy()
+    total_bad = float(descending["N_BAD"].sum())
+
+    def _convert(source):
+        source = source.reset_index(drop=True)
+        n = source["N"].to_numpy(dtype=float)
+        n_bad = source["N_BAD"].to_numpy(dtype=float)
+        proportion = source["PROP"].to_numpy(dtype=float)
+        capture_rate = np.divide(
+            n_bad,
+            total_bad,
+            out=np.zeros_like(n_bad, dtype=float),
+            where=total_bad != 0,
+        )
+        cumulative_n = np.cumsum(n)
+        cumulative_bad = np.cumsum(n_bad)
+        return pd.DataFrame(
+            {
+                "thresholds": np.cumsum(proportion) * 100.0,
+                "avg_score": source["AVG_SCORE"].to_numpy(dtype=float),
+                "avg_true": source["AVG_BAD"].to_numpy(dtype=float),
+                "proportion": proportion,
+                "capture_rate": capture_rate,
+                "cumsum_n": cumulative_n,
+                "cumavg_true": np.divide(
+                    cumulative_bad,
+                    cumulative_n,
+                    out=np.full_like(cumulative_bad, np.nan, dtype=float),
+                    where=cumulative_n != 0,
+                ),
+                "gain": np.cumsum(capture_rate),
+            }
+        )
+
+    # Percentile charts historically run from low score to high score, while
+    # gain charts run from the highest score downward.
+    percentile_frame = _convert(descending.iloc[::-1])
+    gain_frame = _convert(descending)
+    return percentile_frame, gain_frame
+
+
+def _set_weighted_axis_title(ax, fontdicts):
+    subtitle_size = fontdicts.get("subtitle", {}).get("size", 12)
+    ax.set_title(
+        f"Weighted\n{ax.get_title()}",
+        fontsize=max(9, subtitle_size - 2),
+    )
+
+
 @timeit_decorator
 def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None):
     """绘制单模型预测效果评价图.
@@ -1706,15 +1848,14 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
             nbins=bin_count,
             weight_col="w",
         )
-        pct_df = weighted_gains
-        pct_desc_df = weighted_gains.iloc[::-1].reset_index(drop=True)
+        pct_df, pct_desc_df = _weighted_gains_to_plot_frames(weighted_gains)
         if gains_table:
             y_gains = weighted_gains
         pct_info = {
             "pct_bins": weighted_gains.shape[0],
             "pct_interval": 100.0 / weighted_gains.shape[0] if weighted_gains.shape[0] else np.nan,
-            "pct_top_avgTrue": float(weighted_gains["AVG_BAD"].iloc[-1]) if len(weighted_gains) else np.nan,
-            "pct_btm_avgTrue": float(weighted_gains["AVG_BAD"].iloc[0]) if len(weighted_gains) else np.nan,
+            "pct_top_avgTrue": float(weighted_gains["AVG_BAD"].iloc[0]) if len(weighted_gains) else np.nan,
+            "pct_btm_avgTrue": float(weighted_gains["AVG_BAD"].iloc[-1]) if len(weighted_gains) else np.nan,
         }
     else:
         if pct_bin_edges is not None:
@@ -1747,16 +1888,29 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
         else:
             pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False, sample_weight=sample_weight)
 
-    __plot_single_roc_axes(roc_df, plt.subplot(nrow, ncol, i*ncol+1), fontdicts)
-    __plot_single_kde_axes(y_true, y_score, dist_bins, plt.subplot(nrow, ncol, i*ncol+2), fontdicts)
+    ax_roc = plt.subplot(nrow, ncol, i*ncol+1)
+    __plot_single_roc_axes(roc_df, ax_roc, fontdicts)
+    ax_kde = plt.subplot(nrow, ncol, i*ncol+2)
+    __plot_single_kde_axes(
+        y_true,
+        y_score,
+        dist_bins,
+        ax_kde,
+        fontdicts,
+        sample_weight=sample_weight,
+    )
     if sample_weight is None:
         __plot_single_pct_axes(pct_df, plt.subplot(nrow, ncol, i*ncol+3), fontdicts)
         __plot_single_gain_axes(pct_desc_df, plt.subplot(nrow, ncol, i*ncol+4), fontdicts)
     else:
+        _set_weighted_axis_title(ax_roc, fontdicts)
+        _set_weighted_axis_title(ax_kde, fontdicts)
         ax_pct = plt.subplot(nrow, ncol, i * ncol + 3)
-        ax_pct.set_title("Percentile Chart (Weighted)", fontdict=fontdicts["subtitle"])
+        __plot_single_pct_axes(pct_df, ax_pct, fontdicts)
+        _set_weighted_axis_title(ax_pct, fontdicts)
         ax_gain = plt.subplot(nrow, ncol, i * ncol + 4)
-        ax_gain.set_title("Gain Chart (Weighted)", fontdict=fontdicts["subtitle"])
+        __plot_single_gain_axes(pct_desc_df, ax_gain, fontdicts)
+        _set_weighted_axis_title(ax_gain, fontdicts)
 
     info = {
         'N': float(np.sum(sample_weight)) if sample_weight is not None else len(y_true),
