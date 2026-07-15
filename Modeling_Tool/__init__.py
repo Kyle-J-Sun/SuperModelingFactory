@@ -83,6 +83,7 @@ from .WOE import (
 
 # Feature module
 from .Feature import (
+    proc_means_odps,
     DistributionShiftAnalyzer,
     DistributionPlotter,
     VarExtractionInsights,
@@ -267,4 +268,5 @@ __all__ = [
     'screen_config_from_mapping',
     'WeightedScreenResult',
     'weighted_feature_screen',
+    'proc_means_odps',
 ]

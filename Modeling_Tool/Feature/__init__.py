@@ -7,6 +7,7 @@ from .Distribution_Tool import (
     DistributionShiftAnalyzer,
     DistributionPlotter,
 )
+from .ODPS_Distribution_Tool import proc_means_odps
 
 from .Feature_Insights import (
     var_corr_filter,
@@ -40,7 +41,7 @@ from .Weighted_Screen import (
 
 __all__ = [
     # Distribution_Tool
-    'proc_means', 'proc_means_by_grp', 'get_distribution_shift',
+    'proc_means', 'proc_means_by_grp', 'proc_means_odps', 'get_distribution_shift',
     'get_distribution_shift_single_var', 'plot_distribution',
     'DistributionShiftAnalyzer', 'DistributionPlotter',
 
