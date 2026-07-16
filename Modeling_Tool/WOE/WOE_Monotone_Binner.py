@@ -126,30 +126,83 @@ def _chunk_chi2_worker(args):
     return ok, err
 
 
+class BinningPolicyViolation(ValueError):
+    """Governance-policy violation (G08/G09/G17 'raise' policies).
+
+    Subclasses ValueError for caller compatibility, but is re-raised through
+    the binner's per-feature fault-tolerance wrappers: a policy the user set
+    to 'raise' must stop the run, not degrade into a log line.
+    """
+
+
+def _dtree_refine_one_core(binner_lite, df, feat, sv_iv, max_bins, min_samples_leaf,
+                           monotone, eps, max_depth=None):
+    """refine_dtree 的单特征核心：串行路径与并行 worker 共用，杜绝两条路径漂移。
+
+    Returns
+    -------
+    update : dict | None
+        None 表示按 refine_min_n_bins_policy='enforce' 保留 refine 前结果。
+    status : str  ("ok" | "kept_prefit_min_n_bins")
+    """
+    df_normal, _ = binner_lite._split_special(df, feat)
+    new_edges = binner_lite._dtree_edges(
+        df_normal, feat, binner_lite.target_col, max_bins, min_samples_leaf,
+        max_depth=max_depth,
+    )
+    expected_dir = binner_lite._expected_direction.get(feat)
+    if monotone and len(new_edges) >= 1:
+        new_edges = binner_lite._monotone_merge_edges(
+            df_normal, feat, binner_lite.target_col, new_edges, eps,
+            direction=expected_dir,
+        )
+    wt, iv = binner_lite._compute_woe_table(df_normal, feat, new_edges)
+    merge_trace = [] if binner_lite.small_bin_policy is not None else None
+    if binner_lite.small_bin_policy is not None:
+        new_edges, wt = binner_lite._enforce_small_bins(df_normal, feat, new_edges, wt, merge_trace)
+        iv = float(wt["iv"].sum()) if len(wt) else 0.0
+    # G17: refine paths honor min_n_bins per policy.
+    policy = binner_lite.refine_min_n_bins_policy
+    if policy is not None and len(wt) < binner_lite.min_n_bins:
+        message = (
+            f"{feat}: refine_dtree produced {len(wt)} bin(s), below min_n_bins="
+            f"{binner_lite.min_n_bins}"
+        )
+        if policy == "raise":
+            raise BinningPolicyViolation(message)
+        if policy == "enforce":
+            return None, "kept_prefit_min_n_bins"
+        warnings.warn(message + "; keeping the dtree result (policy='warn').",
+                      UserWarning, stacklevel=3)
+    woes = wt.sort_values("bin")["woe"].values if len(wt) > 0 else np.array([])
+    if expected_dir is not None:
+        binner_lite._check_direction_conflict(feat, woes)
+    update = dict(
+        edges        = new_edges,
+        woe_table    = wt,
+        iv           = round(iv + sv_iv, 6),
+        is_monotonic = MonotoneWOEBinner._is_monotone(woes),
+        n_bins       = len(wt),
+        direction    = MonotoneWOEBinner._direction_of(np.asarray(woes, dtype=float)),
+        direction_basis = binner_lite._direction_basis.get(feat, "auto"),
+    )
+    if merge_trace:
+        update["merge_trace"] = merge_trace
+    return update, "ok"
+
+
 def _chunk_dtree_worker(args):
     """refine_dtree() 并行 worker：对一批特征执行决策树重分箱。"""
-    binner_lite, df, chunk_feats, sv_iv_map, max_bins, min_samples_leaf, monotone, eps = args
+    (binner_lite, df, chunk_feats, sv_iv_map, max_bins, min_samples_leaf,
+     monotone, eps, max_depth) = args
     ok, err = {}, {}
     for feat in chunk_feats:
         try:
-            df_normal, _ = binner_lite._split_special(df, feat)
-            new_edges = binner_lite._dtree_edges(
-                df_normal, feat, binner_lite.target_col, max_bins, min_samples_leaf
+            update, status = _dtree_refine_one_core(
+                binner_lite, df, feat, sv_iv_map.get(feat, 0.0), max_bins,
+                min_samples_leaf, monotone, eps, max_depth,
             )
-            if monotone and len(new_edges) >= 1:
-                new_edges = binner_lite._monotone_merge_edges(
-                    df_normal, feat, binner_lite.target_col, new_edges, eps
-                )
-            wt, iv = binner_lite._compute_woe_table(df_normal, feat, new_edges)
-            woes = wt.sort_values("bin")["woe"].values if len(wt) > 0 else np.array([])
-            sv_iv = sv_iv_map.get(feat, 0.0)
-            ok[feat] = dict(
-                edges        = new_edges,
-                woe_table    = wt,
-                iv           = round(iv + sv_iv, 6),
-                is_monotonic = MonotoneWOEBinner._is_monotone(woes),
-                n_bins       = len(wt),
-            )
+            ok[feat] = (update, status)
         except Exception as exc:
             import traceback
             err[feat] = (exc, traceback.format_exc())
@@ -218,6 +271,14 @@ class MonotoneWOEBinner:
         special_values: Optional[List] = None,
         cate_feats: Optional[List[str]] = None,
         bin_label_decimals: Optional[int] = None,
+        min_bad_count: Optional[int] = None,
+        min_good_count: Optional[int] = None,
+        small_bin_policy: Optional[str] = None,
+        monotone_direction: Any = "auto",
+        reference_target: Optional[str] = None,
+        direction_conflict_policy: Optional[str] = None,
+        missing_bin_strategy: Optional[str] = None,
+        refine_min_n_bins_policy: Optional[str] = None,
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col
@@ -230,6 +291,74 @@ class MonotoneWOEBinner:
         self.cate_feats        = list(cate_feats) if cate_feats else []
         self._cate_feats_set   = set(self.cate_feats)
         self.bin_label_decimals = bin_label_decimals
+
+        # ── 分箱治理参数（G08/G09/G17；默认全部 None/auto = 旧行为） ──
+        if small_bin_policy is not None and small_bin_policy not in {"merge", "warn", "raise"}:
+            raise ValueError(
+                f"small_bin_policy must be one of ['merge', 'warn', 'raise'] or None; "
+                f"got {small_bin_policy!r}"
+            )
+        if direction_conflict_policy is not None and direction_conflict_policy not in {"warn", "raise", "keep"}:
+            raise ValueError(
+                f"direction_conflict_policy must be one of ['warn', 'raise', 'keep'] or None; "
+                f"got {direction_conflict_policy!r}"
+            )
+        if missing_bin_strategy is not None and missing_bin_strategy not in {"empirical_special", "fixed_woe", "fail"}:
+            raise ValueError(
+                f"missing_bin_strategy must be one of ['empirical_special', 'fixed_woe', 'fail'] "
+                f"or None; got {missing_bin_strategy!r}"
+            )
+        if refine_min_n_bins_policy is not None and refine_min_n_bins_policy not in {"warn", "enforce", "raise"}:
+            raise ValueError(
+                f"refine_min_n_bins_policy must be one of ['warn', 'enforce', 'raise'] or None; "
+                f"got {refine_min_n_bins_policy!r}"
+            )
+        if isinstance(monotone_direction, dict):
+            bad_dirs = {k: v for k, v in monotone_direction.items() if v not in {"increasing", "decreasing", "auto"}}
+            if bad_dirs:
+                raise ValueError(
+                    f"monotone_direction dict values must be 'increasing'/'decreasing'/'auto'; got {bad_dirs}"
+                )
+        elif monotone_direction not in {"auto", "increasing", "decreasing"}:
+            raise ValueError(
+                f"monotone_direction must be 'auto'/'increasing'/'decreasing' or a dict; "
+                f"got {monotone_direction!r}"
+            )
+        if missing_bin_strategy == "empirical_special":
+            has_nan_sv = any(
+                v is None or (isinstance(v, float) and math.isnan(v))
+                for v in self.special_values
+            )
+            if not has_nan_sv:
+                raise ValueError(
+                    "missing_bin_strategy='empirical_special' requires NaN in special_values "
+                    "(e.g. special_values=[np.nan]) so missing rows get an empirical [Missing] bin."
+                )
+        if missing_bin_strategy == "fixed_woe":
+            has_nan_sv = any(
+                v is None or (isinstance(v, float) and math.isnan(v))
+                for v in self.special_values
+            )
+            if has_nan_sv:
+                raise ValueError(
+                    "missing_bin_strategy='fixed_woe' conflicts with NaN in special_values: "
+                    "missing rows would get an empirical bin, not the fixed missing_woe constant."
+                )
+        self.min_bad_count = min_bad_count
+        self.min_good_count = min_good_count
+        self.small_bin_policy = small_bin_policy
+        self.monotone_direction = monotone_direction
+        self.reference_target = reference_target
+        self.direction_conflict_policy = direction_conflict_policy
+        self.missing_bin_strategy = missing_bin_strategy
+        self.refine_min_n_bins_policy = refine_min_n_bins_policy
+        # Resolved at fit(): "empirical_special" | "fixed_woe" (audit basis for
+        # how missing values are routed, even when the strategy was derived).
+        self._missing_bin_strategy_resolved: Optional[str] = None
+        # {feat: +1/-1} expected WOE direction, resolved at fit() from
+        # monotone_direction / reference_target; workers inherit via copy.
+        self._expected_direction: Dict[str, int] = {}
+        self._direction_basis: Dict[str, str] = {}
 
         # 判断 special_values 中是否包含 nan（缺失值独立分箱）
         self._sv_has_nan = any(
@@ -262,6 +391,12 @@ class MonotoneWOEBinner:
         # dict with unseen_values/affected_rows/affected_frac/total_rows.
         # Reset at the start of every apply_woe call.
         self._unseen_category_stats: Dict[str, dict] = {}
+        # G08: populated when small_bin_policy is active; {feat: {bin_label,
+        # bad, good, thresholds, action}}.
+        self._small_bin_stats: Dict[str, dict] = {}
+        # G09: populated when direction machinery is active; {feat: {expected,
+        # final, basis, action}}.
+        self._direction_stats: Dict[str, dict] = {}
 
     # ─────────────────────────────────────────────────────────────────
     # 内部工具
@@ -431,6 +566,132 @@ class MonotoneWOEBinner:
         dec = all(woe_values[i] >= woe_values[i+1] for i in range(len(woe_values)-1))
         return inc or dec
 
+    @staticmethod
+    def _is_monotone_dir(woe_values: np.ndarray, direction: int) -> bool:
+        """Monotone check pinned to one direction (+1 increasing, -1 decreasing)."""
+        if len(woe_values) <= 1:
+            return True
+        if direction >= 0:
+            return all(woe_values[i] <= woe_values[i + 1] for i in range(len(woe_values) - 1))
+        return all(woe_values[i] >= woe_values[i + 1] for i in range(len(woe_values) - 1))
+
+    @staticmethod
+    def _direction_of(woe_values: np.ndarray) -> str:
+        """Final direction label of a fitted bin sequence."""
+        if len(woe_values) < 2 or woe_values[-1] == woe_values[0]:
+            return "flat"
+        return "increasing" if woe_values[-1] > woe_values[0] else "decreasing"
+
+    def _enforce_small_bins(self, df_normal: pd.DataFrame, feat: str, edges: list, wt: pd.DataFrame,
+                            merge_trace: Optional[list]):
+        """G08: merge/warn/raise on bins violating min_bad_count / min_good_count /
+        min_bin_size. No-op unless small_bin_policy is set. Returns (edges, wt)."""
+        policy = self.small_bin_policy
+        if policy is None:
+            return edges, wt
+        min_bad = self.min_bad_count
+        min_good = self.min_good_count
+        n_total = int(wt["n"].sum()) if len(wt) else 0
+        min_size_n = int(n_total * self.min_bin_size) if self.min_bin_size else 0
+
+        def _violation(row):
+            if min_bad is not None and row["bad"] < min_bad:
+                return "small_bin_min_bad"
+            if min_good is not None and row["good"] < min_good:
+                return "small_bin_min_good"
+            if min_size_n and row["n"] < min_size_n:
+                return "small_bin_min_size"
+            return None
+
+        while len(edges) >= 1 and len(wt) > max(1, self.min_n_bins):
+            ordered = wt.sort_values("bin").reset_index(drop=True)
+            reason = None
+            idx = None
+            for i, row in ordered.iterrows():
+                reason = _violation(row)
+                if reason:
+                    idx = int(i)
+                    break
+            if reason is None:
+                break
+            if policy in {"warn", "raise"}:
+                row = ordered.iloc[idx]
+                message = (
+                    f"{feat}: bin {int(row['bin'])} violates {reason} "
+                    f"(n={int(row['n'])}, bad={int(row['bad'])}, good={int(row['good'])}; "
+                    f"min_bad_count={min_bad}, min_good_count={min_good}, "
+                    f"min_bin_size={self.min_bin_size})"
+                )
+                self._small_bin_stats[feat] = {
+                    "bin": int(row["bin"]), "n": int(row["n"]), "bad": int(row["bad"]),
+                    "good": int(row["good"]), "reason": reason, "action": policy,
+                }
+                if policy == "raise":
+                    raise BinningPolicyViolation(message)
+                warnings.warn(message, UserWarning, stacklevel=3)
+                break
+            # policy == "merge": pop the edge toward the WOE-closer neighbor.
+            woes = ordered["woe"].to_numpy()
+            if idx == 0:
+                edge_idx = 0
+            elif idx == len(ordered) - 1:
+                edge_idx = len(edges) - 1
+            else:
+                left_gap = abs(woes[idx] - woes[idx - 1])
+                right_gap = abs(woes[idx] - woes[idx + 1])
+                edge_idx = idx - 1 if left_gap <= right_gap else idx
+            merged_edge = edges.pop(edge_idx)
+            if merge_trace is not None:
+                row = ordered.iloc[idx]
+                merge_trace.append({
+                    "step": len(merge_trace), "reason": reason, "merged_edge": merged_edge,
+                    "bin": int(row["bin"]), "n": int(row["n"]),
+                    "bad": int(row["bad"]), "good": int(row["good"]),
+                })
+            wt, _ = self._compute_woe_table(df_normal, feat, edges)
+            self._small_bin_stats[feat] = {
+                "reason": reason, "action": "merge",
+                "n_merges": len([t for t in (merge_trace or []) if str(t.get("reason", "")).startswith("small_bin")]),
+            }
+        return edges, wt
+
+    def _check_direction_conflict(self, feat: str, woes: np.ndarray):
+        """G09: compare the final direction against the expected one."""
+        expected = self._expected_direction.get(feat)
+        if expected is None:
+            return
+        woes_arr = np.asarray(woes, dtype=float)
+        final = self._direction_of(woes_arr)
+        expected_label = "increasing" if expected > 0 else "decreasing"
+        basis = self._direction_basis.get(feat, "auto")
+        # A single surviving bin means the forced direction merged the feature
+        # away entirely — the signal opposes the requested direction. Treat it
+        # as a conflict; a multi-bin flat sequence stays exempt.
+        collapsed = len(woes_arr) <= 1
+        conflict = collapsed or final not in {expected_label, "flat"}
+        self._direction_stats[feat] = {
+            "expected": expected_label, "final": final, "basis": basis,
+            "conflict": conflict,
+        }
+        if not conflict:
+            return
+        policy = self.direction_conflict_policy or "warn"
+        detail = (
+            "collapsed to a single bin under the forced direction"
+            if collapsed
+            else f"fitted WOE direction '{final}'"
+        )
+        message = (
+            f"{feat}: {detail} conflicts with expected "
+            f"'{expected_label}' (basis: {basis})."
+        )
+        self._direction_stats[feat]["action"] = policy
+        if policy == "raise":
+            raise BinningPolicyViolation(message)
+        if policy == "warn":
+            warnings.warn(message, UserWarning, stacklevel=3)
+        # policy == "keep": recorded in _direction_stats only.
+
     def _chi2_merge_one(
         self,
         df_normal: pd.DataFrame,
@@ -575,7 +836,13 @@ class MonotoneWOEBinner:
             wt_trial, _ = self._compute_woe_table(sub_full, feat, trial_edges)
             woes_trial  = wt_trial.sort_values("bin")["woe"].values
 
-            if self._is_monotone(woes_trial):
+            expected_dir = self._expected_direction.get(feat)
+            trial_ok = (
+                self._is_monotone(woes_trial)
+                if expected_dir is None
+                else self._is_monotone_dir(woes_trial, expected_dir)
+            )
+            if trial_ok:
                 # 接受合并
                 edges = trial_edges
                 # forbidden 索引需要更新（被合并箱之后的索引都 -1）
@@ -639,26 +906,47 @@ class MonotoneWOEBinner:
 
         edges = list(raw_edges)
         wt, iv = self._compute_woe_table(df_normal, feat, edges)
+        expected_dir = self._expected_direction.get(feat)
+        governance_on = (
+            self.small_bin_policy is not None
+            or expected_dir is not None
+        )
+        merge_trace: Optional[list] = [] if governance_on else None
 
         # 贪心合并
         for _ in range(100):
             woes = wt.sort_values("bin")["woe"].values
-            if self._is_monotone(woes):
+            if expected_dir is None:
+                if self._is_monotone(woes):
+                    break
+            elif self._is_monotone_dir(woes, expected_dir):
                 break
             if len(edges) < self.min_n_bins - 1:
                 break
 
-            inc_vio = [(i, abs(woes[i+1] - woes[i]))
-                       for i in range(len(woes)-1) if woes[i] >= woes[i+1]]
-            dec_vio = [(i, abs(woes[i+1] - woes[i]))
-                       for i in range(len(woes)-1) if woes[i] <= woes[i+1]]
-            violations = inc_vio if len(inc_vio) <= len(dec_vio) else dec_vio
+            if expected_dir is None:
+                inc_vio = [(i, abs(woes[i+1] - woes[i]))
+                           for i in range(len(woes)-1) if woes[i] >= woes[i+1]]
+                dec_vio = [(i, abs(woes[i+1] - woes[i]))
+                           for i in range(len(woes)-1) if woes[i] <= woes[i+1]]
+                violations = inc_vio if len(inc_vio) <= len(dec_vio) else dec_vio
+            elif expected_dir > 0:
+                violations = [(i, abs(woes[i+1] - woes[i]))
+                              for i in range(len(woes)-1) if woes[i] >= woes[i+1]]
+            else:
+                violations = [(i, abs(woes[i+1] - woes[i]))
+                              for i in range(len(woes)-1) if woes[i] <= woes[i+1]]
             if not violations:
                 break
 
             merge_idx = min(violations, key=lambda x: x[1])[0]
             if merge_idx < len(edges):
-                edges.pop(merge_idx)
+                merged_edge = edges.pop(merge_idx)
+                if merge_trace is not None:
+                    merge_trace.append({
+                        "step": len(merge_trace), "reason": "monotone_violation",
+                        "merged_edge": merged_edge,
+                    })
             wt, iv = self._compute_woe_table(df_normal, feat, edges)
 
         woes_final = wt.sort_values("bin")["woe"].values
@@ -671,11 +959,21 @@ class MonotoneWOEBinner:
             wt, iv = self._compute_woe_table(df_normal, feat, edges)
             woes_final = wt.sort_values("bin")["woe"].values
 
+        # ── G08：最小坏/好样本数治理（默认关闭） ──────────────────────────
+        if self.small_bin_policy is not None:
+            edges, wt = self._enforce_small_bins(df_normal, feat, edges, wt, merge_trace)
+            iv = float(wt["iv"].sum()) if len(wt) else 0.0
+            woes_final = wt.sort_values("bin")["woe"].values
+
+        # ── G09：方向冲突检查（默认关闭） ────────────────────────────────
+        if expected_dir is not None:
+            self._check_direction_conflict(feat, woes_final)
+
         # 计算特殊值箱
         sv_table = self._compute_sv_table(sv_groups, total_bad, total_good)
         sv_iv = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
 
-        return dict(
+        result = dict(
             edges        = edges,
             woe_table    = wt,
             sv_table     = sv_table,
@@ -683,6 +981,11 @@ class MonotoneWOEBinner:
             is_monotonic = self._is_monotone(woes_final),
             n_bins       = len(wt),
         )
+        result["direction"] = self._direction_of(np.asarray(woes_final, dtype=float))
+        result["direction_basis"] = self._direction_basis.get(feat, "auto")
+        if merge_trace:
+            result["merge_trace"] = merge_trace
+        return result
 
     @staticmethod
     def _sort_categories(cats: list) -> list:
@@ -809,6 +1112,63 @@ class MonotoneWOEBinner:
         self._chi2_p         = chi2_p
         self._chi2_init_size = chi2_init_size
 
+        # ── G17：missing_bin_strategy 前置校验与解析（默认 None=按 special_values 推导） ──
+        has_nan_sv = self._sv_has_nan
+        if self.missing_bin_strategy == "fail":
+            nan_counts = df[all_fit_feats].isna().sum()
+            offenders = nan_counts[nan_counts > 0]
+            if len(offenders):
+                worst = offenders.sort_values(ascending=False)
+                raise ValueError(
+                    f"missing_bin_strategy='fail': {len(offenders)} feature(s) contain "
+                    f"missing values, e.g. {dict(worst.head(5))}. Clean them or choose "
+                    f"'empirical_special'/'fixed_woe'."
+                )
+            self._missing_bin_strategy_resolved = "fail"
+        elif self.missing_bin_strategy is not None:
+            self._missing_bin_strategy_resolved = self.missing_bin_strategy
+        else:
+            self._missing_bin_strategy_resolved = (
+                "empirical_special" if has_nan_sv else "fixed_woe"
+            )
+
+        # ── G09：解析期望方向（在并行 worker copy 之前，workers 自动继承） ──
+        self._expected_direction = {}
+        self._direction_basis = {}
+        numeric_feats = [f for f in all_fit_feats if f not in self._cate_feats_set]
+        if isinstance(self.monotone_direction, dict):
+            for feat, direction in self.monotone_direction.items():
+                if direction == "auto":
+                    continue
+                self._expected_direction[feat] = 1 if direction == "increasing" else -1
+                self._direction_basis[feat] = f"forced:{direction}"
+        elif self.monotone_direction in {"increasing", "decreasing"}:
+            sign = 1 if self.monotone_direction == "increasing" else -1
+            for feat in numeric_feats:
+                self._expected_direction[feat] = sign
+                self._direction_basis[feat] = f"forced:{self.monotone_direction}"
+        if self.reference_target is not None:
+            if self.reference_target not in df.columns:
+                raise KeyError(
+                    f"reference_target {self.reference_target!r} not in the fit DataFrame"
+                )
+            ref = pd.to_numeric(df[self.reference_target], errors="coerce")
+            bad_mask = ref == 1
+            good_mask = ref == 0
+            for feat in numeric_feats:
+                if feat in self._expected_direction:
+                    continue  # explicit forced direction wins
+                values = pd.to_numeric(df[feat], errors="coerce")
+                mean_bad = values[bad_mask].mean()
+                mean_good = values[good_mask].mean()
+                if pd.isna(mean_bad) or pd.isna(mean_good) or mean_bad == mean_good:
+                    continue
+                # higher x among bads => bad_rate rises with x => WOE increases
+                self._expected_direction[feat] = 1 if mean_bad > mean_good else -1
+                self._direction_basis[feat] = f"reference_target:{self.reference_target}"
+        self._small_bin_stats = {}
+        self._direction_stats = {}
+
         sv_hint   = f"， special_values={self.special_values}" if self.special_values else ""
         cate_hint = f"， cate_feats={len(self.cate_feats)}个" if self.cate_feats else ""
         chi2_hint = (f"， chi2_binning=True (p={chi2_p}, sample={chi2_init_size})"
@@ -828,6 +1188,8 @@ class MonotoneWOEBinner:
                     chi2_init_size = chi2_init_size,
                 )
                 return feat, res, None
+            except BinningPolicyViolation:
+                raise
             except Exception as exc:
                 import traceback as _tb
                 return feat, None, (exc, _tb.format_exc())
@@ -886,6 +1248,8 @@ class MonotoneWOEBinner:
                     _log_feat(feat, feat_ok[feat])
                 elif feat in feat_err:
                     exc, tb = feat_err[feat]
+                    if isinstance(exc, BinningPolicyViolation):
+                        raise exc
                     logger.info(f"  ✗ {feat}: 拟合失败 — {exc}")
                     print(tb)
 
@@ -979,7 +1343,15 @@ class MonotoneWOEBinner:
                     df_normal, feat, edges, chi2_p, chi2_init_size
                 )
                 wt, iv = self._compute_woe_table(df_normal, feat, new_edges)
+                if self.small_bin_policy is not None:
+                    chi2_trace: list = []
+                    new_edges, wt = self._enforce_small_bins(df_normal, feat, new_edges, wt, chi2_trace)
+                    iv = float(wt["iv"].sum()) if len(wt) else 0.0
+                else:
+                    chi2_trace = []
                 woes   = wt.sort_values("bin")["woe"].values
+                if self._expected_direction.get(feat) is not None:
+                    self._check_direction_conflict(feat, woes)
                 sv_table = vr.get("sv_table", pd.DataFrame())
                 sv_iv    = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
                 update = dict(
@@ -988,8 +1360,14 @@ class MonotoneWOEBinner:
                     iv           = round(iv + sv_iv, 6),
                     is_monotonic = self._is_monotone(woes),
                     n_bins       = len(wt),
+                    direction    = self._direction_of(np.asarray(woes, dtype=float)),
+                    direction_basis = self._direction_basis.get(feat, "auto"),
                 )
+                if chi2_trace:
+                    update["merge_trace"] = chi2_trace
                 return feat, (vr["n_bins"], update), None
+            except BinningPolicyViolation:
+                raise
             except Exception as exc:
                 import traceback as _tb
                 return feat, None, (exc, _tb.format_exc())
@@ -1084,7 +1462,7 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _dtree_edges(df_normal: pd.DataFrame, feat: str, target_col: str,
-                     max_bins: int, min_samples_leaf) -> list:
+                     max_bins: int, min_samples_leaf, max_depth: Optional[int] = None) -> list:
         """用决策树找分割点，返回排好序的内部边界列表。"""
         from sklearn.tree import DecisionTreeClassifier
         sub = df_normal[[feat, target_col]].dropna(subset=[feat])
@@ -1095,6 +1473,7 @@ class MonotoneWOEBinner:
         clf = DecisionTreeClassifier(
             max_leaf_nodes   = max_bins,
             min_samples_leaf = min_samples_leaf,
+            max_depth        = max_depth,
             random_state     = 42,
         )
         clf.fit(X, y)
@@ -1106,10 +1485,11 @@ class MonotoneWOEBinner:
     @staticmethod
     def _monotone_merge_edges(df_normal: pd.DataFrame, feat: str,
                               target_col: str, edges: list,
-                              eps: float) -> list:
+                              eps: float, direction: Optional[int] = None) -> list:
         """
         在给定 edges 分箱后，若 WOE 不单调，贪心合并 WOE 方向反转的相邻箱，
-        直到单调为止。不改变箱的单调方向（自动判断升/降）。
+        直到单调为止。direction=None 时自动判断升/降（旧行为：以首个非零
+        差值的符号为主方向）；+1/-1 时强制按指定方向合并（G09）。
         """
         import math as _math
 
@@ -1131,6 +1511,10 @@ class MonotoneWOEBinner:
 
         def _is_mono(arr):
             if len(arr) <= 1: return True
+            if direction is not None:
+                if direction > 0:
+                    return all(arr[i] <= arr[i+1] for i in range(len(arr)-1))
+                return all(arr[i] >= arr[i+1] for i in range(len(arr)-1))
             return (all(arr[i] <= arr[i+1] for i in range(len(arr)-1)) or
                     all(arr[i] >= arr[i+1] for i in range(len(arr)-1)))
 
@@ -1139,8 +1523,10 @@ class MonotoneWOEBinner:
             woes = _woe_seq(cur)
             if len(woes) <= 1 or _is_mono(woes):
                 break
-            # 找第一个方向反转位置（按主方向：第一个差值的符号）
-            main_sign = np.sign(woes[1] - woes[0]) if len(woes) > 1 else 0
+            # 找第一个方向反转位置（direction 未指定时按首个非零差值的符号）
+            main_sign = direction if direction is not None else (
+                np.sign(woes[1] - woes[0]) if len(woes) > 1 else 0
+            )
             for i in range(len(woes) - 1):
                 if main_sign == 0:
                     main_sign = np.sign(woes[i+1] - woes[i])
@@ -1158,6 +1544,7 @@ class MonotoneWOEBinner:
         min_samples_leaf: float = 0.05,
         monotone: bool = True,
         n_jobs: int = 1,
+        max_depth: Optional[int] = None,
     ) -> "MonotoneWOEBinner":
         """
         在已有贪心分箱结果的基础上，用决策树重新划定分割点。
@@ -1231,29 +1618,15 @@ class MonotoneWOEBinner:
         def _refine_one(feat):
             vr = self._results[feat]
             try:
-                df_normal, _ = self._split_special(df, feat)
-                # Step 1: 决策树找分割点
-                new_edges = self._dtree_edges(
-                    df_normal, feat, self.target_col, max_bins, min_samples_leaf
-                )
-                # Step 2: 可选单调合并
-                if monotone and len(new_edges) >= 1:
-                    new_edges = self._monotone_merge_edges(
-                        df_normal, feat, self.target_col, new_edges, eps
-                    )
-                # Step 3: 重算 WOE 表
-                wt, iv = self._compute_woe_table(df_normal, feat, new_edges)
-                woes   = wt.sort_values("bin")["woe"].values if len(wt) > 0 else np.array([])
                 sv_table = vr.get("sv_table", pd.DataFrame())
                 sv_iv    = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
-                update = dict(
-                    edges        = new_edges,
-                    woe_table    = wt,
-                    iv           = round(iv + sv_iv, 6),
-                    is_monotonic = self._is_monotone(woes),
-                    n_bins       = len(wt),
+                update, status = _dtree_refine_one_core(
+                    self, df, feat, sv_iv, max_bins, min_samples_leaf,
+                    monotone, eps, max_depth,
                 )
-                return feat, (vr["n_bins"], update), None
+                return feat, (vr["n_bins"], update, status), None
+            except BinningPolicyViolation:
+                raise
             except Exception as exc:
                 import traceback as _tb
                 return feat, None, (exc, _tb.format_exc())
@@ -1263,7 +1636,12 @@ class MonotoneWOEBinner:
                 logger.info(f"  ✗ {feat}: dtree 重分箱失败 — {err[0]}")
                 print(err[1])
             else:
-                old_nb, update = ok
+                old_nb, update, status = ok
+                if update is None:
+                    logger.info(
+                        f"  - {feat:40s} | kept pre-refine bins ({old_nb}) — {status}"
+                    )
+                    return
                 self._results[feat].update(update)
                 logger.info(
                     f"  ✓ {feat:40s} | bins: {old_nb} → {update['n_bins']} "
@@ -1301,7 +1679,7 @@ class MonotoneWOEBinner:
                         _chunk_dtree_worker,
                         (
                             binner_lite, df, chunk, sv_iv_map, max_bins,
-                            min_samples_leaf, monotone, eps,
+                            min_samples_leaf, monotone, eps, max_depth,
                         ),
                     )
                     for chunk in chunks
@@ -1313,10 +1691,18 @@ class MonotoneWOEBinner:
             for feat in target_feats:
                 if feat in feat_err:
                     exc, tb = feat_err[feat]
+                    if isinstance(exc, BinningPolicyViolation):
+                        raise exc
                     logger.info(f"  ✗ {feat}: dtree 重分箱失败 — {exc}")
                     print(tb)
                 elif feat in feat_ok:
-                    upd = feat_ok[feat]
+                    upd, status = feat_ok[feat]
+                    if upd is None:
+                        logger.info(
+                            f"  - {feat:40s} | kept pre-refine bins "
+                            f"({old_nb_map[feat]}) — {status}"
+                        )
+                        continue
                     self._results[feat].update(upd)
                     logger.info(
                         f"  ✓ {feat:40s} | bins: {old_nb_map[feat]} → {upd['n_bins']} "
@@ -1403,6 +1789,14 @@ class MonotoneWOEBinner:
                  if g["n"] / (total_n + eps) < min_bin_size]
                 if min_bin_size > 0 else []
             )
+            # G08：类别分组的最小坏/好样本数治理（仅 merge 策略在此合并；
+            # warn/raise 在 fit 的数值路径已生效，类别路径同样按 merge 处理）
+            if not too_small and self.small_bin_policy == "merge":
+                too_small = [
+                    i for i, g in enumerate(groups)
+                    if (self.min_bad_count is not None and g["bad"] < self.min_bad_count)
+                    or (self.min_good_count is not None and g["good"] < self.min_good_count)
+                ]
             if too_small:
                 # 把最小的违例箱并入坏率更接近的相邻箱
                 i = min(too_small, key=lambda k: groups[k]["n"])
@@ -1584,6 +1978,32 @@ class MonotoneWOEBinner:
             return f"({_fmt(float(edges[bin_idx-1]))}, {_fmt(float(edges[bin_idx]))}]"
 
     # ── 1. get_final_bins ────────────────────────────────────────────
+
+    def get_direction_summary(self) -> pd.DataFrame:
+        """G09：每个特征的最终 WOE 方向、方向依据与单调性。
+
+        Returns
+        -------
+        DataFrame 列: feat | direction | direction_basis | is_monotonic
+        """
+        self._check_fitted()
+        rows = []
+        for feat, vr in self._results.items():
+            if vr.get("is_categorical"):
+                direction = vr.get("direction", "categorical")
+            else:
+                direction = vr.get("direction")
+                if direction is None:
+                    woes = vr.get("woe_table", pd.DataFrame())
+                    woes = woes.sort_values("bin")["woe"].values if len(woes) else np.array([])
+                    direction = self._direction_of(np.asarray(woes, dtype=float))
+            rows.append({
+                "feat": feat,
+                "direction": direction,
+                "direction_basis": vr.get("direction_basis", self._direction_basis.get(feat, "auto")),
+                "is_monotonic": bool(vr.get("is_monotonic", False)),
+            })
+        return pd.DataFrame(rows, columns=["feat", "direction", "direction_basis", "is_monotonic"])
 
     def get_final_bins(self) -> Dict[str, pd.DataFrame]:
         """
@@ -2113,6 +2533,20 @@ class MonotoneWOEBinner:
                 f"'warn', 'raise', 'silent'; got {unseen_category_policy!r}."
             )
         self._check_fitted()
+        if self.missing_bin_strategy == "fail":
+            check_feats = [
+                f for f in (varlist if varlist is not None else list(self._results))
+                if f in data.columns
+            ]
+            if check_feats:
+                nan_counts = data[check_feats].isna().sum()
+                offenders = nan_counts[nan_counts > 0]
+                if len(offenders):
+                    raise ValueError(
+                        f"missing_bin_strategy='fail': transform data contains missing "
+                        f"values in {len(offenders)} feature(s), e.g. "
+                        f"{dict(offenders.sort_values(ascending=False).head(5))}."
+                    )
         df = data if inplace else data.copy()
         woe_outputs: Dict[str, np.ndarray] = {}
         # Reset per-call so callers can inspect stats from the *latest* run only.
