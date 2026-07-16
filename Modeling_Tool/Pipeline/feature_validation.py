@@ -109,12 +109,22 @@ class FeatureValidationPipelineConfig:
     missing_rate_threshold: float | None = None
     selection_enabled: bool = False
     selection_params: dict[str, Any] = field(default_factory=dict)
+    # G03/G04: group dims (e.g. ["apply_month"]) the selection gates use for
+    # per-group IV/direction evidence. None keeps the gates evidence-free —
+    # setting group-stability thresholds without dims raises loudly.
+    selection_group_dims: list[str] | None = None
     weight_col: str | None = None
     # OOT governance (G10): None resolves to the legacy True (missing OOT is
     # replaced by an OOS copy, now with a loud UserWarning). Set False to keep
     # OOT empty instead — every OOT output is then simply absent. The next
     # minor release flips the resolved default to False.
     synthesize_missing_oot: bool | None = None
+    # G00: "all" (legacy) fits the top-level WOE on every new feature;
+    # "post_missing_gate" runs the selection-grade missing-rate gate
+    # (missing_rate_threshold) BEFORE the WOE fit so high-missing features
+    # cannot break a target's WOE artifacts. The next minor release flips the
+    # default to "post_missing_gate".
+    woe_fit_scope: Literal["all", "post_missing_gate"] = "all"
 
     write_outputs: bool = True
     write_excel: bool = True
@@ -154,6 +164,14 @@ class FeatureValidationPipeline:
         "missing_woe",
         "special_values",
         "bin_label_decimals",
+        "min_bad_count",
+        "min_good_count",
+        "small_bin_policy",
+        "monotone_direction",
+        "reference_target",
+        "direction_conflict_policy",
+        "missing_bin_strategy",
+        "refine_min_n_bins_policy",
     }
     _MONOTONE_FIT_KEYS = {"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"}
 
@@ -211,23 +229,70 @@ class FeatureValidationPipeline:
             if cfg.distribution_enabled
             else {}
         )
+        # G00: with woe_fit_scope="post_missing_gate", the selection-grade
+        # missing-rate gate runs BEFORE the top-level WOE fit, so one
+        # high-missing feature can no longer take down a whole target's WOE
+        # artifacts through the coarse per-target try/except in _fit_woe.
+        woe_fit_features = None
+        missing_gate_dropped = pd.DataFrame()
+        if (
+            cfg.woe_fit_scope == "post_missing_gate"
+            and cfg.missing_rate_threshold is not None
+            and target_cols
+        ):
+            from Modeling_Tool.Feature.Weighted_Screen import _apply_missing_rate_stage
+
+            gate_rows: list[dict] = []
+            woe_fit_features, _gate_table, missing_gate_dropped = _apply_missing_rate_stage(
+                splits["ins"],
+                list(new_features),
+                gate_rows,
+                missing_rate_threshold=cfg.missing_rate_threshold,
+                missing_rate_ref=cfg.woe_params.get("missing_ref_value", -999999),
+            )
         woe_artifacts = (
-            self._fit_woe(splits, new_features, incumbent_features, target_cols)
+            self._fit_woe(
+                splits,
+                new_features,
+                incumbent_features,
+                target_cols,
+                fit_features_override=woe_fit_features,
+            )
             if cfg.woe_enabled and target_cols
             else {}
         )
+        if woe_artifacts and len(missing_gate_dropped):
+            woe_artifacts["missing_gate_dropped"] = missing_gate_dropped
+            refine = woe_artifacts.get("refine_summary")
+            gate_row = pd.DataFrame([{
+                "target": "*", "step": "missing_gate", "status": "ok",
+                "n_in": len(new_features),
+                "n_out": len(woe_fit_features if woe_fit_features is not None else new_features),
+                "threshold": cfg.missing_rate_threshold,
+            }])
+            woe_artifacts["refine_summary"] = (
+                pd.concat([refine, gate_row], ignore_index=True)
+                if isinstance(refine, pd.DataFrame) and len(refine) else gate_row
+            )
+        # G00: once the missing gate has run, every WOE-consuming downstream
+        # stage (PSI/IVKS/corr/selection) operates on the gated feature set —
+        # gated-out features keep their distribution diagnostics and appear in
+        # missing_gate_dropped, but never touch the WOE ecosystem.
+        effective_features = (
+            list(woe_fit_features) if woe_fit_features is not None else new_features
+        )
         psi_summary, psi_details = (
-            self._run_psi(combined, splits, new_features, target_cols, woe_artifacts)
+            self._run_psi(combined, splits, effective_features, target_cols, woe_artifacts)
             if cfg.psi_enabled
             else (pd.DataFrame(), {})
         )
         ivks_summary = (
-            self._run_ivks(combined, new_features, target_cols, woe_artifacts)
+            self._run_ivks(combined, effective_features, target_cols, woe_artifacts)
             if cfg.ivks_enabled and target_cols
             else pd.DataFrame()
         )
         corr_matrix, high_corr_pairs, correlated_detail = (
-            self._run_correlation(combined, new_features, incumbent_features, target_cols, woe_artifacts)
+            self._run_correlation(combined, effective_features, incumbent_features, target_cols, woe_artifacts)
             if cfg.corr_enabled
             else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
         )
@@ -237,7 +302,7 @@ class FeatureValidationPipeline:
         if cfg.selection_enabled and target_cols:
             selected_features, selection_summary, screening_artifact = self._run_selection(
                 splits=splits,
-                new_features=new_features,
+                new_features=effective_features,
                 incumbent_features=incumbent_features,
                 target_cols=target_cols,
                 woe_artifacts=woe_artifacts,
@@ -1147,11 +1212,14 @@ class FeatureValidationPipeline:
         new_features: list[str],
         incumbent_features: list[str],
         target_cols: list[str],
+        fit_features_override: list[str] | None = None,
     ) -> dict[str, Any]:
         from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 
         cfg = self.config
-        fit_features = list(new_features)
+        fit_features = list(
+            new_features if fit_features_override is None else fit_features_override
+        )
         if cfg.corr_include_incumbent and cfg.corr_use_woe_bins:
             fit_features = list(dict.fromkeys(fit_features + incumbent_features))
 
@@ -1307,6 +1375,7 @@ class FeatureValidationPipeline:
             "psi_use_woe_bins": params.get("psi_use_woe_bins", cfg.psi_use_woe_bins),
             "iv_enabled": params.get("iv_enabled", cfg.ivks_enabled),
             "iv_threshold": params.get("iv_threshold", 0.02),
+            "iv_upper_threshold": params.get("iv_upper_threshold"),
             "iv_nbins": params.get("iv_nbins", psi_params.get("buckets", 10)),
             "iv_min_bin_prop": params.get("iv_min_bin_prop", psi_params.get("min_bin_prop", 0.05)),
             "iv_equal_freq": params.get("iv_equal_freq", psi_params.get("equal_freq", True)),
@@ -1330,6 +1399,24 @@ class FeatureValidationPipeline:
             # binner (no prefit WOE engine) would bin declared categorical
             # features as numeric and crash on string levels.
             "categorical_features": params.get("categorical_features", cfg.categorical_features),
+            # Post-corr selection gates (G03/G04/G05/G06); all default off.
+            "monthly_iv_min": params.get("monthly_iv_min"),
+            "monthly_iv_cv_max": params.get("monthly_iv_cv_max"),
+            "direction_consistency_min": params.get("direction_consistency_min"),
+            "min_group_n": params.get("min_group_n"),
+            "insufficient_group_policy": params.get("insufficient_group_policy", "keep_warn"),
+            "target_rules": params.get("target_rules"),
+            "min_pass_count": params.get("min_pass_count"),
+            "per_target_iv_range": params.get("per_target_iv_range"),
+            "direction_reference_target": params.get("direction_reference_target"),
+            "max_selected_features": params.get("max_selected_features"),
+            "min_selected_features": params.get("min_selected_features"),
+            "ranking_metric": params.get("ranking_metric", "iv"),
+            "tie_breaker": params.get("tie_breaker", "name"),
+            "vif_enabled": params.get("vif_enabled", False),
+            "vif_threshold": params.get("vif_threshold", 10.0),
+            "vif_min_features": params.get("vif_min_features", 2),
+            "vif_tie_break_metric": params.get("vif_tie_break_metric", "iv"),
         }
         return screen_config_from_mapping(
             mapping,
@@ -1337,6 +1424,150 @@ class FeatureValidationPipeline:
             woe_fit_query=cfg.woe_fit_query,
             woe_params=cfg.woe_params,
             monotone_woe_params=cfg.monotone_woe_params,
+        )
+
+    def _evidence_bins_frame(
+        self,
+        data: pd.DataFrame,
+        features: list[str],
+        target: str,
+        woe_artifacts: dict[str, Any],
+    ) -> pd.DataFrame | None:
+        engine = (woe_artifacts or {}).get("by_target", {}).get(target, {}).get("engine")
+        if engine is None:
+            return None
+        from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+        adapter = as_woe_engine(engine)
+        if adapter is None:
+            return None
+        usable = [f for f in features if f in data.columns]
+        if not usable:
+            return None
+        return adapter.assign_bins_frame(data, usable)
+
+    @staticmethod
+    def _evidence_iv(bins: np.ndarray, target_values: np.ndarray) -> float:
+        """Same WOE/IV formula as _ivks_from_assigned_bins_grouped, minus the
+        iv_cut/min_group_size report filters (gates need unfiltered evidence)."""
+        bin_codes, _ = pd.factorize(bins, sort=False)
+        counts = np.bincount(bin_codes).astype(float)
+        bad = np.bincount(bin_codes, weights=target_values)
+        good = counts - bad
+        bad_pct = bad / max(float(bad.sum()), 1.0)
+        good_pct = good / max(float(good.sum()), 1.0)
+        woe = np.log((bad_pct + 1e-6) / (good_pct + 1e-6))
+        return float(np.sum((bad_pct - good_pct) * woe))
+
+    def _build_selection_evidence(
+        self,
+        splits: dict[str, pd.DataFrame],
+        target_cols: list[str],
+        woe_artifacts: dict[str, Any],
+        screen_cfg: Any,
+    ) -> Any | None:
+        """Lazy G03/G04 evidence closures over INS, priced only on the
+        post-corr survivor set the gates hand them."""
+        cfg = self.config
+        group_gates_on = any(
+            getattr(screen_cfg, name, None) is not None
+            for name in ("monthly_iv_min", "monthly_iv_cv_max", "direction_consistency_min")
+        )
+        target_gates_on = getattr(screen_cfg, "target_rules", None) is not None
+        if not group_gates_on and not target_gates_on:
+            return None
+        from Modeling_Tool.Feature.Screen_Gates import (
+            SelectionEvidence,
+            point_biserial_direction,
+        )
+
+        ins = splits["ins"]
+        primary = target_cols[0]
+        group_dims = list(cfg.selection_group_dims or [])
+        if group_gates_on:
+            if not group_dims:
+                raise ValueError(
+                    "Group-stability gates (monthly_iv_min/monthly_iv_cv_max/"
+                    "direction_consistency_min) require selection_group_dims, "
+                    "e.g. ['apply_month']."
+                )
+            missing_dims = [c for c in group_dims if c not in ins.columns]
+            if missing_dims:
+                raise KeyError(
+                    f"selection_group_dims {missing_dims} not found in the INS split."
+                )
+
+        def per_group_iv_fn(features: list[str]) -> pd.DataFrame:
+            data = ins[ins[primary].notna()]
+            bins_frame = self._evidence_bins_frame(data, features, primary, woe_artifacts)
+            if bins_frame is None:
+                raise ValueError(
+                    f"Group-stability gates need the WOE engine for target "
+                    f"{primary!r}; none is available (woe fit disabled or failed)."
+                )
+            y = data[primary].astype(int).to_numpy()
+            group_key = group_dims[0] if len(group_dims) == 1 else group_dims
+            rows: list[dict] = []
+            for group_value, positions in data.groupby(group_key, dropna=False, sort=True).indices.items():
+                label = (
+                    "|".join(str(v) for v in group_value)
+                    if isinstance(group_value, tuple) else str(group_value)
+                )
+                y_g = y[positions]
+                sub = data.iloc[positions]
+                for var in features:
+                    if var not in bins_frame.columns:
+                        continue
+                    bins = bins_frame[var].to_numpy(dtype=object)[positions]
+                    bins = np.where(pd.isna(bins), "__MISSING__", bins)
+                    rows.append({
+                        "var": var,
+                        "group": label,
+                        "n": int(len(positions)),
+                        "iv": self._evidence_iv(bins, y_g),
+                        "direction": point_biserial_direction(sub[var], sub[primary]),
+                    })
+            return pd.DataFrame(rows, columns=["var", "group", "n", "iv", "direction"])
+
+        def per_target_fn(features: list[str]) -> pd.DataFrame:
+            rows: list[dict] = []
+            for target in target_cols:
+                data = ins[ins[target].notna()]
+                if not len(data):
+                    rows.extend(
+                        {"var": var, "target": target, "iv": np.nan,
+                         "direction": 0, "status": "no_observed_rows"}
+                        for var in features
+                    )
+                    continue
+                bins_frame = self._evidence_bins_frame(data, features, target, woe_artifacts)
+                y = data[target].astype(int).to_numpy()
+                for var in features:
+                    if bins_frame is None or var not in bins_frame.columns:
+                        rows.append({
+                            "var": var, "target": target, "iv": np.nan,
+                            "direction": point_biserial_direction(data[var], data[target])
+                            if var in data.columns else 0,
+                            "status": "engine_missing",
+                        })
+                        continue
+                    bins = bins_frame[var].to_numpy(dtype=object)
+                    bins = np.where(pd.isna(bins), "__MISSING__", bins)
+                    rows.append({
+                        "var": var,
+                        "target": target,
+                        "iv": self._evidence_iv(bins, y),
+                        "direction": point_biserial_direction(data[var], data[target]),
+                        "status": "ok",
+                    })
+            return pd.DataFrame(rows, columns=["var", "target", "iv", "direction", "status"])
+
+        return SelectionEvidence(
+            group_dims=group_dims,
+            scope="ins",
+            per_group_iv_fn=per_group_iv_fn if group_gates_on else None,
+            per_target_fn=per_target_fn if target_gates_on else None,
+            min_group_n_default=int(cfg.min_group_size),
         )
 
     def _run_selection(
@@ -1362,6 +1593,9 @@ class FeatureValidationPipeline:
         if cfg.weight_col and cfg.weight_col not in splits["ins"].columns:
             raise KeyError(f"Missing weight_col {cfg.weight_col!r} for weighted selection.")
 
+        selection_evidence = self._build_selection_evidence(
+            splits, target_cols, woe_artifacts, screen_cfg,
+        )
         result = feature_screen(
             splits,
             screen_features,
@@ -1369,6 +1603,7 @@ class FeatureValidationPipeline:
             weight_col=cfg.weight_col,
             config=screen_cfg,
             prefit_woe_engine=engine,
+            selection_evidence=selection_evidence,
         )
         selection_config_snapshot = dict(config_snapshot)
         selection_config_snapshot.update({
@@ -1377,6 +1612,21 @@ class FeatureValidationPipeline:
             "iv_use_woe_bins": screen_cfg.iv_use_woe_bins,
             "corr_use_woe_bins": screen_cfg.corr_use_woe_bins,
             "n_incumbent_features": len(incumbent_features),
+            "iv_upper_threshold": screen_cfg.iv_upper_threshold,
+            "monthly_iv_min": screen_cfg.monthly_iv_min,
+            "monthly_iv_cv_max": screen_cfg.monthly_iv_cv_max,
+            "direction_consistency_min": screen_cfg.direction_consistency_min,
+            "min_group_n": screen_cfg.min_group_n,
+            "insufficient_group_policy": screen_cfg.insufficient_group_policy,
+            "target_rules": screen_cfg.target_rules,
+            "min_pass_count": screen_cfg.min_pass_count,
+            "per_target_iv_range": screen_cfg.per_target_iv_range,
+            "direction_reference_target": screen_cfg.direction_reference_target,
+            "max_selected_features": screen_cfg.max_selected_features,
+            "min_selected_features": screen_cfg.min_selected_features,
+            "vif_enabled": screen_cfg.vif_enabled,
+            "vif_threshold": screen_cfg.vif_threshold,
+            "selection_group_dims": list(cfg.selection_group_dims or []),
         })
         selection_summary = {
             "initial_features": list(new_features),

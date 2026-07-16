@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -14,9 +15,11 @@ from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 from .Weighted_Screen import (
     WeightedScreenResult,
+    _DROPPED_DETAIL_COLS,
     _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
+    _iv_band_keep,
     _legacy_unweighted_screen,
     _psi_from_distributions,
     _resolve_splits,
@@ -37,6 +40,14 @@ _MONOTONE_INIT_KEYS = frozenset({
     "missing_woe",
     "special_values",
     "bin_label_decimals",
+    "min_bad_count",
+    "min_good_count",
+    "small_bin_policy",
+    "monotone_direction",
+    "reference_target",
+    "direction_conflict_policy",
+    "missing_bin_strategy",
+    "refine_min_n_bins_policy",
 })
 _MONOTONE_FIT_KEYS = frozenset({"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"})
 
@@ -50,6 +61,7 @@ class FeatureScreenConfig:
     psi_use_woe_bins: bool = False
     iv_enabled: bool = True
     iv_threshold: float = 0.02
+    iv_upper_threshold: float | None = None
     iv_bins: int = 10
     iv_min_bin_prop: float = 0.05
     iv_equal_freq: bool = True
@@ -77,6 +89,28 @@ class FeatureScreenConfig:
     content: float = 1e-6
     precision: int = 5
     min_bin_prop: float = 0.05
+    # --- Post-corr selection gates (G03/G04/G05/G06); all legacy-off ------
+    # G03 group stability (requires SelectionEvidence — FVP only)
+    monthly_iv_min: float | None = None
+    monthly_iv_cv_max: float | None = None
+    direction_consistency_min: float | None = None
+    min_group_n: int | None = None
+    insufficient_group_policy: Literal["keep_warn", "drop", "raise"] = "keep_warn"
+    # G04 multi-target joint gate (requires SelectionEvidence — FVP only)
+    target_rules: Literal["all", "any", "min_pass_count"] | None = None
+    min_pass_count: int | None = None
+    per_target_iv_range: Any = None  # (low, high) or {target: (low, high)}
+    direction_reference_target: str | None = None
+    # G05 hard top-N truncation
+    max_selected_features: int | None = None
+    min_selected_features: int | None = None
+    ranking_metric: str = "iv"
+    tie_breaker: str = "name"
+    # G06 VIF gate (needs the optional statsmodels extra)
+    vif_enabled: bool = False
+    vif_threshold: float = 10.0
+    vif_min_features: int = 2
+    vif_tie_break_metric: str = "iv"
 
 
 def screen_config_from_mapping(
@@ -100,6 +134,9 @@ def screen_config_from_mapping(
         psi_use_woe_bins=bool(cfg.get("psi_use_woe_bins", False)),
         iv_enabled=bool(cfg.get("iv_enabled", True)),
         iv_threshold=float(cfg.get("iv_threshold", 0.02)),
+        iv_upper_threshold=(
+            float(cfg["iv_upper_threshold"]) if cfg.get("iv_upper_threshold") is not None else None
+        ),
         iv_bins=iv_nbins,
         iv_min_bin_prop=float(cfg.get("iv_min_bin_prop", 0.05)),
         iv_equal_freq=bool(cfg.get("iv_equal_freq", True)),
@@ -125,6 +162,23 @@ def screen_config_from_mapping(
         content=float(cfg.get("content", 1e-6)),
         precision=int(cfg.get("precision", 5)),
         min_bin_prop=float(cfg.get("min_bin_prop", cfg.get("iv_min_bin_prop", 0.05))),
+        monthly_iv_min=cfg.get("monthly_iv_min"),
+        monthly_iv_cv_max=cfg.get("monthly_iv_cv_max"),
+        direction_consistency_min=cfg.get("direction_consistency_min"),
+        min_group_n=cfg.get("min_group_n"),
+        insufficient_group_policy=str(cfg.get("insufficient_group_policy", "keep_warn")),  # type: ignore[arg-type]
+        target_rules=cfg.get("target_rules"),
+        min_pass_count=cfg.get("min_pass_count"),
+        per_target_iv_range=cfg.get("per_target_iv_range"),
+        direction_reference_target=cfg.get("direction_reference_target"),
+        max_selected_features=cfg.get("max_selected_features"),
+        min_selected_features=cfg.get("min_selected_features"),
+        ranking_metric=str(cfg.get("ranking_metric", "iv")),
+        tie_breaker=str(cfg.get("tie_breaker", "name")),
+        vif_enabled=bool(cfg.get("vif_enabled", False)),
+        vif_threshold=float(cfg.get("vif_threshold", 10.0)),
+        vif_min_features=int(cfg.get("vif_min_features", 2)),
+        vif_tie_break_metric=str(cfg.get("vif_tie_break_metric", "iv")),
     )
 
 
@@ -213,12 +267,15 @@ def _woe_bins_unweighted_screen(
     config: FeatureScreenConfig,
     *,
     prefit_woe_engine: Any | None = None,
+    selection_evidence: Any | None = None,
 ) -> FeatureScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
     ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, None)]
+    dropped_rows: list[dict] = []
+    stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
         current,
@@ -228,6 +285,7 @@ def _woe_bins_unweighted_screen(
         on_empty_stage=config.on_empty_stage,
     )
     binner = _resolve_screening_binner(splits, current, target_col, config, prefit_woe_engine)
+    engine_fit_features = list(current)
 
     psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
     if config.psi_enabled:
@@ -290,7 +348,7 @@ def _woe_bins_unweighted_screen(
             )
         if iv is not None and not iv.empty:
             iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
-            keep = iv.loc[iv["iv"] >= config.iv_threshold, "var"].tolist()
+            keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
@@ -312,7 +370,25 @@ def _woe_bins_unweighted_screen(
         current = cf.remove_highly_correlated(current, max_iterations=config.corr_max_iterations)
         summary_rows.append(_summary_row("corr", n_before, len(current), config.corr_threshold, None))
 
+    from .Screen_Gates import apply_post_corr_gates
+
+    gate_iv_map = (
+        dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+    )
+    current = apply_post_corr_gates(
+        ins, current, config, selection_evidence, gate_iv_map,
+        summary_rows, dropped_rows, stage_tables,
+        weight_col=None, on_empty_stage=config.on_empty_stage,
+    )
+
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, None))
+    engine_obj, engine_meta = _screen_engine_payload(
+        binner,
+        fit_features=engine_fit_features,
+        target_col=target_col,
+        weight_col=None,
+        summary_rows=summary_rows,
+    )
     return FeatureScreenResult(
         selected_features=list(current),
         iv_table=iv_table,
@@ -321,6 +397,13 @@ def _woe_bins_unweighted_screen(
         summary=pd.DataFrame(summary_rows),
         missing_rate_table=missing_rate_table,
         missing_rate_dropped=missing_rate_dropped,
+        woe_engine=engine_obj,
+        woe_engine_meta=engine_meta,
+        dropped_detail=(
+            pd.DataFrame(dropped_rows, columns=_DROPPED_DETAIL_COLS)
+            if dropped_rows else pd.DataFrame(columns=_DROPPED_DETAIL_COLS)
+        ),
+        stage_tables=stage_tables,
     )
 
 
@@ -328,6 +411,52 @@ def _bins_to_numpy(bins: Any) -> np.ndarray:
     if isinstance(bins, pd.Series):
         return bins.to_numpy(dtype=object)
     return np.asarray(bins, dtype=object)
+
+
+def _screen_engine_payload(
+    binner: Any | None,
+    *,
+    fit_features: list[str],
+    target_col: str,
+    weight_col: str | None,
+    summary_rows: list[dict],
+) -> tuple[Any | None, dict[str, Any]]:
+    """Build the (woe_engine, woe_engine_meta) result payload (G00).
+
+    Monotone engines attach as-is — they hold only per-feature bin tables.
+    WOE_Master engines are never attached (they retain the full training
+    frame at ``self.train_data``); their woe_table + metadata travel instead.
+    """
+    if binner is None:
+        return None, {}
+    engine_name = type(binner).__name__
+    meta: dict[str, Any] = {
+        "engine_name": engine_name,
+        "fit_features": list(fit_features),
+        "target_col": target_col,
+        "weight_col": weight_col,
+        "screen_stages": [row.get("stage") for row in summary_rows],
+    }
+    if engine_name == "WOE_Master":
+        from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+        try:
+            meta["woe_table"] = as_woe_engine(binner).get_woe_table(varlist=list(fit_features))
+        except Exception as exc:
+            meta["woe_table"] = None
+            meta["woe_table_error"] = repr(exc)
+        meta["engine_attached"] = False
+        warnings.warn(
+            "screening WOE engine is a WOE_Master, which retains the full "
+            "training frame — attaching its woe_table and metadata only. "
+            "Use woe_engine='monotone' to get a reusable, serializable "
+            "screening engine on the result.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None, meta
+    meta["engine_attached"] = True
+    return binner, meta
 
 
 def _weighted_woe_bins_screen(
@@ -338,6 +467,7 @@ def _weighted_woe_bins_screen(
     config: FeatureScreenConfig,
     *,
     prefit_woe_engine: Any | None = None,
+    selection_evidence: Any | None = None,
 ) -> FeatureScreenResult:
     from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 
@@ -346,6 +476,8 @@ def _weighted_woe_bins_screen(
     y_ins = ins[target_col].astype(float).to_numpy()
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
+    dropped_rows: list[dict] = []
+    stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
         current,
@@ -369,6 +501,7 @@ def _weighted_woe_bins_screen(
             categorical_features=config.categorical_features,
         )
     adapter = as_woe_engine(binner)
+    engine_fit_features = list(current)
 
     # Assign fitted bins once per split. PSI and IV both consume these labels;
     # doing it here avoids a full WOE transform for every feature and stage.
@@ -447,7 +580,7 @@ def _weighted_woe_bins_screen(
             columns=["var", "iv_weighted", "n_bins", "missing_rate"],
         )
         if not iv_table.empty:
-            keep = iv_table.loc[iv_table["iv_weighted"] >= config.iv_threshold, "var"].tolist()
+            keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
@@ -479,7 +612,25 @@ def _weighted_woe_bins_screen(
         )
         summary_rows.append(_summary_row("corr", n_before, len(current), config.corr_threshold, weight_col))
 
+    from .Screen_Gates import apply_post_corr_gates
+
+    gate_iv_map = (
+        dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+    )
+    current = apply_post_corr_gates(
+        ins, current, config, selection_evidence, gate_iv_map,
+        summary_rows, dropped_rows, stage_tables,
+        weight_col=weight_col, on_empty_stage=config.on_empty_stage,
+    )
+
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, weight_col))
+    engine_obj, engine_meta = _screen_engine_payload(
+        binner,
+        fit_features=engine_fit_features,
+        target_col=target_col,
+        weight_col=weight_col,
+        summary_rows=summary_rows,
+    )
     return FeatureScreenResult(
         selected_features=list(current),
         iv_table=iv_table,
@@ -488,6 +639,13 @@ def _weighted_woe_bins_screen(
         summary=pd.DataFrame(summary_rows),
         missing_rate_table=missing_rate_table,
         missing_rate_dropped=missing_rate_dropped,
+        woe_engine=engine_obj,
+        woe_engine_meta=engine_meta,
+        dropped_detail=(
+            pd.DataFrame(dropped_rows, columns=_DROPPED_DETAIL_COLS)
+            if dropped_rows else pd.DataFrame(columns=_DROPPED_DETAIL_COLS)
+        ),
+        stage_tables=stage_tables,
     )
 
 
@@ -499,6 +657,7 @@ def feature_screen(
     weight_col: str | None = None,
     config: FeatureScreenConfig | None = None,
     prefit_woe_engine: Any | None = None,
+    selection_evidence: Any | None = None,
 ) -> FeatureScreenResult:
     """Run PSI -> IV -> correlation screening on pre-split INS/OOS/OOT frames."""
     cfg = config or FeatureScreenConfig()
@@ -513,6 +672,7 @@ def feature_screen(
                 weight_col,
                 cfg,
                 prefit_woe_engine=prefit_woe_engine,
+                selection_evidence=selection_evidence,
             )
         return _weighted_screen_impl(
             splits,
@@ -524,6 +684,7 @@ def feature_screen(
             psi_compare_splits=list(cfg.psi_compare_splits),
             iv_enabled=cfg.iv_enabled,
             iv_threshold=cfg.iv_threshold,
+            iv_upper_threshold=cfg.iv_upper_threshold,
             iv_bins=cfg.iv_bins,
             min_bin_prop=cfg.min_bin_prop,
             corr_enabled=cfg.corr_enabled,
@@ -538,6 +699,8 @@ def feature_screen(
             prefit_woe_engine=prefit_woe_engine,
             missing_rate_threshold=cfg.missing_rate_threshold,
             missing_rate_ref=cfg.missing_rate_ref,
+            gates_config=cfg,
+            selection_evidence=selection_evidence,
         )
 
     if use_woe_bins or prefit_woe_engine is not None:
@@ -547,6 +710,7 @@ def feature_screen(
             target_col,
             cfg,
             prefit_woe_engine=prefit_woe_engine,
+            selection_evidence=selection_evidence,
         )
 
     return _legacy_unweighted_screen(
@@ -558,6 +722,7 @@ def feature_screen(
         psi_compare_splits=list(cfg.psi_compare_splits),
         iv_enabled=cfg.iv_enabled,
         iv_threshold=cfg.iv_threshold,
+        iv_upper_threshold=cfg.iv_upper_threshold,
         iv_bins=cfg.iv_bins,
         iv_min_bin_prop=cfg.iv_min_bin_prop,
         corr_enabled=cfg.corr_enabled,
@@ -570,6 +735,8 @@ def feature_screen(
         on_empty_stage=cfg.on_empty_stage,
         missing_rate_threshold=cfg.missing_rate_threshold,
         missing_rate_ref=cfg.missing_rate_ref,
+        gates_config=cfg,
+        selection_evidence=selection_evidence,
     )
 
 

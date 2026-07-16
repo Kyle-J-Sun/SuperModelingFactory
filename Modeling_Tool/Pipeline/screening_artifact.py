@@ -38,7 +38,49 @@ def screen_result_to_summary(
     summary["corr_features"] = list(result.selected_features)
     summary["screen_summary"] = result.summary
     summary["final_features"] = list(result.selected_features)
+    dropped_detail = getattr(result, "dropped_detail", None)
+    if dropped_detail is not None and len(dropped_detail):
+        summary["dropped_detail"] = dropped_detail
+    stage_tables = getattr(result, "stage_tables", None)
+    if stage_tables:
+        summary["stage_tables"] = dict(stage_tables)
     return summary
+
+
+def woe_artifacts_from_screen_result(
+    result: WeightedScreenResult,
+    target_col: str,
+) -> dict[str, Any] | None:
+    """Wrap a screen-fitted WOE engine into the CM reuse contract (G00).
+
+    The returned dict matches what CreditModelPipeline._reuse_screening_woe
+    consumes: ``by_target[target] = {engine, adapter, features}`` plus a
+    top-level ``woe_table``. Returns None when the screen did not attach a
+    reusable engine (e.g. WOE_Master screens attach table-only metadata).
+    """
+    engine = getattr(result, "woe_engine", None)
+    meta = dict(getattr(result, "woe_engine_meta", {}) or {})
+    if engine is None:
+        return None
+    from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+    adapter = as_woe_engine(engine)
+    features = list(meta.get("fit_features") or result.selected_features)
+    try:
+        woe_table = adapter.get_woe_table(features)
+    except Exception:
+        woe_table = pd.DataFrame()
+    return {
+        "by_target": {
+            target_col: {
+                "engine": engine,
+                "adapter": adapter,
+                "features": features,
+            }
+        },
+        "woe_table": woe_table,
+        "engine_meta": meta,
+    }
 
 
 @dataclass
@@ -64,6 +106,9 @@ class FeatureScreeningArtifact:
         source: Literal["fvp", "cm", "standalone"],
         config_snapshot: dict[str, Any] | None = None,
     ) -> FeatureScreeningArtifact:
+        if woe_artifacts is None:
+            # G00: reuse the engine the screen itself fitted, when available.
+            woe_artifacts = woe_artifacts_from_screen_result(result, target_col)
         return cls(
             selected_features=list(result.selected_features),
             selection_summary=screen_result_to_summary(result, initial_features),
@@ -147,4 +192,5 @@ class FeatureScreeningArtifact:
 __all__ = [
     "FeatureScreeningArtifact",
     "screen_result_to_summary",
+    "woe_artifacts_from_screen_result",
 ]

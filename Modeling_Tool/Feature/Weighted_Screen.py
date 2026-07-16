@@ -19,6 +19,9 @@ _MISSING_BIN = "__MISSING__"
 _MISSING_RATE_COLS = ["var", "missing_rate"]
 
 
+_DROPPED_DETAIL_COLS = ["var", "stage", "metric", "value", "threshold", "reason"]
+
+
 @dataclass
 class WeightedScreenResult:
     selected_features: list[str]
@@ -32,16 +35,59 @@ class WeightedScreenResult:
     missing_rate_dropped: pd.DataFrame = field(
         default_factory=lambda: pd.DataFrame(columns=_MISSING_RATE_COLS),
     )
+    # G00: the WOE engine fitted (or reused) by the screen, with enough
+    # metadata to rebuild the CM reuse contract. Monotone engines are attached
+    # as-is (they hold no training frame); WOE_Master engines are never
+    # attached — only their woe_table travels (see woe_engine_meta).
+    woe_engine: Any | None = None
+    woe_engine_meta: dict[str, Any] = field(default_factory=dict)
+    # Per-feature drop evidence across all gate stages.
+    dropped_detail: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=_DROPPED_DETAIL_COLS),
+    )
+    # Evidence frames per gate stage (vif / group_stability / multi_target ...).
+    stage_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
-def _summary_row(stage: str, n_in: int, n_out: int, threshold: Any, weight_col: str | None) -> dict:
-    return {
+def _summary_row(stage: str, n_in: int, n_out: int, threshold: Any, weight_col: str | None, **extra: Any) -> dict:
+    row = {
         "stage": stage,
         "n_in": n_in,
         "n_out": n_out,
         "threshold": threshold,
         "weight_col": weight_col,
     }
+    # Extras are merged only when provided so the default summary frame keeps
+    # its legacy column set byte-for-byte.
+    for key, value in extra.items():
+        if value is not None:
+            row[key] = value
+    return row
+
+
+def _iv_band_keep(
+    iv_frame: pd.DataFrame,
+    iv_col: str,
+    lower: float,
+    upper: float | None,
+    dropped_rows: list | None = None,
+    var_col: str = "var",
+) -> list[str]:
+    """IV band gate (G02): keep lower <= iv, and iv <= upper when an upper
+    threshold is set. Upper-bound drops (suspiciously high IV — leakage /
+    look-ahead candidates) are recorded in dropped_rows."""
+    keep_mask = iv_frame[iv_col] >= lower
+    if upper is not None:
+        above = iv_frame[iv_frame[iv_col] > upper]
+        keep_mask &= iv_frame[iv_col] <= upper
+        if dropped_rows is not None:
+            for _, row in above.iterrows():
+                dropped_rows.append({
+                    "var": row[var_col], "stage": "iv", "metric": "iv",
+                    "value": float(row[iv_col]), "threshold": upper,
+                    "reason": "iv_above_upper",
+                })
+    return iv_frame.loc[keep_mask, var_col].tolist()
 
 
 def _resolve_splits(data: pd.DataFrame, split_col: str) -> dict[str, pd.DataFrame]:
@@ -660,6 +706,7 @@ def _legacy_unweighted_screen(
     psi_compare_splits: list[str],
     iv_enabled: bool,
     iv_threshold: float,
+    iv_upper_threshold: float | None = None,
     iv_bins: int,
     iv_min_bin_prop: float,
     corr_enabled: bool,
@@ -672,12 +719,16 @@ def _legacy_unweighted_screen(
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
     missing_rate_threshold: float | None = None,
     missing_rate_ref: Any = None,
+    gates_config: Any | None = None,
+    selection_evidence: Any | None = None,
 ) -> WeightedScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
     ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, None)]
+    dropped_rows: list[dict] = []
+    stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
         current,
@@ -743,7 +794,7 @@ def _legacy_unweighted_screen(
                 plot_path=plot_path,
             )
         iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
-        keep = iv.loc[iv["iv"] >= iv_threshold, "var"].tolist()
+        keep = _iv_band_keep(iv, "iv", iv_threshold, iv_upper_threshold, dropped_rows)
         n_before = len(current)
         current = _apply_stage_keep(
             current, keep, "iv", summary_rows,
@@ -762,6 +813,18 @@ def _legacy_unweighted_screen(
         current = cf.remove_highly_correlated(current, max_iterations=corr_max_iterations)
         summary_rows.append(_summary_row("corr", n_before, len(current), corr_threshold, None))
 
+    if gates_config is not None:
+        from .Screen_Gates import apply_post_corr_gates
+
+        gate_iv_map = (
+            dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+        )
+        current = apply_post_corr_gates(
+            ins, current, gates_config, selection_evidence, gate_iv_map,
+            summary_rows, dropped_rows, stage_tables,
+            weight_col=None, on_empty_stage=on_empty_stage,
+        )
+
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, None))
     return WeightedScreenResult(
         selected_features=list(current),
@@ -771,6 +834,11 @@ def _legacy_unweighted_screen(
         summary=pd.DataFrame(summary_rows),
         missing_rate_table=missing_rate_table,
         missing_rate_dropped=missing_rate_dropped,
+        dropped_detail=(
+            pd.DataFrame(dropped_rows, columns=_DROPPED_DETAIL_COLS)
+            if dropped_rows else pd.DataFrame(columns=_DROPPED_DETAIL_COLS)
+        ),
+        stage_tables=stage_tables,
     )
 
 
@@ -785,6 +853,7 @@ def _weighted_screen_impl(
     psi_compare_splits: list[str],
     iv_enabled: bool,
     iv_threshold: float,
+    iv_upper_threshold: float | None = None,
     iv_bins: int,
     min_bin_prop: float,
     corr_enabled: bool,
@@ -799,6 +868,8 @@ def _weighted_screen_impl(
     prefit_woe_engine: Any | None = None,
     missing_rate_threshold: float | None = None,
     missing_rate_ref: Any = None,
+    gates_config: Any | None = None,
+    selection_evidence: Any | None = None,
 ) -> WeightedScreenResult:
     ins = splits["ins"]
     oos = splits["oos"]
@@ -807,6 +878,8 @@ def _weighted_screen_impl(
 
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
+    dropped_rows: list[dict] = []
+    stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
         current,
@@ -891,7 +964,7 @@ def _weighted_screen_impl(
             columns=["var", "iv_weighted", "n_bins", "missing_rate"],
         )
         if not iv_table.empty:
-            keep = iv_table.loc[iv_table["iv_weighted"] >= iv_threshold, "var"].tolist()
+            keep = _iv_band_keep(iv_table, "iv_weighted", iv_threshold, iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
@@ -918,6 +991,18 @@ def _weighted_screen_impl(
         )
         summary_rows.append(_summary_row("corr", n_before, len(current), corr_threshold, weight_col))
 
+    if gates_config is not None:
+        from .Screen_Gates import apply_post_corr_gates
+
+        gate_iv_map = (
+            dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+        )
+        current = apply_post_corr_gates(
+            ins, current, gates_config, selection_evidence, gate_iv_map,
+            summary_rows, dropped_rows, stage_tables,
+            weight_col=weight_col, on_empty_stage=on_empty_stage,
+        )
+
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, weight_col))
     return WeightedScreenResult(
         selected_features=list(current),
@@ -927,6 +1012,11 @@ def _weighted_screen_impl(
         summary=pd.DataFrame(summary_rows),
         missing_rate_table=missing_rate_table,
         missing_rate_dropped=missing_rate_dropped,
+        dropped_detail=(
+            pd.DataFrame(dropped_rows, columns=_DROPPED_DETAIL_COLS)
+            if dropped_rows else pd.DataFrame(columns=_DROPPED_DETAIL_COLS)
+        ),
+        stage_tables=stage_tables,
     )
 
 
