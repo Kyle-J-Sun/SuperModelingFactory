@@ -78,6 +78,13 @@ class CreditModelPipelineConfig:
     )
     lr_search_params: dict[str, Any] = field(default_factory=dict)
     use_lr_search_params: bool = True
+    # G07: post-fit LR backward elimination. None (legacy) keeps every
+    # feature; "pvalue" iteratively refits without the worst-p feature until
+    # all coefficient p-values clear pvalue_threshold. Params:
+    # pvalue_threshold=0.05, min_features=1, max_iterations=20,
+    # tie_breaker="pvalue" (float ties resolve by column order).
+    lr_elimination_mode: str | None = None
+    lr_elimination_params: dict[str, Any] = field(default_factory=dict)
 
     warm_start_enabled: bool = False
     warm_start_score_col: str | None = None
@@ -279,6 +286,9 @@ class CreditModelPipeline:
         lr_search_results = self._run_lr_search(woe_splits, selected_woe_features)
         warm_start_summary = self._build_warm_start_summary(model_inputs)
         models = self._train_models(model_inputs)
+        lr_elimination_trace = getattr(self, "_lr_elimination_trace", None)
+        if lr_elimination_trace is not None:
+            fs_summary["lr_elimination"] = lr_elimination_trace
 
         optuna_results = self._run_optuna(model_inputs)
         perf_results = self._evaluate_models(
@@ -393,6 +403,17 @@ class CreditModelPipeline:
                 raise ValueError("warm_start_score_type must be 'probability' or 'log_odds'")
             if cfg.warm_start_on_unsupported not in {"skip", "raise"}:
                 raise ValueError("warm_start_on_unsupported must be 'skip' or 'raise'")
+        if cfg.lr_elimination_mode is not None:
+            if cfg.lr_elimination_mode != "pvalue":
+                raise ValueError(
+                    f"lr_elimination_mode must be None or 'pvalue'; got {cfg.lr_elimination_mode!r}"
+                )
+            allowed = {"pvalue_threshold", "min_features", "max_iterations", "tie_breaker"}
+            unknown = set(cfg.lr_elimination_params or {}) - allowed
+            if unknown:
+                raise ValueError(
+                    f"Unknown lr_elimination_params keys {sorted(unknown)}; allowed: {sorted(allowed)}"
+                )
         if cfg.woe_fit_query:
             validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
             validate_woe_fit_query_syntax(data, cfg.woe_fit_query)
@@ -1032,6 +1053,7 @@ class CreditModelPipeline:
 
         cfg = self.config
         models: dict[str, tuple[Any, Any, list[str]]] = {}
+        self._lr_elimination_trace = None
         for raw_name in as_list(cfg.train_models):
             name = str(raw_name).lower()
             if name not in {"lr", "lgb", "xgb", "cat"}:
@@ -1060,6 +1082,10 @@ class CreditModelPipeline:
                     val_tgt_name=cfg.target_col,
                     weight_col=cfg.weight_col,
                 )
+                if cfg.lr_elimination_mode == "pvalue":
+                    lr, feature_cols = self._eliminate_lr_pvalue(
+                        lr, train, val, feature_cols, lr_params, standardize,
+                    )
                 models[name] = (lr, getattr(lr, "model", lr), list(feature_cols))
             elif name in {"lgb", "xgb", "cat"}:
                 if self._warm_start_requested_for(name) and name == "cat":
@@ -1079,6 +1105,58 @@ class CreditModelPipeline:
                 raw = gbm._model.model if hasattr(gbm, "_model") else gbm
                 models[name] = (gbm, raw, list(feature_cols))
         return models
+
+    def _eliminate_lr_pvalue(
+        self,
+        lr: Any,
+        train: pd.DataFrame,
+        val: pd.DataFrame,
+        feature_cols: list[str],
+        lr_params: dict[str, Any],
+        standardize: bool,
+    ) -> tuple[Any, list[str]]:
+        """G07: backward-eliminate LR features by coefficient p-value, refitting
+        after each drop. P-values come from the scipy Fisher-information summary,
+        so they describe exactly the sklearn model that ships."""
+        from Modeling_Tool import LRMaster
+        from Modeling_Tool.Model.LRM_Tool import fast_lr_pvalues
+
+        cfg = self.config
+        elim = dict(cfg.lr_elimination_params or {})
+        threshold = float(elim.get("pvalue_threshold", 0.05))
+        min_features = int(elim.get("min_features", 1))
+        max_iterations = int(elim.get("max_iterations", 20))
+        current = list(feature_cols)
+        trace_rows: list[dict] = []
+        for iteration in range(max_iterations):
+            pvals = fast_lr_pvalues(
+                lr.model, lr._apply_standardizer(train[current]), current,
+            ).drop("Intercept")
+            worst = str(pvals.idxmax())
+            worst_p = float(pvals.max())
+            if not np.isfinite(worst_p) or worst_p <= threshold or len(current) <= min_features:
+                break
+            current.remove(worst)
+            trace_rows.append({
+                "iteration": iteration,
+                "dropped_feature": worst,
+                "p_value": worst_p,
+                "n_remaining": len(current),
+            })
+            lr = LRMaster(params=lr_params or None, standardize=standardize)
+            lr.fit(
+                data=train,
+                varlist=current,
+                tgt_name=cfg.target_col,
+                val_data=val,
+                val_varlist=current,
+                val_tgt_name=cfg.target_col,
+                weight_col=cfg.weight_col,
+            )
+        self._lr_elimination_trace = pd.DataFrame(
+            trace_rows, columns=["iteration", "dropped_feature", "p_value", "n_remaining"],
+        )
+        return lr, current
 
     def _run_backward(
         self,
@@ -1748,6 +1826,8 @@ class CreditModelPipeline:
             safe_to_csv(fs_summary["psi"], output_dir / "psi_result.csv", index=False)
         if isinstance(fs_summary.get("iv"), pd.DataFrame):
             safe_to_csv(fs_summary["iv"], output_dir / "iv_report.csv", index=False)
+        if isinstance(fs_summary.get("lr_elimination"), pd.DataFrame):
+            safe_to_csv(fs_summary["lr_elimination"], output_dir / "lr_pvalue_elimination.csv", index=False)
         safe_to_csv(woe_artifacts.get("woe_table"), output_dir / "woe_table_ins.csv", index=False)
         safe_to_csv(backward_summary, output_dir / "backward_summary.csv", index=False)
         safe_to_csv(lr_search_results, output_dir / "lr_param_search.csv", index=False)

@@ -112,6 +112,30 @@ def lr_varimp(model):
     return varimp_df.sort_values('importance', ascending=False).reset_index(drop=True)
 
 
+def fast_lr_pvalues(model, x, feature_names):
+    """Coefficient p-values for a fitted sklearn LogisticRegression via the
+    observed Fisher information — same formula as get_lr_statsmodel_summary
+    but vectorized (no n x n diagonal weight matrix), so it stays O(n*k)
+    at pipeline sample sizes. Returns a Series indexed by
+    ['Intercept', *feature_names]."""
+    from scipy import stats
+
+    x_arr = x.values if hasattr(x, 'values') else np.array(x)
+    prob = model.predict_proba(x_arr)[:, 1]
+    w = prob * (1 - prob)
+    X_design = np.hstack([np.ones((x_arr.shape[0], 1)), x_arr])
+    fisher = X_design.T @ (X_design * w[:, None])
+    try:
+        cov_matrix = np.linalg.inv(fisher)
+    except np.linalg.LinAlgError:
+        cov_matrix = np.linalg.pinv(fisher)
+    all_coefs = np.concatenate([[model.intercept_[0]], model.coef_[0]])
+    std_errs = np.sqrt(np.diag(cov_matrix))
+    z_scores = all_coefs / std_errs
+    p_values = 2 * (1 - stats.norm.cdf(np.abs(z_scores)))
+    return pd.Series(p_values, index=['Intercept'] + list(feature_names))
+
+
 def get_lr_statsmodel_summary(model, x, y, feature_names=None):
     """
     Generate a statsmodels-style summary for a sklearn LogisticRegression model.
@@ -371,7 +395,13 @@ class FeatureSelectionAnalyzer:
         pd.DataFrame
             DataFrame with columns ['feature', 'VIF'] sorted by VIF descending
         """
-        from statsmodels.stats.outliers_influence import variance_inflation_factor
+        try:
+            from statsmodels.stats.outliers_influence import variance_inflation_factor
+        except ImportError as exc:
+            raise ImportError(
+                "compute_vif requires statsmodels (optional extra). Install it "
+                "with: pip install \"SuperModelingFactory[stats]\""
+            ) from exc
 
         work = _prepare_nan_handled_frame(
             data,
