@@ -19,6 +19,7 @@ from .Weighted_Screen import (
     _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
+    _gate_ranking_iv_map,
     _iv_band_keep,
     _legacy_unweighted_screen,
     _psi_from_distributions,
@@ -323,6 +324,7 @@ def _woe_bins_unweighted_screen(
             summary_rows.append(_summary_row("psi", n_before, len(current), config.psi_threshold, None))
 
     iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
+    iv_floored_map: dict[str, float] = {}
     if config.iv_enabled:
         use_binner = config.iv_use_woe_bins and binner is not None
         vi = VarExtractionInsights(
@@ -356,6 +358,7 @@ def _woe_bins_unweighted_screen(
                     iv_bins=config.iv_bins, min_bin_prop=config.iv_min_bin_prop,
                     content=config.content,
                 )
+                iv_floored_map = dict(zip(gate_frame["var"], gate_frame["iv_floored"]))
                 keep = _iv_band_keep(
                     gate_frame, "iv", config.iv_threshold, config.iv_upper_threshold,
                     dropped_rows, upper_col="iv_floored",
@@ -385,9 +388,7 @@ def _woe_bins_unweighted_screen(
 
     from .Screen_Gates import apply_post_corr_gates
 
-    gate_iv_map = (
-        dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
-    )
+    gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, config.iv_upper_threshold)
     current = apply_post_corr_gates(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
@@ -641,9 +642,7 @@ def _weighted_woe_bins_screen(
 
     from .Screen_Gates import apply_post_corr_gates
 
-    gate_iv_map = (
-        dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
-    )
+    gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, config.iv_upper_threshold)
     current = apply_post_corr_gates(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,

@@ -137,6 +137,29 @@ def _unit_weight_floored_iv(
     return out
 
 
+def _gate_ranking_iv_map(
+    iv_table: pd.DataFrame,
+    iv_floored_map: dict[str, float] | None,
+    iv_upper_threshold: float | None,
+) -> dict[str, float]:
+    """Ranking metric for the post-corr gates (G05 truncation, G06 VIF
+    tie-break). Legacy basis is the degenerate-GUARDED reported IV. When the
+    G02 upper band is armed, leaks are already dropped by the band, so
+    ranking survivors on the guarded IV would understate legit features with
+    class-pure bins; substitute the zero-cell-floored IV where finite (NaN
+    floored values — e.g. non-numeric columns on the unit-weight diagnostic —
+    keep the guarded value, matching _iv_band_keep's fallback). upper=None
+    returns the legacy map verbatim."""
+    gate_iv_map = (
+        dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+    )
+    if iv_upper_threshold is not None:
+        for var, floored in (iv_floored_map or {}).items():
+            if var in gate_iv_map and np.isfinite(floored):
+                gate_iv_map[var] = float(floored)
+    return gate_iv_map
+
+
 def _resolve_splits(data: pd.DataFrame, split_col: str) -> dict[str, pd.DataFrame]:
     if split_col not in data.columns:
         raise KeyError(f"Missing split_col {split_col!r}")
@@ -858,6 +881,7 @@ def _legacy_unweighted_screen(
             summary_rows.append(_summary_row("psi", n_before, len(current), psi_threshold, None))
 
     iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
+    iv_floored_map: dict[str, float] = {}
     if iv_enabled:
         vi = VarExtractionInsights(
             data=ins,
@@ -886,6 +910,7 @@ def _legacy_unweighted_screen(
                 ins, list(gate_frame["var"]), target_col,
                 iv_bins=iv_bins, min_bin_prop=iv_min_bin_prop, content=content,
             )
+            iv_floored_map = dict(zip(gate_frame["var"], gate_frame["iv_floored"]))
             keep = _iv_band_keep(
                 gate_frame, "iv", iv_threshold, iv_upper_threshold, dropped_rows,
                 upper_col="iv_floored",
@@ -913,9 +938,7 @@ def _legacy_unweighted_screen(
     if gates_config is not None:
         from .Screen_Gates import apply_post_corr_gates
 
-        gate_iv_map = (
-            dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
-        )
+        gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, iv_upper_threshold)
         current = apply_post_corr_gates(
             ins, current, gates_config, selection_evidence, gate_iv_map,
             summary_rows, dropped_rows, stage_tables,
@@ -1104,9 +1127,7 @@ def _weighted_screen_impl(
     if gates_config is not None:
         from .Screen_Gates import apply_post_corr_gates
 
-        gate_iv_map = (
-            dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
-        )
+        gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, iv_upper_threshold)
         current = apply_post_corr_gates(
             ins, current, gates_config, selection_evidence, gate_iv_map,
             summary_rows, dropped_rows, stage_tables,

@@ -27,20 +27,41 @@ import pandas as pd
 from .Weighted_Screen import _apply_stage_keep, _summary_row
 
 
-def point_biserial_direction(x: pd.Series, y: pd.Series) -> int:
+def point_biserial_direction(
+    x: pd.Series, y: pd.Series, sample_weight: np.ndarray | None = None
+) -> int:
     """Sign of the point-biserial association between a numeric feature and a
     binary target: +1 when higher x means higher bad rate (WOE increasing),
     -1 for the opposite, 0 when undefined. The single shared definition of
-    "direction" for G03/G04."""
+    "direction" for G03/G04.
+
+    ``sample_weight`` is positional-aligned with the passed ``x``/``y``
+    (before NaN masking). A class whose total weight is zero — like a class
+    with no rows — and a weighted tie both return 0, mirroring the
+    unweighted NaN/tie semantics."""
     xv = pd.to_numeric(x, errors="coerce")
     yv = pd.to_numeric(y, errors="coerce")
     mask = xv.notna() & yv.notna()
     if not bool(mask.any()):
         return 0
-    xv = xv[mask]
-    yv = yv[mask]
-    mean_bad = xv[yv == 1].mean()
-    mean_good = xv[yv == 0].mean()
+    if sample_weight is None:
+        xv = xv[mask]
+        yv = yv[mask]
+        mean_bad = xv[yv == 1].mean()
+        mean_good = xv[yv == 0].mean()
+    else:
+        mask_np = mask.to_numpy()
+        w = np.asarray(sample_weight, dtype=float)[mask_np]
+        xa = xv.to_numpy(dtype=float)[mask_np]
+        ya = yv.to_numpy(dtype=float)[mask_np]
+        w_bad = w[ya == 1]
+        w_good = w[ya == 0]
+        mean_bad = (
+            float(np.average(xa[ya == 1], weights=w_bad)) if w_bad.sum() > 0 else float("nan")
+        )
+        mean_good = (
+            float(np.average(xa[ya == 0], weights=w_good)) if w_good.sum() > 0 else float("nan")
+        )
     if pd.isna(mean_bad) or pd.isna(mean_good) or mean_bad == mean_good:
         return 0
     return 1 if mean_bad > mean_good else -1

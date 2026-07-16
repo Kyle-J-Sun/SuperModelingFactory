@@ -1447,12 +1447,29 @@ class FeatureValidationPipeline:
         return adapter.assign_bins_frame(data, usable)
 
     @staticmethod
-    def _evidence_iv(bins: np.ndarray, target_values: np.ndarray) -> float:
+    def _evidence_iv(
+        bins: np.ndarray,
+        target_values: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> float:
         """Same WOE/IV formula as _ivks_from_assigned_bins_grouped, minus the
-        iv_cut/min_group_size report filters (gates need unfiltered evidence)."""
+        iv_cut/min_group_size report filters (gates need unfiltered evidence).
+
+        ``sample_weight`` (positional-aligned with ``bins``) switches counts
+        to weighted mass so gate evidence matches the weighted modeling
+        basis; None reproduces the unweighted arithmetic exactly. Weights are
+        expected on frequency scale (e.g. FT weights): the max(total, 1.0)
+        floors are kept verbatim, so a zero-mass class or slice degrades to
+        iv == 0.0 (never NaN) and sub-unit total mass is damped — both err
+        toward dropping under a lower IV floor."""
         bin_codes, _ = pd.factorize(bins, sort=False)
-        counts = np.bincount(bin_codes).astype(float)
-        bad = np.bincount(bin_codes, weights=target_values)
+        if sample_weight is None:
+            counts = np.bincount(bin_codes).astype(float)
+            bad = np.bincount(bin_codes, weights=target_values)
+        else:
+            w = np.asarray(sample_weight, dtype=float)
+            counts = np.bincount(bin_codes, weights=w)
+            bad = np.bincount(bin_codes, weights=w * np.asarray(target_values, dtype=float))
         good = counts - bad
         bad_pct = bad / max(float(bad.sum()), 1.0)
         good_pct = good / max(float(good.sum()), 1.0)
@@ -1467,7 +1484,12 @@ class FeatureValidationPipeline:
         screen_cfg: Any,
     ) -> Any | None:
         """Lazy G03/G04 evidence closures over INS, priced only on the
-        post-corr survivor set the gates hand them."""
+        post-corr survivor set the gates hand them.
+
+        Evidence IVs and directions respect ``cfg.weight_col`` so gate
+        decisions share the weighted modeling basis; the ``n`` column stays a
+        RAW observation count (min_group_n gauges statistical sufficiency,
+        which weights do not add to)."""
         cfg = self.config
         group_gates_on = any(
             getattr(screen_cfg, name, None) is not None
@@ -1483,6 +1505,13 @@ class FeatureValidationPipeline:
 
         ins = splits["ins"]
         primary = target_cols[0]
+        w_ins = None
+        if cfg.weight_col:
+            from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
+            w_ins = resolve_sample_weight(
+                data=ins, weight_col=cfg.weight_col, expected_len=len(ins)
+            )
         group_dims = list(cfg.selection_group_dims or [])
         if group_gates_on:
             if not group_dims:
@@ -1498,7 +1527,9 @@ class FeatureValidationPipeline:
                 )
 
         def per_group_iv_fn(features: list[str]) -> pd.DataFrame:
-            data = ins[ins[primary].notna()]
+            obs_mask = ins[primary].notna()
+            data = ins[obs_mask]
+            w_data = w_ins[obs_mask.to_numpy()] if w_ins is not None else None
             bins_frame = self._evidence_bins_frame(data, features, primary, woe_artifacts)
             if bins_frame is None:
                 raise ValueError(
@@ -1514,6 +1545,7 @@ class FeatureValidationPipeline:
                     if isinstance(group_value, tuple) else str(group_value)
                 )
                 y_g = y[positions]
+                w_g = w_data[positions] if w_data is not None else None
                 sub = data.iloc[positions]
                 for var in features:
                     if var not in bins_frame.columns:
@@ -1524,15 +1556,18 @@ class FeatureValidationPipeline:
                         "var": var,
                         "group": label,
                         "n": int(len(positions)),
-                        "iv": self._evidence_iv(bins, y_g),
-                        "direction": point_biserial_direction(sub[var], sub[primary]),
+                        "iv": self._evidence_iv(bins, y_g, sample_weight=w_g),
+                        "direction": point_biserial_direction(
+                            sub[var], sub[primary], sample_weight=w_g
+                        ),
                     })
             return pd.DataFrame(rows, columns=["var", "group", "n", "iv", "direction"])
 
         def per_target_fn(features: list[str]) -> pd.DataFrame:
             rows: list[dict] = []
             for target in target_cols:
-                data = ins[ins[target].notna()]
+                obs_mask = ins[target].notna()
+                data = ins[obs_mask]
                 if not len(data):
                     rows.extend(
                         {"var": var, "target": target, "iv": np.nan,
@@ -1540,13 +1575,16 @@ class FeatureValidationPipeline:
                         for var in features
                     )
                     continue
+                w_t = w_ins[obs_mask.to_numpy()] if w_ins is not None else None
                 bins_frame = self._evidence_bins_frame(data, features, target, woe_artifacts)
                 y = data[target].astype(int).to_numpy()
                 for var in features:
                     if bins_frame is None or var not in bins_frame.columns:
                         rows.append({
                             "var": var, "target": target, "iv": np.nan,
-                            "direction": point_biserial_direction(data[var], data[target])
+                            "direction": point_biserial_direction(
+                                data[var], data[target], sample_weight=w_t
+                            )
                             if var in data.columns else 0,
                             "status": "engine_missing",
                         })
@@ -1556,8 +1594,10 @@ class FeatureValidationPipeline:
                     rows.append({
                         "var": var,
                         "target": target,
-                        "iv": self._evidence_iv(bins, y),
-                        "direction": point_biserial_direction(data[var], data[target]),
+                        "iv": self._evidence_iv(bins, y, sample_weight=w_t),
+                        "direction": point_biserial_direction(
+                            data[var], data[target], sample_weight=w_t
+                        ),
                         "status": "ok",
                     })
             return pd.DataFrame(rows, columns=["var", "target", "iv", "direction", "status"])
@@ -1627,6 +1667,7 @@ class FeatureValidationPipeline:
             "vif_enabled": screen_cfg.vif_enabled,
             "vif_threshold": screen_cfg.vif_threshold,
             "selection_group_dims": list(cfg.selection_group_dims or []),
+            "evidence_weight_col": cfg.weight_col,
         })
         selection_summary = {
             "initial_features": list(new_features),
