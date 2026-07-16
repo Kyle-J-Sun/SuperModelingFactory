@@ -72,22 +72,69 @@ def _iv_band_keep(
     upper: float | None,
     dropped_rows: list | None = None,
     var_col: str = "var",
+    upper_col: str | None = None,
 ) -> list[str]:
     """IV band gate (G02): keep lower <= iv, and iv <= upper when an upper
     threshold is set. Upper-bound drops (suspiciously high IV — leakage /
-    look-ahead candidates) are recorded in dropped_rows."""
+    look-ahead candidates) are recorded in dropped_rows.
+
+    ``upper_col`` names an alternative column for the upper test only. The
+    degenerate-guarded IV excludes class-pure bins, so near-perfect
+    separators — the exact features the upper band targets — understate it;
+    callers pass a zero-cell-floored IV here while the lower band and the
+    reported table keep the legacy column. Rows with NaN in ``upper_col``
+    fall back to ``iv_col``."""
     keep_mask = iv_frame[iv_col] >= lower
     if upper is not None:
-        above = iv_frame[iv_frame[iv_col] > upper]
-        keep_mask &= iv_frame[iv_col] <= upper
+        if upper_col is not None and upper_col in iv_frame.columns:
+            gate = iv_frame[upper_col].where(iv_frame[upper_col].notna(), iv_frame[iv_col])
+            metric = upper_col
+        else:
+            gate = iv_frame[iv_col]
+            metric = "iv"
+        above = iv_frame[gate > upper]
+        keep_mask &= gate <= upper
         if dropped_rows is not None:
-            for _, row in above.iterrows():
+            for idx, row in above.iterrows():
                 dropped_rows.append({
-                    "var": row[var_col], "stage": "iv", "metric": "iv",
-                    "value": float(row[iv_col]), "threshold": upper,
+                    "var": row[var_col], "stage": "iv", "metric": metric,
+                    "value": float(gate.loc[idx]), "threshold": upper,
                     "reason": "iv_above_upper",
                 })
     return iv_frame.loc[keep_mask, var_col].tolist()
+
+
+def _unit_weight_floored_iv(
+    ins: pd.DataFrame,
+    varlist: list[str],
+    target_col: str,
+    *,
+    iv_bins: int,
+    min_bin_prop: float,
+    content: float,
+    precision: int = 5,
+) -> list[float]:
+    """Zero-cell-floored equal-freq IV with unit weights, for the G02 upper
+    band on the gains-table path: its filliv convention zeroes pure bins and
+    would otherwise understate hard leakage the same way the degenerate
+    guard does. Non-numeric columns return NaN so the gate falls back to
+    the reported IV. The remainder-IV warning is suppressed — only the
+    floored diagnostic is consumed here."""
+    y = ins[target_col].astype(float).to_numpy()
+    w = np.ones(len(ins), dtype=float)
+    out: list[float] = []
+    for var in varlist:
+        if var not in ins.columns or not pd.api.types.is_numeric_dtype(ins[var]):
+            out.append(float("nan"))
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            _, _, _, floored = _weighted_iv_for_var(
+                ins[var].to_numpy(dtype=float), y, w, iv_bins, min_bin_prop, precision,
+                var_name=var, on_null_edges="silent", content=content,
+            )
+        out.append(floored)
+    return out
 
 
 def _resolve_splits(data: pd.DataFrame, split_col: str) -> dict[str, pd.DataFrame]:
@@ -209,7 +256,7 @@ def _psi_from_distributions(expected: pd.Series, actual: pd.Series, content: flo
     return float(((a - e) * np.log(a / e)).sum())
 
 
-def _weighted_iv_from_assigned_bins(
+def _weighted_iv_detail(
     y: np.ndarray,
     w: np.ndarray,
     bins: np.ndarray,
@@ -217,7 +264,21 @@ def _weighted_iv_from_assigned_bins(
     *,
     var_name: str | None = None,
     include_missing_bin: bool = False,
-) -> tuple[float, int, float]:
+    content: float | None = None,
+) -> tuple[float, int, float, float]:
+    """Weighted IV plus an optional zero-cell-floored variant.
+
+    The reported IV (first element) excludes class-degenerate bins via
+    iv_guard. That is right for the *lower* informativeness bound, but it
+    understates IV for near-perfectly separating features: a pure bin
+    carries the strongest possible signal yet contributes nothing, so the
+    exact leakage candidates iv_upper_threshold (G02) exists to catch sail
+    under the band. When ``content`` is given, the fourth element floors
+    each bin's class shares at ``content`` (the same floor the PSI path
+    uses) so pure bins contribute a large finite term, matching the
+    WOE-engine convention; features with no degenerate bins get
+    iv_floored == iv. When ``content`` is None the fourth element is NaN.
+    """
     included = np.ones(len(bins), dtype=bool)
     if not include_missing_bin:
         included &= bins != _MISSING_BIN
@@ -225,9 +286,10 @@ def _weighted_iv_from_assigned_bins(
     total_good = float(np.sum(w[included] * (1.0 - y[included])))
     if total_bad <= 0 or total_good <= 0:
         missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-        return 0.0, 0, missing_rate
+        return 0.0, 0, missing_rate, (0.0 if content is not None else float("nan"))
 
     iv = 0.0
+    iv_floored = 0.0 if content is not None else float("nan")
     n_bins = 0
     n_contributing_bins = 0
     n_degenerate = 0
@@ -238,7 +300,13 @@ def _weighted_iv_from_assigned_bins(
         m = bins == b
         bad_w = float(np.sum(w[m] * y[m]))
         good_w = float(np.sum(w[m] * (1.0 - y[m])))
-        contrib, is_degenerate = iv_guard(bad_w / total_bad, good_w / total_good)
+        bad_share = bad_w / total_bad
+        good_share = good_w / total_good
+        contrib, is_degenerate = iv_guard(bad_share, good_share)
+        if content is not None:
+            floor_bad = max(bad_share, content)
+            floor_good = max(good_share, content)
+            iv_floored += float((floor_bad - floor_good) * np.log(floor_bad / floor_good))
         if is_degenerate:
             n_degenerate += 1
             continue
@@ -254,7 +322,7 @@ def _weighted_iv_from_assigned_bins(
                 stacklevel=2,
             )
         missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-        return 0.0, 0, missing_rate
+        return 0.0, 0, missing_rate, iv_floored
 
     if n_degenerate:
         prefix = f"{var_name}: " if var_name else ""
@@ -265,7 +333,22 @@ def _weighted_iv_from_assigned_bins(
             stacklevel=2,
         )
     missing_rate = 1.0 - float(np.sum(w[np.isfinite(x)])) / float(np.sum(w) or 1.0)
-    return float(iv), n_bins, missing_rate
+    return float(iv), n_bins, missing_rate, iv_floored
+
+
+def _weighted_iv_from_assigned_bins(
+    y: np.ndarray,
+    w: np.ndarray,
+    bins: np.ndarray,
+    x: np.ndarray,
+    *,
+    var_name: str | None = None,
+    include_missing_bin: bool = False,
+) -> tuple[float, int, float]:
+    iv, n_bins, missing_rate, _ = _weighted_iv_detail(
+        y, w, bins, x, var_name=var_name, include_missing_bin=include_missing_bin,
+    )
+    return iv, n_bins, missing_rate
 
 
 def _weighted_iv_for_var(
@@ -279,16 +362,18 @@ def _weighted_iv_for_var(
     var_name: str | None = None,
     include_missing_bin: bool = False,
     on_null_edges: Literal["raise", "warn_and_zero", "silent"] = "raise",
-) -> tuple[float, int, float]:
+    content: float | None = None,
+) -> tuple[float, int, float, float]:
     edges = _weighted_equal_freq_edges(x, w, n_bins, min_bin_prop, precision=precision)
     bins = _assign_bins(x, edges, name=var_name, on_null_edges=on_null_edges)
-    return _weighted_iv_from_assigned_bins(
+    return _weighted_iv_detail(
         y,
         w,
         bins,
         x,
         var_name=var_name,
         include_missing_bin=include_missing_bin,
+        content=content,
     )
 
 
@@ -721,6 +806,7 @@ def _legacy_unweighted_screen(
     missing_rate_ref: Any = None,
     gates_config: Any | None = None,
     selection_evidence: Any | None = None,
+    content: float = 1e-6,
 ) -> WeightedScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
@@ -794,7 +880,18 @@ def _legacy_unweighted_screen(
                 plot_path=plot_path,
             )
         iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
-        keep = _iv_band_keep(iv, "iv", iv_threshold, iv_upper_threshold, dropped_rows)
+        if iv_upper_threshold is not None:
+            gate_frame = iv[["var", "iv"]].copy()
+            gate_frame["iv_floored"] = _unit_weight_floored_iv(
+                ins, list(gate_frame["var"]), target_col,
+                iv_bins=iv_bins, min_bin_prop=iv_min_bin_prop, content=content,
+            )
+            keep = _iv_band_keep(
+                gate_frame, "iv", iv_threshold, iv_upper_threshold, dropped_rows,
+                upper_col="iv_floored",
+            )
+        else:
+            keep = _iv_band_keep(iv, "iv", iv_threshold, iv_upper_threshold, dropped_rows)
         n_before = len(current)
         current = _apply_stage_keep(
             current, keep, "iv", summary_rows,
@@ -941,11 +1038,13 @@ def _weighted_screen_impl(
         psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
 
     iv_records: list[dict] = []
+    iv_floored_map: dict[str, float] = {}
     if iv_enabled:
+        floor_content = content if iv_upper_threshold is not None else None
         for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
-            iv_val, n_b, miss = _weighted_iv_for_var(
+            iv_val, n_b, miss, iv_floored = _weighted_iv_for_var(
                 ins[var].to_numpy(dtype=float),
                 y_ins,
                 w_ins,
@@ -953,7 +1052,10 @@ def _weighted_screen_impl(
                 min_bin_prop,
                 precision,
                 var_name=var,
+                content=floor_content,
             )
+            if floor_content is not None:
+                iv_floored_map[var] = iv_floored
             iv_records.append({
                 "var": var,
                 "iv_weighted": iv_val,
@@ -964,7 +1066,15 @@ def _weighted_screen_impl(
             columns=["var", "iv_weighted", "n_bins", "missing_rate"],
         )
         if not iv_table.empty:
-            keep = _iv_band_keep(iv_table, "iv_weighted", iv_threshold, iv_upper_threshold, dropped_rows)
+            if iv_upper_threshold is not None:
+                gate_frame = iv_table[["var", "iv_weighted"]].copy()
+                gate_frame["iv_floored"] = gate_frame["var"].map(iv_floored_map)
+                keep = _iv_band_keep(
+                    gate_frame, "iv_weighted", iv_threshold, iv_upper_threshold,
+                    dropped_rows, upper_col="iv_floored",
+                )
+            else:
+                keep = _iv_band_keep(iv_table, "iv_weighted", iv_threshold, iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,

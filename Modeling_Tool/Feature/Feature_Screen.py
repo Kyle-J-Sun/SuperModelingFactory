@@ -24,9 +24,10 @@ from .Weighted_Screen import (
     _psi_from_distributions,
     _resolve_splits,
     _summary_row,
+    _unit_weight_floored_iv,
     _weighted_bin_distribution,
     _weighted_corr_for_screen,
-    _weighted_iv_from_assigned_bins,
+    _weighted_iv_detail,
     _weighted_screen_impl,
 )
 
@@ -348,7 +349,19 @@ def _woe_bins_unweighted_screen(
             )
         if iv is not None and not iv.empty:
             iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
-            keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
+            if config.iv_upper_threshold is not None:
+                gate_frame = iv[["var", "iv"]].copy()
+                gate_frame["iv_floored"] = _unit_weight_floored_iv(
+                    ins, list(gate_frame["var"]), target_col,
+                    iv_bins=config.iv_bins, min_bin_prop=config.iv_min_bin_prop,
+                    content=config.content,
+                )
+                keep = _iv_band_keep(
+                    gate_frame, "iv", config.iv_threshold, config.iv_upper_threshold,
+                    dropped_rows, upper_col="iv_floored",
+                )
+            else:
+                keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
@@ -553,7 +566,9 @@ def _weighted_woe_bins_screen(
         psi_table = pd.DataFrame(columns=["var", "psi_ins_oos", "psi_ins_oot", "psi_max"])
 
     iv_records: list[dict] = []
+    iv_floored_map: dict[str, float] = {}
     if config.iv_enabled:
+        floor_content = config.content if config.iv_upper_threshold is not None else None
         for var in current:
             if var not in ins.columns or ins[var].nunique(dropna=False) <= 1:
                 continue
@@ -564,12 +579,16 @@ def _weighted_woe_bins_screen(
             else:
                 # Categorical/object feature: IV itself is computed from the
                 # already-assigned bins; ``x`` only feeds np.isfinite() inside
-                # _weighted_iv_from_assigned_bins to derive the weighted
+                # _weighted_iv_detail to derive the weighted
                 # missing rate. A hard float cast crashes on string levels
                 # (e.g. '4.高中'), so encode observed -> 1.0 / missing -> NaN,
                 # matching the notna semantics of _missing_rate_for_series.
                 x_ins = np.where(x_series.notna().to_numpy(), 1.0, np.nan)
-            iv_val, n_b, miss = _weighted_iv_from_assigned_bins(y_ins, w_ins, bins_ins, x_ins)
+            iv_val, n_b, miss, iv_floored = _weighted_iv_detail(
+                y_ins, w_ins, bins_ins, x_ins, content=floor_content,
+            )
+            if floor_content is not None:
+                iv_floored_map[var] = iv_floored
             iv_records.append({
                 "var": var,
                 "iv_weighted": iv_val,
@@ -580,7 +599,15 @@ def _weighted_woe_bins_screen(
             columns=["var", "iv_weighted", "n_bins", "missing_rate"],
         )
         if not iv_table.empty:
-            keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
+            if config.iv_upper_threshold is not None:
+                gate_frame = iv_table[["var", "iv_weighted"]].copy()
+                gate_frame["iv_floored"] = gate_frame["var"].map(iv_floored_map)
+                keep = _iv_band_keep(
+                    gate_frame, "iv_weighted", config.iv_threshold,
+                    config.iv_upper_threshold, dropped_rows, upper_col="iv_floored",
+                )
+            else:
+                keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
@@ -737,6 +764,7 @@ def feature_screen(
         missing_rate_ref=cfg.missing_rate_ref,
         gates_config=cfg,
         selection_evidence=selection_evidence,
+        content=cfg.content,
     )
 
 
