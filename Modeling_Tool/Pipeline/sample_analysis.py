@@ -43,6 +43,19 @@ class SampleAnalysisPipelineConfig:
     # .estimate_split_count() directly without running.
     dry_run: bool = False
 
+    # G01: row-level materialization of the recommended splits. Off by default
+    # (legacy: SAP only emits statistics). With materialize_split=True the
+    # recommended (window, ratio, seed) combination per target is REPLAYED via
+    # the same SampleSplitter, producing a long frame
+    # [id_col, target_col, split_col_name] plus a verifiable split_artifact.
+    id_col: str | None = None
+    materialize_split: bool = False
+    # When set, OOT = rows with oot_time_dim >= oot_cutoff (artifact records
+    # oot_basis="cutoff"); otherwise the recommended trailing window is used.
+    oot_cutoff: Any = None
+    split_col_name: str = "sample_split"
+    persist_split_map: bool = False
+
 
 @dataclass
 class SampleAnalysisPipelineResult:
@@ -52,6 +65,10 @@ class SampleAnalysisPipelineResult:
     split_candidate_summary: pd.DataFrame
     split_recommendation: pd.DataFrame
     output_paths: dict[str, str]
+    # G01: long frame [id_col, target_col, split_col_name] and its audit
+    # artifact; None unless materialize_split=True.
+    row_level_split: pd.DataFrame | None = None
+    split_artifact: dict[str, Any] | None = None
 
 
 class SampleAnalysisPipeline:
@@ -110,6 +127,19 @@ class SampleAnalysisPipeline:
         profile_summary = self._profile_summary(work)
         split_candidates = self._split_candidates(work)
         split_recommendation = self._recommend_splits(split_candidates)
+
+        row_level_split = None
+        split_artifact = None
+        if self.config.materialize_split:
+            if split_recommendation.empty:
+                raise ValueError(
+                    "materialize_split=True but no split recommendation was produced "
+                    "(no target had usable OOT/pool segments)."
+                )
+            row_level_split, split_artifact = self._materialize_recommended_splits(
+                work, split_recommendation,
+            )
+
         output_paths = self._write_outputs(
             {
                 "label_coverage_summary": label_coverage,
@@ -119,6 +149,20 @@ class SampleAnalysisPipeline:
                 "split_recommendation": split_recommendation,
             }
         )
+        if row_level_split is not None and self.config.persist_split_map:
+            import json
+
+            output_dir = Path(self.config.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            split_csv = output_dir / "row_level_split.csv"
+            row_level_split.to_csv(split_csv, index=False)
+            output_paths["row_level_split"] = str(split_csv.resolve())
+            artifact_json = output_dir / "split_artifact.json"
+            artifact_json.write_text(
+                json.dumps(split_artifact, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            output_paths["split_artifact"] = str(artifact_json.resolve())
 
         return SampleAnalysisPipelineResult(
             label_coverage_summary=label_coverage,
@@ -127,6 +171,8 @@ class SampleAnalysisPipeline:
             split_candidate_summary=split_candidates,
             split_recommendation=split_recommendation,
             output_paths=output_paths,
+            row_level_split=row_level_split,
+            split_artifact=split_artifact,
         )
 
     def _validate_input(self, data: pd.DataFrame) -> None:
@@ -141,6 +187,11 @@ class SampleAnalysisPipeline:
         missing = [col for col in dict.fromkeys(required) if col not in data.columns]
         if missing:
             raise KeyError(f"Missing required columns: {missing}")
+        if cfg.materialize_split:
+            if not cfg.id_col:
+                raise ValueError("materialize_split=True requires id_col.")
+            if cfg.id_col not in data.columns:
+                raise KeyError(f"Missing id_col {cfg.id_col!r} for materialize_split.")
 
     def _label_coverage(self, data: pd.DataFrame) -> pd.DataFrame:
         cfg = self.config
@@ -224,26 +275,9 @@ class SampleAnalysisPipeline:
 
                 for ins_ratio in cfg.ins_oos_ratios:
                     for seed in list(cfg.random_seeds):
-                        splitter = SampleSplitter(
-                            test_size=1 - float(ins_ratio),
-                            random_state=int(seed),
-                            stratify=True,
+                        ins_index, oos_index = self._materialize_one_split(
+                            pool_index, pool_target, float(ins_ratio), int(seed),
                         )
-                        try:
-                            ins_index, oos_index = splitter.split_indices(
-                                pool_index,
-                                pool_target,
-                            )
-                        except ValueError:
-                            splitter = SampleSplitter(
-                                test_size=1 - float(ins_ratio),
-                                random_state=int(seed),
-                                stratify=False,
-                            )
-                            ins_index, oos_index = splitter.split_indices(
-                                pool_index,
-                                pool_target,
-                            )
 
                         br_ins = mature.loc[ins_index, target].mean()
                         br_oos = mature.loc[oos_index, target].mean()
@@ -275,6 +309,141 @@ class SampleAnalysisPipeline:
                             }
                         )
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _materialize_one_split(
+        pool_index: pd.Index,
+        pool_target: pd.Series,
+        ins_ratio: float,
+        seed: int,
+    ) -> tuple[pd.Index, pd.Index]:
+        """The single INS/OOS index generator shared by candidate scoring and
+        row-level materialization — replaying a recommended (ratio, seed) is
+        guaranteed to reproduce the exact indices the statistics came from."""
+        from Modeling_Tool import SampleSplitter
+
+        splitter = SampleSplitter(
+            test_size=1 - float(ins_ratio),
+            random_state=int(seed),
+            stratify=True,
+        )
+        try:
+            return splitter.split_indices(pool_index, pool_target)
+        except ValueError:
+            splitter = SampleSplitter(
+                test_size=1 - float(ins_ratio),
+                random_state=int(seed),
+                stratify=False,
+            )
+            return splitter.split_indices(pool_index, pool_target)
+
+    def _materialize_recommended_splits(
+        self,
+        data: pd.DataFrame,
+        recommendation: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """G01: replay each target's recommended split into row-level
+        membership, with loud integrity assertions and verifiable ID hashes."""
+        from Modeling_Tool.Pipeline._common import hash_id_values
+
+        cfg = self.config
+        id_col = cfg.id_col
+        split_col = cfg.split_col_name
+        frames: list[pd.DataFrame] = []
+        per_target: dict[str, Any] = {}
+        for _, rec in recommendation.iterrows():
+            target = str(rec["target_col"])
+            mature = data[data[target].notna()]
+            dup_count = int(mature[id_col].duplicated().sum())
+            if dup_count:
+                raise ValueError(
+                    f"materialize_split: id_col {id_col!r} has {dup_count} duplicate "
+                    f"value(s) among mature rows of target {target!r}; row-level "
+                    f"membership would be ambiguous."
+                )
+            if cfg.oot_cutoff is not None:
+                oot_mask = mature[cfg.oot_time_dim] >= cfg.oot_cutoff
+                oot_basis = "cutoff"
+                oot_spec: Any = str(cfg.oot_cutoff)
+            else:
+                time_values = sorted(mature[cfg.oot_time_dim].dropna().unique())
+                window = int(rec["oot_window_periods"])
+                oot_values = set(time_values[-window:])
+                oot_mask = mature[cfg.oot_time_dim].isin(oot_values)
+                oot_basis = "window"
+                oot_spec = ",".join(str(x) for x in sorted(oot_values))
+            oot_index = mature.index[oot_mask]
+            pool_index = mature.index[~oot_mask]
+            if len(oot_index) == 0 or len(pool_index) == 0:
+                raise ValueError(
+                    f"materialize_split: target {target!r} produced an empty "
+                    f"{'OOT' if len(oot_index) == 0 else 'INS/OOS pool'} segment "
+                    f"(oot_basis={oot_basis!r}, spec={oot_spec!r})."
+                )
+            ins_index, oos_index = self._materialize_one_split(
+                pool_index, mature.loc[pool_index, target],
+                float(rec["ins_ratio"]), int(rec["seed"]),
+            )
+            # split_indices may hand back plain ndarrays; the set-algebra
+            # assertions below need pandas Index semantics.
+            ins_index, oos_index = pd.Index(ins_index), pd.Index(oos_index)
+
+            segments = {"ins": ins_index, "oos": oos_index, "oot": oot_index}
+            for (name_a, idx_a), (name_b, idx_b) in (
+                (("ins", ins_index), ("oos", oos_index)),
+                (("ins", ins_index), ("oot", oot_index)),
+                (("oos", oos_index), ("oot", oot_index)),
+            ):
+                overlap = len(idx_a.intersection(idx_b))
+                if overlap:
+                    raise AssertionError(
+                        f"materialize_split: {overlap} row(s) fall in both "
+                        f"{name_a} and {name_b} for target {target!r}."
+                    )
+            covered = len(ins_index) + len(oos_index) + len(oot_index)
+            if covered != len(mature):
+                raise AssertionError(
+                    f"materialize_split: segments cover {covered} rows but target "
+                    f"{target!r} has {len(mature)} mature rows."
+                )
+
+            long = pd.DataFrame({
+                id_col: np.concatenate([
+                    mature.loc[idx, id_col].to_numpy() for idx in segments.values()
+                ]),
+                "target_col": target,
+                split_col: np.concatenate([
+                    np.full(len(idx), name, dtype=object)
+                    for name, idx in segments.items()
+                ]),
+            })
+            frames.append(long)
+            per_target[target] = {
+                "seed": int(rec["seed"]),
+                "ins_ratio": float(rec["ins_ratio"]),
+                "oot_time_dim": cfg.oot_time_dim,
+                "oot_basis": oot_basis,
+                "oot_spec": oot_spec,
+                "counts": {name: int(len(idx)) for name, idx in segments.items()},
+                "hashes": {
+                    **{
+                        name: hash_id_values(mature.loc[idx, id_col])
+                        for name, idx in segments.items()
+                    },
+                    "full": hash_id_values(mature[id_col]),
+                },
+            }
+
+        from Modeling_Tool import __version__ as smf_version
+
+        row_level = pd.concat(frames, ignore_index=True)
+        artifact = {
+            "split_col_name": split_col,
+            "id_col": id_col,
+            "targets": per_target,
+            "smf_version": str(smf_version),
+        }
+        return row_level, artifact
 
     def _recommend_splits(self, split_candidates: pd.DataFrame) -> pd.DataFrame:
         if split_candidates.empty:

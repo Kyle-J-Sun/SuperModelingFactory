@@ -630,3 +630,18 @@ def split_oot_by_flag(
     ins_oos = data.loc[~mask_oot].copy()
     oot = data.loc[mask_oot].copy()
     return ins_oos, oot
+
+
+def hash_id_values(values: Iterable[Any]) -> str:
+    """Deterministic sha256 over the sorted string forms of a set of IDs.
+
+    Used by split materialization (G01) so two runs can prove they produced
+    the same row-level INS/OOS/OOT membership without shipping the IDs.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for value in sorted(str(v) for v in values):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
