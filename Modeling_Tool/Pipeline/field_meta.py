@@ -299,8 +299,34 @@ _FIELD_LABELS = {
     "corr_use_woe_bins": "相关性指标复用 WOE 分箱",
     "corr_params": "相关性参数",
     "missing_rate_threshold": "缺失率阈值",
+    "woe_fit_scope": "顶层 WOE 拟合范围",
+    "iv_upper_threshold": "IV 上限阈值",
     "selection_enabled": "启用自动特征筛选",
     "selection_params": "自动筛选参数",
+    "selection_group_dims": "筛选门分组维度",
+    "monthly_iv_min": "分组 IV 下限",
+    "monthly_iv_cv_max": "分组 IV 变异系数上限",
+    "direction_consistency_min": "方向一致组占比下限",
+    "min_group_n": "分组最小样本数",
+    "insufficient_group_policy": "分组不足处理策略",
+    "target_rules": "多标签联合规则",
+    "min_pass_count": "多标签最少通过数",
+    "per_target_iv_range": "分标签 IV 区间",
+    "direction_reference_target": "方向基准标签",
+    "max_selected_features": "入选特征数上限",
+    "min_selected_features": "入选特征数下限",
+    "ranking_metric": "截断排序指标",
+    "tie_breaker": "截断破平规则",
+    "vif_enabled": "启用 VIF 门",
+    "vif_threshold": "VIF 阈值",
+    "vif_min_features": "VIF 保留特征下限",
+    "vif_tie_break_metric": "VIF 破平指标",
+    "lr_elimination_mode": "LR 系数淘汰模式",
+    "lr_elimination_params": "LR 系数淘汰参数",
+    "materialize_split": "物化行级切分",
+    "oot_cutoff": "OOT 切点",
+    "split_col_name": "切分列名",
+    "persist_split_map": "落盘切分映射",
     "profile_cols": "画像列",
     "oot_time_dim": "OOT 时间粒度",
     "oot_windows": "OOT 窗口列表",
@@ -380,6 +406,9 @@ _FIELD_OPTIONS = {
     "batch_corr_mode": ["within_batch", "block_pairwise", "off"],
     "psi_reference_dataset": ["ins", "oos", "oot", "external"],
     "numeric_coercion_mode": ["safe", "aggressive", "off"],
+    "woe_fit_scope": ["all", "post_missing_gate"],
+    "insufficient_group_policy": ["keep_warn", "drop", "raise"],
+    "target_rules": ["all", "any", "min_pass_count"],
     "applied_sample": [1, 0],
 }
 
@@ -443,6 +472,14 @@ _NESTED_FIELDS = {
         _nested("min_bin_size", "单调分箱最小箱占比。", "slider", min_val=0.0, max_val=0.5, step=0.005),
         _nested("min_n_bins", "单调分箱最少箱数。", "slider", min_val=1, max_val=20, step=1),
         _nested("n_jobs", "并行任务数。", "number"),
+        _nested("min_bad_count", "每箱最小坏样本数（None=不限制）。", "number"),
+        _nested("min_good_count", "每箱最小好样本数（None=不限制）。", "number"),
+        _nested("small_bin_policy", "小箱处理策略（None=沿用旧行为）。", "select", options=["merge", "warn", "raise"]),
+        _nested("monotone_direction", "强制单调方向。", "select", options=["auto", "increasing", "decreasing"]),
+        _nested("reference_target", "方向参考目标列。", "text"),
+        _nested("direction_conflict_policy", "方向冲突处理。", "select", options=["warn", "raise", "keep"]),
+        _nested("missing_bin_strategy", "缺失箱策略（None=按 special_values 推导）。", "select", options=["empirical_special", "fixed_woe", "fail"]),
+        _nested("refine_min_n_bins_policy", "refine 最少箱数策略（None=沿用旧行为）。", "select", options=["warn", "enforce", "raise"]),
     ],
     "corr_params": [
         _nested("corr_cutpoint", "高相关阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
@@ -597,6 +634,8 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
                 "split_candidate_summary",
                 "split_recommendation",
                 "output_paths",
+                "row_level_split",
+                "split_artifact",
             ],
         ),
         "mock_sample": PipelineRegistryEntry(
@@ -1122,6 +1161,8 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("target_cols 不能为空。")
         if missing("time_col"):
             errors.append("time_col 不能为空。")
+        if vals.get("materialize_split") and missing("id_col"):
+            errors.append("materialize_split=True 时必须配置 id_col。")
     elif entry.key == "mock_sample":
         n_samples = int(vals.get("n_samples", 80000) or 0)
         if n_samples < 1:
