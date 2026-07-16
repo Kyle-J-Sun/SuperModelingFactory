@@ -95,10 +95,18 @@ def calc_pr(y_true, y_score, sample_weight=None):
     )
 
 
-def rank_bins(score, weight, nbins):
+def rank_bins(score, weight, nbins, ascending=False):
+    """Weighted equal-frequency rank bins.
+
+    ``ascending=False`` (default, legacy) sorts scores descending — bin 1 is
+    the highest-score bucket. ``ascending=True`` sorts scores ascending so
+    bin 1 is the lowest-score bucket, matching the unweighted
+    ``gains_ascending=True`` convention.
+    """
     score = np.asarray(score, dtype=float)
     weight = np.ones(len(score), dtype=float) if weight is None else np.asarray(weight, dtype=float)
-    order = np.lexsort((np.arange(len(score)), -score))
+    sort_key = score if ascending else -score
+    order = np.lexsort((np.arange(len(score)), sort_key))
     bins = np.empty(len(score), dtype=int)
     total = float(weight.sum()) or float(len(score)) or 1.0
     cum_weight = np.cumsum(weight[order])
@@ -108,18 +116,35 @@ def rank_bins(score, weight, nbins):
     return bins
 
 
-def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binning=None, **kwargs):
+def _split_special_scores(df, score, spec_values):
+    """Split a frame into (normal, special) rows by exact score membership.
+
+    Special score values (e.g. the all-missing override ``-1``) are business
+    sentinels, not model outputs: they must not participate in quantile
+    binning or ranking metrics.
+    """
+    if not spec_values:
+        return df, None
+    spec_mask = df[score].isin(list(spec_values))
+    if not bool(spec_mask.any()):
+        return df, None
+    return df[~spec_mask], df[spec_mask]
+
+
+def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binning=None,
+                    ascending=False, spec_values=None, **kwargs):
     cols = [dep, score]
     if weight_col is not None and weight_col in data.columns:
         cols.append(weight_col)
     df = data[cols].copy()
+    df, special_df = _split_special_scores(df, score, spec_values)
     weight = resolve_weights(df, weight_col=weight_col, expected_len=len(df))
     if weight is None:
         weight = np.ones(len(df), dtype=float)
 
     y = df[dep].astype(float).to_numpy()
     s = df[score].astype(float).to_numpy()
-    df["_bin_num"] = rank_bins(s, weight, nbins)
+    df["_bin_num"] = rank_bins(s, weight, nbins, ascending=ascending)
     df["_bin_range"] = df["_bin_num"]
     df["_w"] = weight
     df["_bad_w"] = weight * y
@@ -165,13 +190,56 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     out["KS_PER_BIN"] = (out["CUM_BAD_PCT"] - out["CUM_GOOD_PCT"]).abs()
     out["KS"] = out["KS_PER_BIN"]
     out["LIFT"] = out["AVG_BAD"] / overall_bad_rate if overall_bad_rate else np.nan
-    out["TRUE_BAD_SHIFT"] = out["AVG_BAD"].shift(1) / out["AVG_BAD"] - 1
+    out["TRUE_BAD_SHIFT"] = (
+        (out["AVG_BAD"].shift(1) / out["AVG_BAD"] - 1)
+        if not ascending
+        else (out["AVG_BAD"] / out["AVG_BAD"].shift(1) - 1)
+    )
     out["RANK_ORDER_BUMP"] = out["TRUE_BAD_SHIFT"].lt(0).astype(int)
     with np.errstate(divide="ignore", invalid="ignore"):
         out["WOE"] = np.log(out["BAD_PCT_IN_EACH_BIN"] / out["GOOD_PCT_IN_EACH_BIN"])
     out["WOE"] = out["WOE"].replace([np.inf, -np.inf], 0).fillna(0)
     out["IV"] = (out["BAD_PCT_IN_EACH_BIN"] - out["GOOD_PCT_IN_EACH_BIN"]) * out["WOE"]
     out["AUC"] = safe_auc(y, s, sample_weight=weight)
+
+    if special_df is not None and len(special_df):
+        # Special sentinel scores (e.g. -1 for all-missing rows) get their own
+        # descriptive rows: never part of quantile edges, cumulative columns,
+        # or ranking metrics (those stay NaN by construction).
+        spec_weight = resolve_weights(special_df, weight_col=weight_col, expected_len=len(special_df))
+        if spec_weight is None:
+            spec_weight = np.ones(len(special_df), dtype=float)
+        grand_total = total_weight + float(np.sum(spec_weight))
+        spec_rows = []
+        for value, part in special_df.groupby(score, sort=True):
+            part_w = resolve_weights(part, weight_col=weight_col, expected_len=len(part))
+            if part_w is None:
+                part_w = np.ones(len(part), dtype=float)
+            part_y = part[dep].astype(float).to_numpy()
+            n_w = float(np.sum(part_w))
+            n_bad = float(np.sum(part_w * part_y))
+            label = f"special:{value}"
+            spec_rows.append(
+                pd.DataFrame(
+                    {
+                        "MIN": [value],
+                        "MAX": [value],
+                        "N": [n_w],
+                        "N_RAW": [int(len(part))],
+                        "PERF_CNT": [n_w],
+                        "N_BAD": [n_bad],
+                        "N_GOOD": [n_w - n_bad],
+                        "AVG_SCORE": [float(value)],
+                        "UNIQUE_SCORE": [1],
+                        "PROP": [n_w / grand_total if grand_total else np.nan],
+                        "AVG_BAD": [n_bad / n_w if n_w else np.nan],
+                        "AVG_GOOD": [(n_w - n_bad) / n_w if n_w else np.nan],
+                    },
+                    index=pd.MultiIndex.from_tuples([(label, label)], names=out.index.names),
+                )
+            )
+        out = pd.concat([out] + spec_rows)
+        out["AUC"] = out["AUC"].iloc[0]
     return out
 
 
@@ -212,32 +280,53 @@ def calc_fixed_pct(y_true, y_score, sample_weight=None, **kwargs):
     return calc_equid_dist(y_true, y_score, sample_weight=sample_weight, **kwargs)
 
 
-def dataset_summary(name, data, tgt_name, scr_name, weight_col=None, nbins=10):
+def dataset_summary(name, data, tgt_name, scr_name, weight_col=None, nbins=10,
+                    ascending=False, spec_values=None):
     weight = resolve_weights(data, weight_col=weight_col, expected_len=len(data))
     y_true = data[tgt_name].to_numpy()
     y_score = data[scr_name].to_numpy()
-    roc_df = calc_roc(y_true, y_score, sample_weight=weight)
-    gains = get_gains_table(data, tgt_name, scr_name, nbins=nbins, weight_col=weight_col)
-    return {
+    # Ranking metrics (AUC/KS/avgScore) are computed on non-special rows only:
+    # sentinel scores like -1 carry no ordering information.
+    rank_data, special_part = _split_special_scores(data, scr_name, spec_values)
+    rank_weight = resolve_weights(rank_data, weight_col=weight_col, expected_len=len(rank_data))
+    rank_true = rank_data[tgt_name].to_numpy()
+    rank_score = rank_data[scr_name].to_numpy()
+    roc_df = calc_roc(rank_true, rank_score, sample_weight=rank_weight)
+    gains = get_gains_table(
+        data, tgt_name, scr_name, nbins=nbins, weight_col=weight_col,
+        ascending=ascending, spec_values=spec_values,
+    )
+    summary = {
         "index": name,
         "dataset": name,
         "DATASET": name,
-        "AUC": safe_auc(y_true, y_score, sample_weight=weight),
+        "AUC": safe_auc(rank_true, rank_score, sample_weight=rank_weight),
         "KS": float(roc_df["KS"].max()) if "KS" in roc_df else np.nan,
         "LIFT": float(gains["LIFT"].max()) if "LIFT" in gains else np.nan,
         "IV": float(gains["IV"].sum()) if "IV" in gains else np.nan,
         "N": float(np.sum(weight)) if weight is not None else float(len(data)),
         "N_RAW": int(len(data)),
         "avgTrue": safe_weighted_average(y_true, weight),
-        "avgScore": safe_weighted_average(y_score, weight),
+        "avgScore": safe_weighted_average(rank_score, rank_weight),
     }
+    if special_part is not None:
+        spec_weight = resolve_weights(special_part, weight_col=weight_col, expected_len=len(special_part))
+        summary["N_SPECIAL"] = (
+            float(np.sum(spec_weight)) if spec_weight is not None else float(len(special_part))
+        )
+        summary["N_SPECIAL_RAW"] = int(len(special_part))
+    return summary
 
 
-def get_perf_summary(train=None, validation=None, oot=None, tgt_name=None, scr_name=None, weight_col=None, nbins=10, **kwargs):
+def get_perf_summary(train=None, validation=None, oot=None, tgt_name=None, scr_name=None, weight_col=None, nbins=10,
+                     ascending=False, spec_values=None, **kwargs):
     rows = []
     for name, data in (("ins", train), ("oos", validation), ("oot", oot)):
         if data is not None:
-            rows.append(dataset_summary(name, data, tgt_name, scr_name, weight_col=weight_col, nbins=nbins))
+            rows.append(dataset_summary(
+                name, data, tgt_name, scr_name, weight_col=weight_col, nbins=nbins,
+                ascending=ascending, spec_values=spec_values,
+            ))
     return pd.DataFrame(rows)
 
 

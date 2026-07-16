@@ -532,6 +532,26 @@ def copy_column_length_checked(
     dst[col] = src[col].to_numpy()
 
 
+def all_missing_mask(data: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+    """Rows where every listed feature is missing.
+
+    Same membership test as ``Core.scoring``'s all-missing branch
+    (``pd.isnull(data[varlist]).sum(axis=1) == len(varlist)``), so the
+    pipeline's evaluation override and the production scoring API agree on
+    which rows count as un-scorable.
+    """
+    features = list(feature_cols or [])
+    if not features:
+        return np.zeros(len(data), dtype=bool)
+    absent = [col for col in features if col not in data.columns]
+    if absent:
+        raise KeyError(
+            f"all-missing score override needs raw feature columns "
+            f"{absent[:5]} which are absent from the evaluation frame."
+        )
+    return (pd.isnull(data[features]).sum(axis=1) == len(features)).to_numpy()
+
+
 def resolve_missing_oot(
     oos: pd.DataFrame,
     synthesize: bool,

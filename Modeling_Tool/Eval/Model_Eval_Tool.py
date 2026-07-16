@@ -2169,7 +2169,7 @@ class PerformanceEvaluator:
                  dist_bins = 20, pct_bins = 10, precision = 5, min_bin_prop = 0.05,
                  include_missing = False, equal_freq = True, chi2_method = False,
                  init_equi_bins = 1000, chi2_p = 0.9, tree_binning = False, random_state = 42,
-                 weight_col = None):
+                 weight_col = None, spec_values = None, ascending = None):
         """
         初始化性能评估器。
         
@@ -2225,9 +2225,29 @@ class PerformanceEvaluator:
         self.tree_binning = tree_binning
         self.random_state = random_state
         self.weight_col = weight_col
+        # spec_values: sentinel scores (e.g. -1 for all-missing overrides)
+        # that get their own evaluation bin and are excluded from quantile
+        # edges and ranking metrics. ascending: None keeps every underlying
+        # function's own legacy default; an explicit bool is threaded through
+        # summary/gains/plot and the weighted path uniformly.
+        self.spec_values = list(spec_values) if spec_values else []
+        self.ascending = ascending
         self.datasets = {}
         self.dataset_weight_cols = {}
         self.evaluate_status = None
+
+    def _governed_eval_kwargs(self):
+        """Kwargs to thread spec_values/ascending into underlying eval calls.
+
+        Nothing is passed when unset, so every legacy default stays intact
+        (unweighted summary False, comparison paths True, weighted False).
+        """
+        kwargs = {}
+        if self.spec_values:
+            kwargs["spec_values"] = list(self.spec_values)
+        if self.ascending is not None:
+            kwargs["ascending"] = bool(self.ascending)
+        return kwargs
     
     def add_dataset(self, name, data, weight_col = None, overwrite = False):
         """
@@ -2351,6 +2371,8 @@ class PerformanceEvaluator:
                         scr_name,
                         weight_col=wc,
                         nbins=self.pct_bins,
+                        ascending=bool(self.ascending) if self.ascending is not None else False,
+                        spec_values=self.spec_values or None,
                     )
                 )
             fnl_df = pd.DataFrame(rows)
@@ -2368,15 +2390,23 @@ class PerformanceEvaluator:
                     if scr_name is None:
                         scr_name = "_mdl_scr"
                         work_data[scr_name] = self.model.predict_proba(work_data.loc[:, self.feature_cols])[:, 1]
-                    payload = {
-                        "y_true": work_data[self.tgt_name],
-                        "y_score": work_data[scr_name],
-                    }
                     resolved_weight = _weighted_eval.resolve_weights(
                         work_data,
                         weight_col=wc,
                         expected_len=len(work_data),
                     )
+                    y_true = work_data[self.tgt_name].to_numpy()
+                    y_score = work_data[scr_name].to_numpy()
+                    if self.spec_values:
+                        keep = ~pd.Series(y_score).isin(self.spec_values).to_numpy()
+                        y_true = y_true[keep]
+                        y_score = y_score[keep]
+                        if resolved_weight is not None:
+                            resolved_weight = np.asarray(resolved_weight)[keep]
+                    payload = {
+                        "y_true": y_true,
+                        "y_score": y_score,
+                    }
                     if resolved_weight is not None:
                         payload["sample_weight"] = resolved_weight
                     eval_datasets[name] = payload
@@ -2445,6 +2475,21 @@ class PerformanceEvaluator:
                 return data[self.scr_name]
             return self.model.predict_proba(data.loc[:, self.feature_cols])[:, 1]
 
+        def _rank_payload(data):
+            """(y_true, y_score) with special sentinel scores removed.
+
+            Sentinels like the all-missing override -1 carry no ordering
+            information: AUC/KS/distribution figures are computed on the
+            non-special rows; their bin-level accounting lives in the gains
+            table via spec_values.
+            """
+            y_true = data[self.tgt_name]
+            y_score = _get_score(data)
+            if not self.spec_values:
+                return y_true, y_score
+            keep = ~pd.Series(np.asarray(y_score)).isin(self.spec_values).to_numpy()
+            return np.asarray(y_true)[keep], np.asarray(y_score)[keep]
+
         def _get_benchmark_bin_edges():
             if benchmark_dataset is None:
                 return None
@@ -2492,9 +2537,10 @@ class PerformanceEvaluator:
             for name, data in dataset_dict.items():
                 if data is None:
                     continue
+                y_true, y_score = _rank_payload(data)
                 eval_datasets[name] = {
-                    "y_true": data[self.tgt_name],
-                    "y_score": _get_score(data)
+                    "y_true": y_true,
+                    "y_score": y_score
                 }
 
             if len(eval_datasets) == 0:
@@ -2553,7 +2599,8 @@ class PerformanceEvaluator:
                         chi2_p = self.chi2_p,
                         retSummary = True,
                         tree_binning = False if benchmark_bin_edges is not None else self.tree_binning,
-                        random_state = self.random_state
+                        random_state = self.random_state,
+                        **self._governed_eval_kwargs(),
                     )
                 gains_res['index'] = name
                 gains_summ_list.append(gains_res)

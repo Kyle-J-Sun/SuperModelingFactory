@@ -10,6 +10,7 @@ import warnings
 
 from ._common import (
     add_dataset_with_optional_weight,
+    all_missing_mask,
     apply_woe_fit_query,
     as_list,
     copy_column_length_checked,
@@ -120,6 +121,28 @@ class CreditModelPipelineConfig:
 
     perf_pct_bins: int = 10
     perf_min_bin_prop: float = 0.03
+
+    # --- Evaluation governance (G13/G14/G15/G16) -------------------------
+    # eval_target_cols: extra labels evaluated against the SAME frozen model
+    # scores; effective label set = [target_col] + eval_target_cols (deduped).
+    # all_missing_score_value: rows whose raw model features are ALL missing
+    # get this score (e.g. -1); same test as Core.scoring's
+    # all_missing_spec_value, persisted in the model artifact metadata.
+    # special_score_values: sentinel scores (e.g. [-1]) get their own
+    # evaluation bin, excluded from quantile edges and ranking metrics.
+    # gains_ascending: None keeps each underlying path's legacy default;
+    # an explicit bool is threaded through summary/gains/weighted uniformly.
+    # NOTE (announced flip): the next minor release flips the resolved
+    # default of gains_ascending to True (score ascending, bin 1 = low risk).
+    # eval_weight_col: "inherit" (default) reuses weight_col for evaluation
+    # and search/backward eval weights; None evaluates unweighted even when
+    # training is weighted; any other string names the evaluation weight
+    # column explicitly.
+    eval_target_cols: list[str] | None = None
+    all_missing_score_value: float | None = None
+    special_score_values: list[float] | None = None
+    gains_ascending: bool | None = None
+    eval_weight_col: str | None = "inherit"
 
     screening_artifact: Any | None = None
     feature_validation_result: Any | None = None
@@ -373,6 +396,20 @@ class CreditModelPipeline:
         if cfg.woe_fit_query:
             validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
             validate_woe_fit_query_syntax(data, cfg.woe_fit_query)
+        eval_targets = self._effective_eval_targets()
+        missing_targets = [t for t in eval_targets if t not in data.columns]
+        if missing_targets:
+            raise KeyError(
+                f"Missing evaluation target column(s) {missing_targets} "
+                f"(target_col + eval_target_cols must all exist in the input data)"
+            )
+        eval_weight = self._resolve_eval_weight_col()
+        if eval_weight and eval_weight != cfg.weight_col and eval_weight not in data.columns:
+            raise KeyError(f"Missing eval_weight_col {eval_weight!r}")
+        if cfg.all_missing_score_value is not None:
+            float(cfg.all_missing_score_value)
+        if cfg.special_score_values is not None:
+            [float(v) for v in cfg.special_score_values]
         if cfg.extra_eval_datasets:
             reserved = {"ins", "oos", "oot"}
             conflicts = sorted(set(cfg.extra_eval_datasets) & reserved)
@@ -381,8 +418,11 @@ class CreditModelPipeline:
                     f"extra_eval_datasets names cannot conflict with split names {sorted(reserved)}: {conflicts}"
                 )
             for name, extra_df in cfg.extra_eval_datasets.items():
-                if cfg.target_col not in extra_df.columns:
-                    raise KeyError(f"extra_eval_datasets[{name!r}] missing target_col {cfg.target_col!r}")
+                extra_missing = [t for t in eval_targets if t not in extra_df.columns]
+                if extra_missing:
+                    raise KeyError(
+                        f"extra_eval_datasets[{name!r}] missing evaluation target column(s) {extra_missing}"
+                    )
                 if cfg.warm_start_enabled and cfg.warm_start_score_col and cfg.warm_start_score_col not in extra_df.columns:
                     raise KeyError(
                         f"extra_eval_datasets[{name!r}] missing warm_start_score_col {cfg.warm_start_score_col!r}"
@@ -474,6 +514,28 @@ class CreditModelPipeline:
             "oot_synthesized": False,
             "oot_withheld": False,
         }
+
+    def _resolve_eval_weight_col(self) -> str | None:
+        """Resolve the evaluation weight column (G16).
+
+        "inherit" (default) reuses the training weight_col — the legacy
+        behavior; None evaluates unweighted even when training is weighted;
+        any other string names the evaluation weight column explicitly.
+        """
+        value = self.config.eval_weight_col
+        if value == "inherit":
+            return self.config.weight_col
+        return value
+
+    def _effective_eval_targets(self) -> list[str]:
+        """[target_col] + eval_target_cols, deduplicated, order preserved."""
+        cfg = self.config
+        targets = [cfg.target_col]
+        for name in as_list(cfg.eval_target_cols):
+            label = str(name)
+            if label not in targets:
+                targets.append(label)
+        return targets
 
     def _apply_split_governance(self, splits: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         """Remove forbidden splits from the working splits dict entirely, so
@@ -925,7 +987,16 @@ class CreditModelPipeline:
                 features = list(selected_raw_features if source == "raw" else selected_woe_features)
             else:
                 continue
-            inputs[name] = {"source": source, "splits": splits, "features": features}
+            inputs[name] = {
+                "source": source,
+                "splits": splits,
+                "features": features,
+                # Raw-column view of the model's inputs, used by the
+                # all-missing score override (G14): the business rule is
+                # defined on raw features regardless of what representation
+                # the model consumed.
+                "raw_features": list(selected_raw_features if source == "woe" else features),
+            }
         return inputs
 
     @staticmethod
@@ -1051,7 +1122,7 @@ class CreditModelPipeline:
                     "validation_data": splits[validation_split],
                     "test_data_dict": test_data_dict,
                     "weight_col": cfg.weight_col,
-                    "validation_weight_col": cfg.weight_col,
+                    "validation_weight_col": self._resolve_eval_weight_col(),
                 },
                 user_init,
             )
@@ -1196,7 +1267,7 @@ class CreditModelPipeline:
             eval_sets=eval_sets,
             param_grid=cfg.lr_search_param_grid,
             weight_col=cfg.weight_col,
-            eval_weight_col=cfg.weight_col,
+            eval_weight_col=self._resolve_eval_weight_col(),
             **params,
         )
         self._lr_best_params = dict(getattr(lr, "best_params_", {}) or {})
@@ -1332,7 +1403,7 @@ class CreditModelPipeline:
                     search_space=search_spaces[name],
                     fit_kwargs=fit_kwargs or None,
                     weight_col=cfg.weight_col,
-                    eval_weight_col=cfg.weight_col,
+                    eval_weight_col=self._resolve_eval_weight_col(),
                     **common,
                 )
             except Exception as exc:
@@ -1357,12 +1428,16 @@ class CreditModelPipeline:
                 model_extra = {key: df.copy() for key, df in cfg.extra_eval_datasets.items()}
             else:
                 model_extra = extra_eval_splits
+            eval_targets = self._effective_eval_targets()
+            eval_weight = self._resolve_eval_weight_col()
             evaluator = PerformanceEvaluator(
-                tgt_name=cfg.target_col,
+                tgt_name=eval_targets if len(eval_targets) > 1 else cfg.target_col,
                 scr_name=f"pred_{name}",
                 pct_bins=cfg.perf_pct_bins,
                 min_bin_prop=cfg.perf_min_bin_prop,
                 equal_freq=True,
+                spec_values=cfg.special_score_values,
+                ascending=cfg.gains_ascending,
             )
             allowed = self._governance.get("evaluation_splits")
             if allowed is not None:
@@ -1372,8 +1447,12 @@ class CreditModelPipeline:
             for ds_name, df in eval_splits.items():
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
+                if cfg.all_missing_score_value is not None:
+                    override = all_missing_mask(scored, model_inputs[name].get("raw_features") or [])
+                    if override.any():
+                        scored.loc[override, f"pred_{name}"] = float(cfg.all_missing_score_value)
                 nan_stats[str(ds_name)] = int((~np.isfinite(scored[f"pred_{name}"].to_numpy(dtype=float))).sum())
-                add_dataset_with_optional_weight(evaluator, ds_name, scored, weight_col=cfg.weight_col)
+                add_dataset_with_optional_weight(evaluator, ds_name, scored, weight_col=eval_weight)
             self.predict_positive_nan_stats[str(name)] = nan_stats
             total_bad = sum(nan_stats.values())
             if total_bad:
@@ -1390,6 +1469,21 @@ class CreditModelPipeline:
                 fig_save_path = str(Path(cfg.output_dir) / "figs" / "perf" / f"perf_{name}.png")
             results[name] = evaluator.evaluate(to_show=False, display=False, fig_save_path=fig_save_path)
         return results
+
+    def _raw_features_for_saved_model(
+        self,
+        model_name: str,
+        model_feature_sources: dict[str, str],
+        model_feature_sets: dict[str, list[str]],
+        woe_artifacts: dict[str, Any],
+    ) -> list[str]:
+        """Raw-column view of a saved model's inputs, for the all-missing
+        override metadata (the business rule is defined on raw features)."""
+        features = list(model_feature_sets.get(model_name, []))
+        if str(model_feature_sources.get(model_name, "woe")).lower() == "raw":
+            return features
+        suffix = woe_artifacts.get("woe_suffix", self.config.woe_params.get("woe_suffix", "_woe"))
+        return self._woe_to_raw_features(features, suffix)
 
     def _predict_model_positive(
         self,
@@ -1605,6 +1699,15 @@ class CreditModelPipeline:
                 "oot_withheld": self._governance["oot_withheld"],
                 "evaluation_splits": self._governance["evaluation_splits"],
                 "forbidden_splits": self._governance["forbidden_splits"],
+                "eval_target_cols": list(cfg.eval_target_cols) if cfg.eval_target_cols else None,
+                "all_missing_score_value": cfg.all_missing_score_value,
+                "all_missing_raw_features": (
+                    self._raw_features_for_saved_model(name, model_feature_sources, model_feature_sets, woe_artifacts)
+                    if cfg.all_missing_score_value is not None
+                    else None
+                ),
+                "special_score_values": list(cfg.special_score_values) if cfg.special_score_values else None,
+                "gains_ascending": cfg.gains_ascending,
             }
             metrics = None
             if isinstance(perf_results.get(name), pd.DataFrame):
