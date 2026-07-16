@@ -532,6 +532,49 @@ def copy_column_length_checked(
     dst[col] = src[col].to_numpy()
 
 
+def resolve_missing_oot(
+    oos: pd.DataFrame,
+    synthesize: bool,
+    pipeline: str,
+) -> pd.DataFrame | None:
+    """Decide what to do when a run has no real OOT rows.
+
+    ``synthesize=True`` preserves the historical behavior — the OOS frame is
+    copied in as a stand-in OOT — but now emits a loud ``UserWarning`` so the
+    placeholder can never be mistaken for a real out-of-time sample.
+    ``synthesize=False`` returns ``None``: the caller must then leave OOT out
+    of its splits (missing key or empty frame) so no downstream stage
+    evaluates, searches, or reports against a synthetic OOT.
+    """
+    if synthesize:
+        warnings.warn(
+            f"{pipeline}: no real OOT rows found; OOS ({len(oos)} rows) was "
+            f"copied in as a stand-in OOT. Metrics labeled 'oot' are OOS "
+            f"metrics, NOT out-of-time performance. Set "
+            f"synthesize_missing_oot=False (or candidate_mode=True) to drop "
+            f"the placeholder instead.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return oos.copy()
+    return None
+
+
+def assert_split_allowed(
+    split: str,
+    forbidden: list[str] | set[str] | None,
+    component: str,
+) -> None:
+    """Hard gate for split governance: raise if ``component`` is about to
+    consume a split listed in ``forbidden_splits``."""
+    if forbidden and split in set(forbidden):
+        raise ValueError(
+            f"{component} requested split {split!r}, but it is listed in "
+            f"forbidden_splits {sorted(set(forbidden))}. Remove the split from "
+            f"the component's configuration or lift the restriction."
+        )
+
+
 def split_oot_by_flag(
     data: pd.DataFrame,
     oot_col: str | None,

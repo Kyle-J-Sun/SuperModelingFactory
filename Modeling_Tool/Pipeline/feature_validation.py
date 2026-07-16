@@ -18,6 +18,7 @@ from ._common import (
     make_dirs,
     normalize_group_specs,
     normalize_split_values,
+    resolve_missing_oot,
     safe_to_csv,
     split_oot_by_flag,
     validate_woe_fit_query_columns,
@@ -109,6 +110,11 @@ class FeatureValidationPipelineConfig:
     selection_enabled: bool = False
     selection_params: dict[str, Any] = field(default_factory=dict)
     weight_col: str | None = None
+    # OOT governance (G10): None resolves to the legacy True (missing OOT is
+    # replaced by an OOS copy, now with a loud UserWarning). Set False to keep
+    # OOT empty instead — every OOT output is then simply absent. The next
+    # minor release flips the resolved default to False.
+    synthesize_missing_oot: bool | None = None
 
     write_outputs: bool = True
     write_excel: bool = True
@@ -959,6 +965,11 @@ class FeatureValidationPipeline:
         if "apply_quarter" in cfg.time_dims and "apply_quarter" not in data.columns:
             data["apply_quarter"] = dt.dt.to_period("Q").astype(str)
 
+    def _synthesize_missing_oot(self) -> bool:
+        """Resolve the None-default: legacy True until the announced flip."""
+        value = self.config.synthesize_missing_oot
+        return True if value is None else bool(value)
+
     def _split_data(self, data: pd.DataFrame, target_col: str | None) -> dict[str, pd.DataFrame]:
         cfg = self.config
         work = data.copy()
@@ -973,7 +984,14 @@ class FeatureValidationPipeline:
             oot = work[normalized.eq("oot").fillna(False)].copy()
             if len(ins) and len(oos):
                 if not len(oot):
-                    oot = oos.copy()
+                    synthesized = resolve_missing_oot(
+                        oos,
+                        self._synthesize_missing_oot(),
+                        "FeatureValidationPipeline",
+                    )
+                    # FVP keeps the empty-OOT representation: downstream
+                    # stages already guard every OOT consumer with len(oot).
+                    oot = synthesized if synthesized is not None else oot
                 splits = {"ins": ins, "oos": oos, "oot": oot}
                 if cfg.split_col:
                     reserved = set(splits)
@@ -1002,7 +1020,13 @@ class FeatureValidationPipeline:
         else:
             ins, oos = self._split_frame(ins_oos, None)
         if len(oot) == 0:
-            oot = oos.copy()
+            synthesized = resolve_missing_oot(
+                oos,
+                self._synthesize_missing_oot(),
+                "FeatureValidationPipeline",
+            )
+            if synthesized is not None:
+                oot = synthesized
         return {"ins": ins.copy(), "oos": oos.copy(), "oot": oot.copy()}
 
     def _split_frame(self, data: pd.DataFrame, target_col: str | None) -> tuple[pd.DataFrame, pd.DataFrame]:

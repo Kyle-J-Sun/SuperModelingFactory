@@ -17,6 +17,8 @@ from ._common import (
     merge_dict,
     persist_explain_outputs,
     predict_positive,
+    assert_split_allowed,
+    resolve_missing_oot,
     safe_to_csv,
     split_oot_by_flag,
     validate_woe_fit_query_columns,
@@ -88,6 +90,25 @@ class CreditModelPipelineConfig:
     backward_params: dict[str, Any] = field(default_factory=dict)
     use_backward_features: bool = True
 
+    # --- OOT governance (G10/G11/G12) -----------------------------------
+    # None means "not set explicitly": the effective value is resolved at
+    # run() start — legacy behavior outside candidate_mode, tightened
+    # defaults inside it. Explicit values conflicting with
+    # candidate_mode=True raise at validation time.
+    # NOTE (announced flip): synthesize_missing_oot=None currently resolves
+    # to True (legacy OOS-copy stand-in, now with a loud UserWarning);
+    # search_eval_splits=None resolves to ["oos", "oot"] and
+    # backward_report_splits=None to ["oot"]. The next minor release flips
+    # these resolved defaults to False / ["oos"] / [].
+    candidate_mode: bool = False
+    synthesize_missing_oot: bool | None = None
+    evaluation_splits: list[str] | None = None
+    forbidden_splits: list[str] = field(default_factory=list)
+    search_eval_splits: list[str] | None = None
+    search_objective_when_no_oot: str = "max_primary"
+    backward_validation_split: str = "oos"
+    backward_report_splits: list[str] | None = None
+
     optuna_models: list[str] = field(default_factory=lambda: ["lgb", "xgb", "cat"])
     optuna_n_trials: int = 5
     optuna_params: dict[str, Any] = field(default_factory=dict)
@@ -127,6 +148,7 @@ class CreditModelPipelineResult:
     selected_woe_features: list[str] = field(default_factory=list)
     model_paths: dict[str, str] = field(default_factory=dict)
     artifact_paths: dict[str, str] = field(default_factory=dict)
+    split_governance: dict[str, Any] = field(default_factory=dict)
 
 
 class CreditModelPipeline:
@@ -178,11 +200,15 @@ class CreditModelPipeline:
         self.config = config or CreditModelPipelineConfig()
         self.predict_positive_nan_stats: dict[str, dict[str, int]] = {}
         self._validate_gbm_feature_source_config()
+        # Resolved again at run() start; kept here so helpers (_split_data,
+        # _run_lr_search, ...) work when exercised directly in tests.
+        self._governance = self._resolve_split_governance()
 
     def run(self, data: pd.DataFrame) -> CreditModelPipelineResult:
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
         self._validate_input(data, feature_cols)
+        self._governance = self._resolve_split_governance()
 
         output_dir = Path(cfg.output_dir)
         if cfg.write_outputs or cfg.write_excel:
@@ -198,7 +224,7 @@ class CreditModelPipeline:
         if cfg.save_models:
             make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
-        splits = self._split_data(data)
+        splits = self._apply_split_governance(self._split_data(data))
         fs_summary, final_features, screening_artifact = self._resolve_feature_selection(
             splits,
             feature_cols,
@@ -306,6 +332,7 @@ class CreditModelPipeline:
             selected_woe_features=list(selected_woe_features),
             model_paths=model_paths,
             artifact_paths=artifact_paths,
+            split_governance=dict(self._governance),
         )
 
     def _resolve_feature_cols(self, data: pd.DataFrame) -> list[str]:
@@ -361,6 +388,104 @@ class CreditModelPipeline:
                         f"extra_eval_datasets[{name!r}] missing warm_start_score_col {cfg.warm_start_score_col!r}"
                     )
 
+    _KNOWN_SPLITS = ("ins", "oos", "oot")
+
+    def _resolve_split_governance(self) -> dict[str, Any]:
+        """Resolve effective OOT-governance settings (G10/G11/G12).
+
+        Governance config fields default to None ("not set explicitly") and
+        resolve to legacy behavior outside candidate_mode or tightened
+        defaults inside it. Explicit values that contradict
+        candidate_mode=True raise instead of being silently overridden, and
+        the user's config object is never mutated.
+        """
+        cfg = self.config
+
+        def _norm(values: Any, field_name: str) -> list[str]:
+            names = [str(v).strip().lower() for v in as_list(values)]
+            unknown = sorted(set(names) - set(self._KNOWN_SPLITS))
+            if unknown:
+                raise ValueError(
+                    f"{field_name} only supports splits {list(self._KNOWN_SPLITS)}; got {unknown}"
+                )
+            return names
+
+        forbidden = set(_norm(cfg.forbidden_splits, "forbidden_splits"))
+        if cfg.candidate_mode:
+            conflicts = []
+            if cfg.synthesize_missing_oot is True:
+                conflicts.append("synthesize_missing_oot=True")
+            if cfg.evaluation_splits is not None and "oot" in _norm(cfg.evaluation_splits, "evaluation_splits"):
+                conflicts.append("evaluation_splits contains 'oot'")
+            if cfg.search_eval_splits is not None and "oot" in _norm(cfg.search_eval_splits, "search_eval_splits"):
+                conflicts.append("search_eval_splits contains 'oot'")
+            if cfg.backward_report_splits is not None and "oot" in _norm(cfg.backward_report_splits, "backward_report_splits"):
+                conflicts.append("backward_report_splits contains 'oot'")
+            if str(cfg.backward_validation_split).strip().lower() == "oot":
+                conflicts.append("backward_validation_split='oot'")
+            if conflicts:
+                raise ValueError(
+                    f"candidate_mode=True forbids any OOT consumption, but the config "
+                    f"explicitly requests it: {conflicts}. Drop candidate_mode or the "
+                    f"conflicting settings."
+                )
+            forbidden |= {"oot"}
+
+        synthesize = cfg.synthesize_missing_oot
+        if synthesize is None:
+            # Legacy default True (announced flip to False on the next minor
+            # release); candidate_mode never synthesizes.
+            synthesize = not cfg.candidate_mode
+        evaluation_splits = None
+        if cfg.evaluation_splits is not None:
+            evaluation_splits = _norm(cfg.evaluation_splits, "evaluation_splits")
+        elif cfg.candidate_mode:
+            evaluation_splits = ["ins", "oos"]
+        if cfg.search_eval_splits is not None:
+            search_eval = _norm(cfg.search_eval_splits, "search_eval_splits")
+        else:
+            search_eval = ["oos"] if cfg.candidate_mode else ["oos", "oot"]
+        if cfg.backward_report_splits is not None:
+            backward_report = _norm(cfg.backward_report_splits, "backward_report_splits")
+        else:
+            backward_report = [] if cfg.candidate_mode else ["oot"]
+        backward_validation = _norm([cfg.backward_validation_split], "backward_validation_split")[0]
+
+        # Fail fast on explicit forbidden-split consumption.
+        if evaluation_splits is not None:
+            for name in evaluation_splits:
+                assert_split_allowed(name, forbidden, "evaluation_splits")
+        for name in search_eval:
+            assert_split_allowed(name, forbidden, "search (lr_search/optuna) eval_sets")
+        for name in backward_report:
+            assert_split_allowed(name, forbidden, "backward test_data_dict")
+        assert_split_allowed(backward_validation, forbidden, "backward validation_data")
+
+        return {
+            "candidate_mode": bool(cfg.candidate_mode),
+            "synthesize_missing_oot": bool(synthesize),
+            "evaluation_splits": evaluation_splits,
+            "forbidden_splits": sorted(forbidden),
+            "search_eval_splits": search_eval,
+            "search_eval_splits_explicit": cfg.search_eval_splits is not None,
+            "backward_validation_split": backward_validation,
+            "backward_report_splits": backward_report,
+            "backward_report_splits_explicit": cfg.backward_report_splits is not None,
+            "oot_synthesized": False,
+            "oot_withheld": False,
+        }
+
+    def _apply_split_governance(self, splits: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+        """Remove forbidden splits from the working splits dict entirely, so
+        no downstream stage can consume them even by accident."""
+        governed = dict(splits)
+        for name in self._governance["forbidden_splits"]:
+            if name in governed:
+                governed.pop(name)
+                if name == "oot":
+                    self._governance["oot_withheld"] = True
+        return governed
+
     def _gbm_weight_kwargs(self, train: pd.DataFrame, val: pd.DataFrame) -> dict[str, Any]:
         cfg = self.config
         if not cfg.weight_col:
@@ -415,7 +540,15 @@ class CreditModelPipeline:
             oot = work[lower == "oot"].copy()
             if len(ins) and len(oos):
                 if not len(oot):
-                    oot = oos.copy()
+                    synthesized = resolve_missing_oot(
+                        oos,
+                        self._governance["synthesize_missing_oot"],
+                        "CreditModelPipeline",
+                    )
+                    if synthesized is None:
+                        return {"ins": ins, "oos": oos}
+                    self._governance["oot_synthesized"] = True
+                    oot = synthesized
                 return {"ins": ins, "oos": oos, "oot": oot}
             if cfg.split_col:
                 raise ValueError(f"split_col {cfg.split_col!r} must contain non-empty ins and oos samples")
@@ -433,7 +566,15 @@ class CreditModelPipeline:
         )
         ins, oos = splitter.split_df(ins_oos, target=cfg.target_col)
         if len(oot) == 0:
-            oot = oos.copy()
+            synthesized = resolve_missing_oot(
+                oos,
+                self._governance["synthesize_missing_oot"],
+                "CreditModelPipeline",
+            )
+            if synthesized is None:
+                return {"ins": ins.copy(), "oos": oos.copy()}
+            self._governance["oot_synthesized"] = True
+            oot = synthesized
         return {"ins": ins.copy(), "oos": oos.copy(), "oot": oot.copy()}
 
     def _resolve_screening_artifact(self) -> Any | None:
@@ -877,18 +1018,42 @@ class CreditModelPipeline:
         try:
             from Modeling_Tool import BackwardVariableEliminator
 
+            gov = self._governance
+            validation_split = gov["backward_validation_split"]
+            if validation_split not in splits:
+                raise ValueError(
+                    f"backward_validation_split {validation_split!r} is not available "
+                    f"in this run (available: {sorted(splits)})."
+                )
+            test_data_dict: dict[str, pd.DataFrame] = {}
+            for split_name in gov["backward_report_splits"]:
+                if split_name not in splits:
+                    if gov["backward_report_splits_explicit"]:
+                        raise ValueError(
+                            f"backward_report_splits contains {split_name!r}, which is "
+                            f"not available in this run (available: {sorted(splits)})."
+                        )
+                    continue
+                test_data_dict[split_name] = splits[split_name]
+            user_init = dict(cfg.backward_params.get("init", {}))
+            for split_name in (user_init.get("test_data_dict") or {}):
+                assert_split_allowed(
+                    str(split_name).lower(),
+                    gov["forbidden_splits"],
+                    "backward test_data_dict (backward_params['init'])",
+                )
             params = merge_dict(
                 {
                     "train_data": splits["ins"],
                     "varlist": feature_cols,
                     "dep": cfg.target_col,
                     "model_type": f"{cfg.backward_model}m" if cfg.backward_model == "lgb" else cfg.backward_model,
-                    "validation_data": splits["oos"],
-                    "test_data_dict": {"oot": splits["oot"]},
+                    "validation_data": splits[validation_split],
+                    "test_data_dict": test_data_dict,
                     "weight_col": cfg.weight_col,
                     "validation_weight_col": cfg.weight_col,
                 },
-                cfg.backward_params.get("init", {}),
+                user_init,
             )
             bwd = BackwardVariableEliminator(**params)
             run_params = merge_dict(
@@ -915,6 +1080,79 @@ class CreditModelPipeline:
             return summary, selected
         except Exception as exc:
             return pd.DataFrame({"step": ["backward"], "error": [repr(exc)]}), list(feature_cols)
+
+    def _build_search_eval_sets(
+        self,
+        splits: dict[str, pd.DataFrame],
+        *,
+        component: str,
+    ) -> dict[str, pd.DataFrame]:
+        """Build hyperparameter-search eval_sets from search_eval_splits.
+
+        Every requested split passes the forbidden_splits hard gate. A split
+        missing from the run (e.g. no real OOT with synthesis disabled) is an
+        error when search_eval_splits was set explicitly; when the field was
+        left unset, unavailable splits are silently dropped from the resolved
+        legacy default instead.
+        """
+        gov = self._governance
+        eval_sets: dict[str, pd.DataFrame] = {}
+        for name in gov["search_eval_splits"]:
+            assert_split_allowed(name, gov["forbidden_splits"], component)
+            if name not in splits:
+                if gov["search_eval_splits_explicit"]:
+                    raise ValueError(
+                        f"{component}: search eval split {name!r} is not available in "
+                        f"this run (available: {sorted(splits)}). Drop it from "
+                        f"search_eval_splits or provide the split."
+                    )
+                continue
+            eval_sets[name] = splits[name]
+        if not eval_sets:
+            raise ValueError(
+                f"{component}: no usable search eval splits "
+                f"(requested {gov['search_eval_splits']}, available {sorted(splits)})."
+            )
+        return eval_sets
+
+    def _default_search_objective_params(self, eval_sets: dict[str, pd.DataFrame]) -> dict[str, Any]:
+        has_oot = "oot" in eval_sets
+        return {
+            "objective": "oot_gap_penalized" if has_oot else str(self.config.search_objective_when_no_oot),
+            "primary_set": "oos",
+            "gap_ref_sets": ["oot"] if has_oot else [],
+            "metric": "auc",
+        }
+
+    def _validate_search_objective_params(
+        self,
+        params: dict[str, Any],
+        eval_sets: dict[str, pd.DataFrame],
+        *,
+        component: str,
+    ) -> None:
+        primary = str(params.get("primary_set"))
+        if primary not in eval_sets:
+            raise ValueError(
+                f"{component}: primary_set {primary!r} is not among the search eval "
+                f"sets {sorted(eval_sets)}."
+            )
+        gap_refs = [str(x) for x in as_list(params.get("gap_ref_sets"))]
+        missing = [name for name in gap_refs if name not in eval_sets]
+        if missing:
+            raise ValueError(
+                f"{component}: gap_ref_sets {missing} are not among the search eval "
+                f"sets {sorted(eval_sets)} — the split may be absent from this run "
+                f"or listed in forbidden_splits."
+            )
+        objective = params.get("objective")
+        if not callable(objective) and str(objective) == "oot_gap_penalized" and not gap_refs:
+            raise ValueError(
+                f"{component}: objective='oot_gap_penalized' requires a non-empty "
+                f"gap_ref_sets, but no gap reference split is available in this run. "
+                f"Use objective='max_primary' (see search_objective_when_no_oot) or "
+                f"provide a real OOT split."
+            )
 
     def _run_lr_search(
         self,
@@ -945,22 +1183,17 @@ class CreditModelPipeline:
                 f"Allowed keys are {sorted(allowed_search_params)}. "
                 "LRMaster.grid_search_params uses holdout eval_sets and does not accept cv."
             )
+        eval_sets = self._build_search_eval_sets(splits, component="lr_search")
         params = merge_dict(
-            {
-                "objective": "oot_gap_penalized",
-                "primary_set": "oos",
-                "gap_ref_sets": ["oot"],
-                "metric": "auc",
-                "refit": False,
-                "verbose": False,
-            },
+            self._default_search_objective_params(eval_sets),
             cfg.lr_search_params,
         )
+        self._validate_search_objective_params(params, eval_sets, component="lr_search")
         results = lr.grid_search_params(
             data=splits["ins"],
             varlist=feature_cols,
             tgt_name=cfg.target_col,
-            eval_sets={"oos": splits["oos"], "oot": splits["oot"]},
+            eval_sets=eval_sets,
             param_grid=cfg.lr_search_param_grid,
             weight_col=cfg.weight_col,
             eval_weight_col=cfg.weight_col,
@@ -1055,23 +1288,36 @@ class CreditModelPipeline:
                 continue
             splits = input_info["splits"]
             feature_cols = list(input_info["features"])
+            user_common = dict(cfg.optuna_params.get("common", {}))
+            user_eval_sets = user_common.get("eval_sets")
+            if user_eval_sets is not None:
+                # Legacy override kept, but every named split still passes the
+                # governance hard gate — forbidden splits cannot sneak back in
+                # through optuna_params.
+                for split_name in user_eval_sets:
+                    assert_split_allowed(
+                        str(split_name).lower(),
+                        self._governance["forbidden_splits"],
+                        "optuna_search eval_sets (optuna_params['common'])",
+                    )
+                eval_sets = dict(user_eval_sets)
+            else:
+                eval_sets = self._build_search_eval_sets(splits, component="optuna_search")
             common = merge_dict(
                 {
                     "varlist": feature_cols,
                     "tgt_name": cfg.target_col,
-                    "eval_sets": {"oos": splits["oos"], "oot": splits["oot"]},
+                    "eval_sets": eval_sets,
                     "engine": "optuna",
-                    "objective": "oot_gap_penalized",
-                    "primary_set": "oos",
-                    "gap_ref_sets": ["oot"],
-                    "metric": "auc",
+                    **self._default_search_objective_params(eval_sets),
                     "n_trials": cfg.optuna_n_trials,
                     "refit": True,
                     "verbose": False,
                     "random_state": cfg.random_state,
                 },
-                cfg.optuna_params.get("common", {}),
+                user_common,
             )
+            self._validate_search_objective_params(common, eval_sets, component="optuna_search")
             if self._warm_start_requested_for(name) and name == "cat":
                 if cfg.warm_start_on_unsupported == "raise":
                     raise NotImplementedError("CatBoost does not support warm-start init_score")
@@ -1118,6 +1364,9 @@ class CreditModelPipeline:
                 min_bin_prop=cfg.perf_min_bin_prop,
                 equal_freq=True,
             )
+            allowed = self._governance.get("evaluation_splits")
+            if allowed is not None:
+                splits = {name: df for name, df in splits.items() if name in set(allowed)}
             eval_splits = {**splits, **model_extra}
             nan_stats: dict[str, int] = {}
             for ds_name, df in eval_splits.items():
@@ -1351,6 +1600,11 @@ class CreditModelPipeline:
                 "warm_start_enabled": bool(cfg.warm_start_enabled and name in warm_start_requested),
                 "warm_start_score_col": cfg.warm_start_score_col,
                 "random_state": cfg.random_state,
+                "candidate_mode": self._governance["candidate_mode"],
+                "oot_synthesized": self._governance["oot_synthesized"],
+                "oot_withheld": self._governance["oot_withheld"],
+                "evaluation_splits": self._governance["evaluation_splits"],
+                "forbidden_splits": self._governance["forbidden_splits"],
             }
             metrics = None
             if isinstance(perf_results.get(name), pd.DataFrame):
