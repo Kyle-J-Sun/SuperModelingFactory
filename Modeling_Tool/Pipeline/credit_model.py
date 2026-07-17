@@ -892,8 +892,18 @@ class CreditModelPipeline:
                 },
                 cfg.monotone_woe_params,
             )
+            # fit()-only kwargs must not reach MonotoneWOEBinner.__init__ —
+            # n_jobs / chi2_p / chi2_init_size in monotone_woe_params used to
+            # raise TypeError on this self-fit path (the screening-side
+            # fit_screening_woe_engine already splits init vs fit keys).
+            fit_kwargs = {
+                key: params.pop(key)
+                for key in ("chi2_binning", "chi2_p", "chi2_init_size", "n_jobs")
+                if key in params
+            }
+            fit_kwargs["chi2_binning"] = bool(fit_kwargs.get("chi2_binning", False))
             binner = MonotoneWOEBinner(**params)
-            binner.fit(fit_ins, chi2_binning=bool(cfg.monotone_woe_params.get("chi2_binning", False)))
+            binner.fit(fit_ins, **fit_kwargs)
             if cfg.write_outputs and cfg.plot_outputs:
                 binner.plot_woe_graph(graph_path=str(Path(cfg.output_dir) / "figs" / "mono_woe"))
             adapter = as_woe_engine(binner, woe_suffix=woe_suffix)

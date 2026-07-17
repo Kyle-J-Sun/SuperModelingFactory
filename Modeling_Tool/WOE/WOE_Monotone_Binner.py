@@ -391,6 +391,11 @@ class MonotoneWOEBinner:
         # dict with unseen_values/affected_rows/affected_frac/total_rows.
         # Reset at the start of every apply_woe call.
         self._unseen_category_stats: Dict[str, dict] = {}
+        # G18: per-feature categorical transform coverage from the most recent
+        # apply_woe call — transform missing rate vs fit-time missing rate,
+        # exact / str()-fallback match counts, unmatched (missing_woe-filled)
+        # rows. Purely observational; reset at every apply_woe call.
+        self._categorical_transform_stats: Dict[str, dict] = {}
         # G08: populated when small_bin_policy is active; {feat: {bin_label,
         # bad, good, thresholds, action}}.
         self._small_bin_stats: Dict[str, dict] = {}
@@ -2522,6 +2527,17 @@ class MonotoneWOEBinner:
             ``{"unseen_values": set, "affected_rows": int,
             "affected_frac": float, "total_rows": int}``. Reset at the
             start of every ``apply_woe`` call.
+        _categorical_transform_stats : Dict[str, dict]
+            G18: per-categorical-feature transform coverage from the most
+            recent ``apply_woe`` call: ``{"total_rows", "missing_rows",
+            "missing_rate", "fit_missing_rate", "exact_match_rows",
+            "fallback_match_rows", "unmatched_rows"}``. Purely observational
+            (mapped WOE values are unchanged). Two RuntimeWarnings fire
+            unless ``unseen_category_policy="silent"``: rows matched only
+            via the ``str()`` fallback (fit/transform dtype drift), and a
+            transform missing rate ≥ 50% that exceeds the fit-time missing
+            rate by ≥ 30pp (upstream column likely broken/renamed/re-typed).
+            Reset at the start of every ``apply_woe`` call.
 
         Returns
         -------
@@ -2551,6 +2567,7 @@ class MonotoneWOEBinner:
         woe_outputs: Dict[str, np.ndarray] = {}
         # Reset per-call so callers can inspect stats from the *latest* run only.
         self._unseen_category_stats = {}
+        self._categorical_transform_stats = {}
 
         selected_features = (
             list(self._results)
@@ -2669,6 +2686,7 @@ class MonotoneWOEBinner:
                     mapped = pd.Series(np.nan, index=series.index, dtype=float)
 
                 fallback_mask = mapped.isna() & ~missing_mask
+                exact_arr = mapped.notna().to_numpy()  # G18: hits before the str() fallback
                 if cat_woe_map_str and fallback_mask.any():
                     mapped.loc[fallback_mask] = (
                         series.loc[fallback_mask].astype(str).map(cat_woe_map_str)
@@ -2683,6 +2701,72 @@ class MonotoneWOEBinner:
                     out[hit_arr] = mapped.to_numpy(dtype=float)[hit_arr]
 
                 woe_outputs[woe_col] = out.astype(float, copy=False)
+
+                # ── G18: transform-coverage stats + loud guards ──
+                # Observational only: the WOE values written above are
+                # byte-identical to pre-G18 behavior. Two silent failure
+                # modes get a voice here:
+                #   1) rows matched only via the str() fallback — the
+                #      transform column's dtype differs from fit time;
+                #   2) a mostly-missing transform column whose missing rate
+                #      exploded vs fit time — upstream column broken/renamed
+                #      (every such row silently gets the [Missing]-bin WOE).
+                n_rows = int(len(series))
+                n_missing = int(missing_arr.sum())
+                n_hit = int(hit_arr.sum())
+                n_exact = int((exact_arr & ~missing_arr).sum())
+                n_fallback = n_hit - n_exact
+                n_unmatched = n_rows - n_missing - n_hit
+                fit_missing_rate = None
+                fit_n_normal = float(wt["n"].sum()) if "n" in wt.columns and len(wt) else None
+                if (
+                    fit_n_normal is not None
+                    and len(sv_table) > 0
+                    and "n" in sv_table.columns
+                    and "bin_label" in sv_table.columns
+                ):
+                    fit_n_missing = float(sv_table.loc[sv_table["bin_label"] == "[Missing]", "n"].sum())
+                    denom = fit_n_normal + float(sv_table["n"].sum())
+                    if denom > 0:
+                        fit_missing_rate = fit_n_missing / denom
+                elif fit_n_normal:
+                    fit_missing_rate = 0.0
+                missing_rate = n_missing / max(n_rows, 1)
+                self._categorical_transform_stats[feat] = {
+                    "total_rows": n_rows,
+                    "missing_rows": n_missing,
+                    "missing_rate": missing_rate,
+                    "fit_missing_rate": fit_missing_rate,
+                    "exact_match_rows": n_exact,
+                    "fallback_match_rows": n_fallback,
+                    "unmatched_rows": n_unmatched,
+                }
+                if unseen_category_policy != "silent":
+                    if n_fallback > 0:
+                        warnings.warn(
+                            f"apply_woe: feature {feat!r} matched {n_fallback} row(s) "
+                            f"only through the str() fallback — the transform column's "
+                            f"dtype likely differs from fit time (e.g. int codes vs "
+                            f"zero-padded strings). The mapping resolved, but the same "
+                            f"drift can silently mis-map when value renderings collide; "
+                            f"align the upstream column dtype with fit time.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                    if missing_rate >= 0.5 and (
+                        fit_missing_rate is None or missing_rate - fit_missing_rate >= 0.3
+                    ):
+                        fit_desc = "unknown" if fit_missing_rate is None else f"{fit_missing_rate:.1%}"
+                        warnings.warn(
+                            f"apply_woe: categorical feature {feat!r} is "
+                            f"{missing_rate:.1%} missing in the transform data vs "
+                            f"{fit_desc} at fit time — all those rows receive the "
+                            f"[Missing]-bin WOE. The upstream column is likely broken, "
+                            f"renamed or re-typed; the feature column is near-constant "
+                            f"after transform.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
                 continue
 
 
