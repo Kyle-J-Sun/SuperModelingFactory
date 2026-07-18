@@ -490,7 +490,15 @@ class CorrelationFilter:
             suffix = str(getattr(self.woe_binner, "woe_suffix", "_woe"))
             try:
                 adapter = as_woe_engine(self.woe_binner, woe_suffix=suffix)
-                suffix = adapter.woe_suffix
+            except TypeError as exc:
+                raise TypeError(
+                    "corr_use_woe_bins=True routed categorical feature(s) through "
+                    "the screening WOE engine at the corr stage, but the supplied "
+                    "woe_binner is an Unsupported WOE engine. Expected WOE_Master, "
+                    "MonotoneWOEBinner, or WOEEngineAdapter."
+                ) from exc
+            suffix = adapter.woe_suffix
+            try:
                 tx = adapter.transform(self.data.copy(), varlist=non_numeric, suffix=suffix)
             except (TypeError, ValueError, KeyError, AttributeError, np.linalg.LinAlgError):
                 tx = None
