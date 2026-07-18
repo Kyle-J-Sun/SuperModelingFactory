@@ -34,7 +34,9 @@ jobs:
           repository: Kyle-J-Sun/SuperModelingFactory_pytest
           token: ${{ secrets.PYTEST_REPO_TOKEN }}
           path: SuperModelingFactory_pytest
-          ref: main
+          # Bootstrap cross-repo validation before pytest PR #45 merges.
+          # This is restored to main after that PR is green and merged.
+          ref: agent/0.7.1-regression-hardening
 
       - name: Setup Python ${{ matrix.python }}
         uses: actions/setup-python@v6
