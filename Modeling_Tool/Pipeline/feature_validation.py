@@ -1417,6 +1417,7 @@ class FeatureValidationPipeline:
             "vif_threshold": params.get("vif_threshold", 10.0),
             "vif_min_features": params.get("vif_min_features", 2),
             "vif_tie_break_metric": params.get("vif_tie_break_metric", "iv"),
+            "vif_use_woe_bins": params.get("vif_use_woe_bins", False),
         }
         return screen_config_from_mapping(
             mapping,
@@ -1666,6 +1667,7 @@ class FeatureValidationPipeline:
             "min_selected_features": screen_cfg.min_selected_features,
             "vif_enabled": screen_cfg.vif_enabled,
             "vif_threshold": screen_cfg.vif_threshold,
+            "vif_use_woe_bins": screen_cfg.vif_use_woe_bins,
             "selection_group_dims": list(cfg.selection_group_dims or []),
             "evidence_weight_col": cfg.weight_col,
         })

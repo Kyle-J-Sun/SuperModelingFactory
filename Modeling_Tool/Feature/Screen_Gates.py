@@ -107,9 +107,17 @@ def apply_vif_stage(
     *,
     weight_col: str | None,
     on_empty_stage: str,
+    woe_frame_fn: Callable[[list[str]], pd.DataFrame] | None = None,
 ) -> list[str]:
     """G06: iteratively drop the highest-VIF feature until all VIFs fall
-    below ``vif_threshold`` or only ``vif_min_features`` remain."""
+    below ``vif_threshold`` or only ``vif_min_features`` remain.
+
+    G06-2: the VIF matrix basis is selectable. ``vif_use_woe_bins=True``
+    computes VIF on the WOE-encoded INS view (``woe_frame_fn``; all-numeric,
+    matches the LR design-matrix collinearity semantics). The legacy raw-value
+    basis excludes non-numeric survivors from the matrix — raw string columns
+    used to crash statsmodels — keeping them in the selection untouched.
+    """
     if not getattr(config, "vif_enabled", False) or len(current) <= max(2, int(config.vif_min_features)):
         if getattr(config, "vif_enabled", False) and len(current) <= int(config.vif_min_features):
             summary_rows.append(_summary_row(
@@ -129,15 +137,79 @@ def apply_vif_stage(
     from Modeling_Tool.Model.LRM_Tool import FeatureSelectionAnalyzer
 
     analyzer = FeatureSelectionAnalyzer()
-    survivors = list(current)
-    iteration_rows: list[dict] = []
     threshold = float(config.vif_threshold)
     floor = int(config.vif_min_features)
     tie_metric = str(getattr(config, "vif_tie_break_metric", "iv"))
+    excluded: list[str] = []
+    raw_vif_cast_columns: list[str] = []
+    if bool(getattr(config, "vif_use_woe_bins", False)):
+        if woe_frame_fn is None:
+            raise ValueError(
+                "vif_use_woe_bins=True requires a fitted screening WOE engine "
+                "(enable psi_use_woe_bins/iv_use_woe_bins/corr_use_woe_bins or "
+                "pass a prefit engine) so the VIF matrix can be WOE-encoded."
+            )
+        base = woe_frame_fn(list(current))
+        if not isinstance(base, pd.DataFrame):
+            raise ValueError(
+                "vif_use_woe_bins=True requires woe_frame_fn to return a pandas DataFrame."
+            )
+        missing = [name for name in current if name not in base.columns]
+        if missing:
+            raise ValueError(
+                "vif_use_woe_bins=True could not produce a VIF column for "
+                f"{missing!r}. Refit the screening WOE engine or supply a "
+                "prefit engine that covers every surviving feature."
+            )
+        non_numeric = [name for name in current if not pd.api.types.is_numeric_dtype(base[name])]
+        if non_numeric:
+            raise ValueError(
+                "vif_use_woe_bins=True requires numeric WOE columns; got "
+                f"non-numeric output for {non_numeric!r}."
+            )
+        survivors = list(current)
+    else:
+        survivors = [c for c in current if pd.api.types.is_numeric_dtype(ins[c])]
+        excluded = [c for c in current if c not in set(survivors)]
+        if excluded:
+            preview = ", ".join(excluded[:5]) + ("..." if len(excluded) > 5 else "")
+            warnings.warn(
+                f"vif gate: {len(excluded)} non-numeric feature(s) excluded from "
+                f"the raw-value VIF matrix and kept in the selection: {preview}. "
+                f"Raw non-numeric columns crash statsmodels OLS; set "
+                f"vif_use_woe_bins=True to include them via the WOE-encoded "
+                f"matrix instead.",
+                UserWarning,
+                stacklevel=3,
+            )
+        base = ins
+        if len(survivors) <= max(2, floor):
+            summary_rows.append(_summary_row(
+                "vif", len(current), len(current), threshold, weight_col,
+                note="skipped_insufficient_numeric",
+                n_excluded_non_numeric=len(excluded),
+                excluded_non_numeric=list(excluded),
+            ))
+            return current
+        # pandas nullable numeric/boolean and bool columns are logically
+        # numeric but produce object arrays in statsmodels.  Convert only
+        # those VIF inputs; a normal NumPy numeric frame stays byte-identical.
+        base = ins[survivors]
+        for name in survivors:
+            dtype = base[name].dtype
+            if (
+                pd.api.types.is_bool_dtype(dtype)
+                or pd.api.types.is_extension_array_dtype(dtype)
+            ):
+                if not raw_vif_cast_columns:
+                    base = base.copy()
+                base[name] = pd.to_numeric(base[name], errors="raise").astype(float)
+                raw_vif_cast_columns.append(name)
+    iteration_rows: list[dict] = []
     for iteration in range(len(current)):
         if len(survivors) <= floor:
             break
-        vif_table = analyzer.compute_vif(ins[survivors])
+        vif_table = analyzer.compute_vif(base[survivors])
         vif_table = vif_table.sort_values("VIF", ascending=False).reset_index(drop=True)
         worst = vif_table.iloc[0]
         if not np.isfinite(worst["VIF"]) or worst["VIF"] > threshold:
@@ -153,10 +225,16 @@ def apply_vif_stage(
             )[0]
             drop_vif = float(vif_table.loc[vif_table["feature"] == drop, "VIF"].iloc[0])
             survivors.remove(drop)
-            iteration_rows.append({
+            row = {
                 "iteration": iteration, "dropped": drop, "vif": drop_vif,
-                "n_remaining": len(survivors),
-            })
+                "n_remaining": len(survivors) + len(excluded),
+            }
+            if excluded:
+                row["n_vif_features"] = len(survivors)
+                row["n_excluded_non_numeric"] = len(excluded)
+            if raw_vif_cast_columns:
+                row["cast_vif_columns"] = list(raw_vif_cast_columns)
+            iteration_rows.append(row)
             dropped_rows.append({
                 "var": drop, "stage": "vif", "metric": "vif",
                 "value": drop_vif, "threshold": threshold, "reason": "vif_above_threshold",
@@ -166,11 +244,24 @@ def apply_vif_stage(
     if iteration_rows:
         stage_tables["vif"] = pd.DataFrame(iteration_rows)
     kept = _apply_stage_keep(
-        current, survivors, "vif", summary_rows,
+        current, survivors + excluded, "vif", summary_rows,
         on_empty_stage=on_empty_stage, weight_col=weight_col,
         threshold=threshold, intersect=True,
     )
-    summary_rows.append(_summary_row("vif", len(current), len(kept), threshold, weight_col))
+    audit: dict[str, Any] = {}
+    if excluded:
+        # Warnings are intentionally supplemental: application-level warning
+        # filters can hide them, whereas the selection summary is an artifact.
+        audit.update({
+            "note": "excluded_non_numeric",
+            "n_excluded_non_numeric": len(excluded),
+            "excluded_non_numeric": list(excluded),
+        })
+    if raw_vif_cast_columns:
+        audit["cast_vif_columns"] = list(raw_vif_cast_columns)
+    summary_rows.append(_summary_row(
+        "vif", len(current), len(kept), threshold, weight_col, **audit,
+    ))
     return kept
 
 
@@ -449,6 +540,7 @@ def apply_post_corr_gates(
     *,
     weight_col: str | None,
     on_empty_stage: str,
+    woe_frame_fn: Callable[[list[str]], pd.DataFrame] | None = None,
 ) -> list[str]:
     """Orchestrate the post-corr gates: vif -> group_stability ->
     multi_target -> truncation. Raises when G03/G04 thresholds are set but no
@@ -463,6 +555,7 @@ def apply_post_corr_gates(
     current = apply_vif_stage(
         ins, current, config, iv_map, summary_rows, dropped_rows, stage_tables,
         weight_col=weight_col, on_empty_stage=on_empty_stage,
+        woe_frame_fn=woe_frame_fn,
     )
     if evidence is not None:
         current = apply_group_stability_stage(

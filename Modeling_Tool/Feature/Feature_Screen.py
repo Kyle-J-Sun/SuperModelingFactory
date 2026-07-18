@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 import numpy as np
 import pandas as pd
@@ -113,6 +113,11 @@ class FeatureScreenConfig:
     vif_threshold: float = 10.0
     vif_min_features: int = 2
     vif_tie_break_metric: str = "iv"
+    # G06-2: False (legacy) computes VIF on raw values with non-numeric
+    # survivors excluded+warned (raw string columns crash statsmodels);
+    # True computes VIF on the WOE-encoded INS view (all-numeric, matches
+    # the LR design-matrix collinearity semantics).
+    vif_use_woe_bins: bool = False
 
 
 def screen_config_from_mapping(
@@ -181,6 +186,7 @@ def screen_config_from_mapping(
         vif_threshold=float(cfg.get("vif_threshold", 10.0)),
         vif_min_features=int(cfg.get("vif_min_features", 2)),
         vif_tie_break_metric=str(cfg.get("vif_tie_break_metric", "iv")),
+        vif_use_woe_bins=bool(cfg.get("vif_use_woe_bins", False)),
     )
 
 
@@ -199,6 +205,10 @@ def fit_screening_woe_engine(
     from Modeling_Tool.Pipeline._common import apply_woe_fit_query
 
     fit_ins, _ = apply_woe_fit_query(train, woe_fit_query, target=target_col)
+    # A screening WOE fit is an internal diagnostic artifact.  In particular,
+    # WOE_Master can append transformed columns while fitting/transforming, so
+    # never let an opt-in screen stage mutate the caller's INS frame.
+    fit_ins = fit_ins.copy()
     if woe_engine.lower() == "monotone":
         from Modeling_Tool import MonotoneWOEBinner
 
@@ -236,7 +246,12 @@ def fit_screening_woe_engine(
 
 
 def _needs_woe_bins(config: FeatureScreenConfig) -> bool:
-    return config.psi_use_woe_bins or config.iv_use_woe_bins or config.corr_use_woe_bins
+    return (
+        config.psi_use_woe_bins
+        or config.iv_use_woe_bins
+        or config.corr_use_woe_bins
+        or (config.vif_enabled and config.vif_use_woe_bins)
+    )
 
 
 def _resolve_screening_binner(
@@ -250,6 +265,22 @@ def _resolve_screening_binner(
         return prefit_woe_engine
     if not _needs_woe_bins(config):
         return None
+    categorical = [
+        col for col in (config.categorical_features or []) if col in feature_cols
+    ]
+    if (
+        config.vif_enabled
+        and config.vif_use_woe_bins
+        and categorical
+        and str(config.woe_engine).lower() != "monotone"
+    ):
+        raise ValueError(
+            "vif_use_woe_bins=True with categorical_features requires "
+            "woe_engine='monotone'. The equal_freq WOE_Master screening "
+            "engine does not support categorical fitting on this path; use "
+            "the monotone engine or leave vif_use_woe_bins=False to retain "
+            "the raw-basis exclude-and-warn behavior."
+        )
     return fit_screening_woe_engine(
         splits["ins"],
         feature_cols,
@@ -393,6 +424,11 @@ def _woe_bins_unweighted_screen(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
         weight_col=None, on_empty_stage=config.on_empty_stage,
+        woe_frame_fn=(
+            _vif_woe_frame_fn(ins, binner)
+            if config.vif_enabled and config.vif_use_woe_bins
+            else None
+        ),
     )
 
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, None))
@@ -425,6 +461,50 @@ def _bins_to_numpy(bins: Any) -> np.ndarray:
     if isinstance(bins, pd.Series):
         return bins.to_numpy(dtype=object)
     return np.asarray(bins, dtype=object)
+
+
+def _vif_woe_frame_fn(
+    ins: pd.DataFrame, binner: Any | None
+) -> Callable[[list[str]], pd.DataFrame] | None:
+    """Lazy WOE-encoded INS view for the VIF gate (G06-2,
+    ``vif_use_woe_bins=True``). Returns None when no screening engine was
+    fitted — the gate raises an actionable error in that case. Columns are
+    renamed back to the raw feature names so drop bookkeeping stays on the
+    selection's own vocabulary."""
+    if binner is None:
+        return None
+    def _frame(feats: list[str]) -> pd.DataFrame:
+        names = list(feats)
+        # Construct the adapter only when this opt-in gate actually reaches
+        # VIF.  This preserves the historical opaque-prefit-engine path when
+        # VIF/WOE is disabled and avoids doing work at a min-feature floor.
+        from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+
+        engine_suffix = str(getattr(binner, "woe_suffix", "_woe"))
+        try:
+            adapter = as_woe_engine(binner, woe_suffix=engine_suffix)
+        except TypeError as exc:
+            raise ValueError(
+                "vif_use_woe_bins=True requires a supported fitted WOE "
+                "engine (WOE_Master, MonotoneWOEBinner, or WOEEngineAdapter)."
+            ) from exc
+        suffix = adapter.woe_suffix
+        # Transform a copy as well: some legacy engines retain or append
+        # intermediate WOE columns on the passed frame.
+        tx = adapter.transform(ins.copy(), varlist=names, suffix=suffix)
+        expected = [f"{name}{suffix}" for name in names]
+        missing = [name for name, column in zip(names, expected) if column not in tx.columns]
+        if missing:
+            raise ValueError(
+                "vif_use_woe_bins=True could not produce WOE columns for "
+                f"{missing!r}. Refit the screening WOE engine or supply a "
+                "prefit engine that covers every surviving feature."
+            )
+        frame = tx[expected].copy()
+        frame.columns = names
+        return frame
+
+    return _frame
 
 
 def _screen_engine_payload(
@@ -647,6 +727,11 @@ def _weighted_woe_bins_screen(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
         weight_col=weight_col, on_empty_stage=config.on_empty_stage,
+        woe_frame_fn=(
+            _vif_woe_frame_fn(ins, binner)
+            if config.vif_enabled and config.vif_use_woe_bins
+            else None
+        ),
     )
 
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, weight_col))
