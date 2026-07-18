@@ -24,6 +24,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+
 from .Weighted_Screen import _apply_stage_keep, _summary_row
 
 
@@ -118,8 +120,18 @@ def apply_vif_stage(
     basis excludes non-numeric survivors from the matrix — raw string columns
     used to crash statsmodels — keeping them in the selection untouched.
     """
-    if not getattr(config, "vif_enabled", False) or len(current) <= max(2, int(config.vif_min_features)):
-        if getattr(config, "vif_enabled", False) and len(current) <= int(config.vif_min_features):
+    if not getattr(config, "vif_enabled", False):
+        return current
+
+    tie_metric = str(getattr(config, "vif_tie_break_metric", "iv"))
+    if tie_metric != "iv":
+        raise ValueError(
+            "vif_tie_break_metric currently supports only 'iv'; "
+            f"got {tie_metric!r}"
+        )
+
+    if len(current) <= max(2, int(config.vif_min_features)):
+        if len(current) <= int(config.vif_min_features):
             summary_rows.append(_summary_row(
                 "vif", len(current), len(current), config.vif_threshold, weight_col,
                 note="skipped_at_floor",
@@ -139,7 +151,11 @@ def apply_vif_stage(
     analyzer = FeatureSelectionAnalyzer()
     threshold = float(config.vif_threshold)
     floor = int(config.vif_min_features)
-    tie_metric = str(getattr(config, "vif_tie_break_metric", "iv"))
+    sample_weight = (
+        resolve_sample_weight(data=ins, weight_col=weight_col, expected_len=len(ins))
+        if weight_col is not None
+        else None
+    )
     excluded: list[str] = []
     raw_vif_cast_columns: list[str] = []
     if bool(getattr(config, "vif_use_woe_bins", False)):
@@ -209,7 +225,13 @@ def apply_vif_stage(
     for iteration in range(len(current)):
         if len(survivors) <= floor:
             break
-        vif_table = analyzer.compute_vif(base[survivors])
+        if sample_weight is None:
+            # Preserve the historical unweighted call path byte-for-byte.
+            vif_table = analyzer.compute_vif(base[survivors])
+        else:
+            vif_table = analyzer.compute_vif(
+                base[survivors], sample_weight=sample_weight,
+            )
         vif_table = vif_table.sort_values("VIF", ascending=False).reset_index(drop=True)
         worst = vif_table.iloc[0]
         if not np.isfinite(worst["VIF"]) or worst["VIF"] > threshold:

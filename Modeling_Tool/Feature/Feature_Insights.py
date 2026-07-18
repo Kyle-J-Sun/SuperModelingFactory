@@ -419,6 +419,7 @@ class CorrelationFilter:
         self._corr_matrix_cache = None
         self._corr_matrix_excluded = set()
         self._metric_summary_cache = None
+        self._correlation_decision_trace = []
 
     def _corr_matrix_frame(self, varlist):
         # 0.7.0-R1: numeric-subset correlation base. A pure-numeric varlist is
@@ -546,7 +547,27 @@ class CorrelationFilter:
                 if fnl_selected_var not in selected_varlist:
                     selected_varlist.append(fnl_selected_var)
 
-                removed_varlist += [x for x in correlated_list if x != fnl_selected_var and x not in removed_varlist]
+                newly_removed = [
+                    x for x in correlated_list
+                    if x != fnl_selected_var and x not in removed_varlist
+                ]
+                metric_map = fnl_summary.set_index("var")[name_mapping[base_metric]].to_dict()
+                positions = {name: idx for idx, name in enumerate(varlist)}
+                for dropped_var in newly_removed:
+                    decision_pair = [fnl_selected_var, dropped_var]
+                    decision_pair.sort(key=positions.__getitem__)
+                    var_a, var_b = decision_pair
+                    corr_value = self._corr_matrix_cache.loc[var_a, var_b]
+                    self._correlation_decision_trace.append({
+                        "var_a": var_a,
+                        "var_b": var_b,
+                        "corr": float(corr_value),
+                        "iv_a": float(metric_map.get(var_a, 0.0)),
+                        "iv_b": float(metric_map.get(var_b, 0.0)),
+                        "kept": fnl_selected_var,
+                        "dropped": dropped_var,
+                    })
+                removed_varlist += newly_removed
                 
                 if var not in correlated_dict:
                     correlated_dict[var] = {}
@@ -585,6 +606,7 @@ class CorrelationFilter:
         >>> filter_analyzer = CorrelationFilter(df, 'target')
         >>> keep_vars = filter_analyzer.remove_highly_correlated(['var1', 'var2', 'var3'])
         """
+        self._correlation_decision_trace = []
         self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         self._metric_summary_cache = None
         self._metric_summary(varlist)

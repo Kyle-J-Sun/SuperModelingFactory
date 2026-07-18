@@ -19,6 +19,7 @@ from .Weighted_Screen import (
     _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
+    _corr_filter_dropped_audit,
     _gate_ranking_iv_map,
     _iv_band_keep,
     _legacy_unweighted_screen,
@@ -701,23 +702,42 @@ def _weighted_woe_bins_screen(
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
     if config.corr_enabled and len(current) > 1:
-        corr = _weighted_corr_for_screen(
-            ins, current, w_ins,
-            corr_use_woe_bins=config.corr_use_woe_bins,
-            corr_nan_policy=config.corr_nan_policy,
-            corr_block_size=config.corr_block_size,
-            adapter=adapter,
-            binner=binner,
-        )
-        iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
         n_before = len(current)
-        current, corr_dropped = _corr_dedup_weighted(
-            current,
-            corr,
-            iv_map,
-            config.corr_threshold,
-            config.corr_max_iterations,
-        )
+        if bool(np.all(w_ins == w_ins[0])) and config.corr_nan_policy == "pairwise":
+            # Match the unweighted WOE/mixed-basis decision exactly for
+            # constant positive weights, while retaining weighted audit rows.
+            from Modeling_Tool import CorrelationFilter
+
+            corr_input = list(current)
+            use_binner = config.corr_use_woe_bins and binner is not None
+            cf = CorrelationFilter(
+                data=ins[current + [target_col]],
+                dep=target_col,
+                corr_cutpoint=config.corr_threshold,
+                woe_binner=binner if use_binner else None,
+                woe_engine="monotone" if use_binner else "master",
+            )
+            current = cf.remove_highly_correlated(
+                current, max_iterations=config.corr_max_iterations
+            )
+            corr_dropped = _corr_filter_dropped_audit(cf, corr_input, current)
+        else:
+            corr = _weighted_corr_for_screen(
+                ins, current, w_ins,
+                corr_use_woe_bins=config.corr_use_woe_bins,
+                corr_nan_policy=config.corr_nan_policy,
+                corr_block_size=config.corr_block_size,
+                adapter=adapter,
+                binner=binner,
+            )
+            iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+            current, corr_dropped = _corr_dedup_weighted(
+                current,
+                corr,
+                iv_map,
+                config.corr_threshold,
+                config.corr_max_iterations,
+            )
         summary_rows.append(_summary_row("corr", n_before, len(current), config.corr_threshold, weight_col))
 
     from .Screen_Gates import apply_post_corr_gates

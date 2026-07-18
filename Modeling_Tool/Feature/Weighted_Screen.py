@@ -578,21 +578,52 @@ def _weighted_corr_for_screen(
     """Build weighted correlation matrix for screening (WOE or raw-value path)."""
     from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 
-    if corr_use_woe_bins:
+    non_numeric = [v for v in current if not pd.api.types.is_numeric_dtype(ins[v])]
+    if corr_use_woe_bins and non_numeric:
         eng = adapter if adapter is not None else (as_woe_engine(binner) if binner is not None else None)
         if eng is not None:
             suffix = getattr(eng, "woe_suffix", "_woe")
-            woe_ins = eng.transform(ins, varlist=current)
-            cols = [f"{v}{suffix}" for v in current if f"{v}{suffix}" in woe_ins.columns]
-            if cols:
-                X = woe_ins[cols].to_numpy(dtype=float)
-                return _weighted_pearson_corr_matrix(
-                    X,
+            # Match the unweighted mixed basis: numeric columns stay raw and
+            # only categorical columns are WOE encoded.
+            woe_ins = eng.transform(
+                ins.copy(), varlist=non_numeric, suffix=suffix
+            )
+            encoded: dict[str, np.ndarray] = {}
+            excluded: list[str] = []
+            for name in non_numeric:
+                column = f"{name}{suffix}"
+                if column in woe_ins.columns and pd.api.types.is_numeric_dtype(woe_ins[column]):
+                    encoded[name] = woe_ins[column].to_numpy()
+                else:
+                    excluded.append(name)
+            if excluded:
+                warnings.warn(
+                    f"corr_use_woe_bins=True could not WOE-encode {len(excluded)} "
+                    f"feature(s) {excluded[:5]}; they are excluded from the "
+                    f"correlation matrix and kept through the corr stage. Refit the "
+                    f"screening WOE engine to cover them.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            # Return a matrix on the full current vocabulary. Excluded
+            # categories remain NaN rows/columns so dedup keeps them.
+            corr_full = np.full((len(current), len(current)), np.nan)
+            excluded_set = set(excluded)
+            active = [name for name in current if name not in excluded_set]
+            if active:
+                frame = ins[active].copy()
+                for name, values in encoded.items():
+                    frame[name] = values
+                corr_active = _weighted_pearson_corr_matrix(
+                    frame[active].to_numpy(dtype=float),
                     w_ins,
-                    nan_policy="pairwise",
+                    nan_policy=corr_nan_policy,
                     corr_block_size=corr_block_size,
                 )
-    non_numeric = [v for v in current if not pd.api.types.is_numeric_dtype(ins[v])]
+                active_idx = [current.index(name) for name in active]
+                corr_full[np.ix_(active_idx, active_idx)] = corr_active
+            return corr_full
     if non_numeric:
         # Raw-value Pearson correlation is undefined for categorical/object
         # features. Exclude them from the correlation computation but keep
@@ -802,6 +833,99 @@ def _corr_dedup_weighted(
         current = [v for v in current if v not in remove]
 
     return current, pd.DataFrame(dropped_rows)
+
+
+def _corr_filter_dropped_audit(
+    corr_filter: Any,
+    varlist: list[str],
+    kept: list[str],
+) -> pd.DataFrame:
+    """Convert an unweighted CorrelationFilter decision to weighted audit rows.
+
+    Constant positive weights reuse CorrelationFilter for byte-compatible
+    feature ordering and IV tie-breaking.  This adapter preserves the existing
+    seven-column ``corr_dropped`` evidence contract for that weighted call.
+    Each row's ``var_a/var_b`` endpoints are exactly its ``kept/dropped`` pair.
+    For star-shaped groups, ``corr`` may be below the cutoff because it records
+    the group winner versus the indirectly dropped member; another group edge
+    triggered the decision.
+    """
+    columns = ["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"]
+    kept_set = set(kept)
+    dropped = [name for name in varlist if name not in kept_set]
+    if not dropped:
+        return pd.DataFrame(columns=columns)
+
+    def _state(name: str):
+        value = getattr(corr_filter, name, None)
+        if value is None:
+            value = getattr(getattr(corr_filter, "_base", None), name, None)
+        return value
+
+    trace = _state("_correlation_decision_trace")
+    rows = []
+    recorded = set()
+    if isinstance(trace, list):
+        for row in trace:
+            if not isinstance(row, dict) or not set(columns).issubset(row):
+                continue
+            dropped_name = row["dropped"]
+            if dropped_name in dropped and dropped_name not in recorded:
+                rows.append({column: row[column] for column in columns})
+                recorded.add(dropped_name)
+    dropped = [name for name in dropped if name not in recorded]
+    if not dropped:
+        return pd.DataFrame(rows, columns=columns)
+
+    # Defensive fallback for third-party/future filters without trace support.
+    matrix = _state("_corr_matrix_cache")
+    if not isinstance(matrix, pd.DataFrame):
+        return pd.DataFrame(rows, columns=columns)
+    matrix = matrix.reindex(index=varlist, columns=varlist)
+
+    metric = _state("_metric_summary_cache")
+    iv_map: dict[str, float] = {}
+    if isinstance(metric, pd.DataFrame) and {"var", "iv"}.issubset(metric.columns):
+        for name, value in zip(metric["var"], metric["iv"]):
+            try:
+                iv_map[str(name)] = float(value)
+            except (TypeError, ValueError):
+                iv_map[str(name)] = 0.0
+
+    positions = {name: idx for idx, name in enumerate(varlist)}
+    threshold = float(getattr(corr_filter, "corr_cutpoint"))
+    for dropped_name in dropped:
+        candidates = []
+        for partner in varlist:
+            if partner == dropped_name:
+                continue
+            value = matrix.loc[dropped_name, partner]
+            if pd.notna(value) and abs(float(value)) > threshold:
+                candidates.append((partner, float(value)))
+        if not candidates:
+            continue
+        partner, corr_value = min(
+            candidates,
+            key=lambda item: (
+                0 if item[0] in kept_set else 1,
+                -abs(item[1]),
+                positions[item[0]],
+            ),
+        )
+        if positions[dropped_name] < positions[partner]:
+            var_a, var_b = dropped_name, partner
+        else:
+            var_a, var_b = partner, dropped_name
+        rows.append({
+            "var_a": var_a,
+            "var_b": var_b,
+            "corr": corr_value,
+            "iv_a": iv_map.get(var_a, 0.0),
+            "iv_b": iv_map.get(var_b, 0.0),
+            "kept": partner,
+            "dropped": dropped_name,
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _legacy_unweighted_screen(
@@ -1110,18 +1234,38 @@ def _weighted_screen_impl(
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
     if corr_enabled and len(current) > 1:
-        corr = _weighted_corr_for_screen(
-            ins, current, w_ins,
-            corr_use_woe_bins=corr_use_woe_bins,
-            corr_nan_policy=corr_nan_policy,
-            corr_block_size=corr_block_size,
-            binner=prefit_woe_engine,
-        )
-        iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
         n_before = len(current)
-        current, corr_dropped = _corr_dedup_weighted(
-            current, corr, iv_map, corr_threshold, corr_max_iterations,
-        )
+        if bool(np.all(w_ins == w_ins[0])) and corr_nan_policy == "pairwise":
+            # Constant positive weights follow the exact unweighted decision
+            # contract. Explicit non-default NaN policies stay on the weighted
+            # implementation so they cannot be silently ignored.
+            from Modeling_Tool import CorrelationFilter
+
+            corr_input = list(current)
+            use_binner = corr_use_woe_bins and prefit_woe_engine is not None
+            cf = CorrelationFilter(
+                data=ins[current + [target_col]],
+                dep=target_col,
+                corr_cutpoint=corr_threshold,
+                woe_binner=prefit_woe_engine if use_binner else None,
+                woe_engine="monotone" if use_binner else "master",
+            )
+            current = cf.remove_highly_correlated(
+                current, max_iterations=corr_max_iterations
+            )
+            corr_dropped = _corr_filter_dropped_audit(cf, corr_input, current)
+        else:
+            corr = _weighted_corr_for_screen(
+                ins, current, w_ins,
+                corr_use_woe_bins=corr_use_woe_bins,
+                corr_nan_policy=corr_nan_policy,
+                corr_block_size=corr_block_size,
+                binner=prefit_woe_engine,
+            )
+            iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
+            current, corr_dropped = _corr_dedup_weighted(
+                current, corr, iv_map, corr_threshold, corr_max_iterations,
+            )
         summary_rows.append(_summary_row("corr", n_before, len(current), corr_threshold, weight_col))
 
     if gates_config is not None:

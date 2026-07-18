@@ -381,7 +381,13 @@ class FeatureSelectionAnalyzer:
         self.selected_features_ = results.loc[results['selected'], 'feature'].tolist()
         return results
 
-    def compute_vif(self, data, nan_handling="fillna_median", nan_warn_threshold=0.05):
+    def compute_vif(
+        self,
+        data,
+        nan_handling="fillna_median",
+        nan_warn_threshold=0.05,
+        sample_weight=None,
+    ):
         """
         Compute Variance Inflation Factor (VIF) for multicollinearity detection.
 
@@ -389,6 +395,11 @@ class FeatureSelectionAnalyzer:
         ----------
         data : pd.DataFrame
             Feature matrix (should not include target variable)
+        sample_weight : array-like, optional
+            Per-row frequency/sample weights. Constant weights deliberately
+            use the legacy OLS implementation for strict parity. Non-constant
+            weights use WLS auxiliary regressions with the same no-intercept
+            design as variance_inflation_factor.
 
         Returns
         -------
@@ -403,6 +414,11 @@ class FeatureSelectionAnalyzer:
                 "with: pip install \"SuperModelingFactory[stats]\""
             ) from exc
 
+        weight = (
+            resolve_sample_weight(sample_weight=sample_weight, expected_len=len(data))
+            if sample_weight is not None
+            else None
+        )
         work = _prepare_nan_handled_frame(
             data,
             nan_handling=nan_handling,
@@ -410,9 +426,27 @@ class FeatureSelectionAnalyzer:
             context="FeatureSelectionAnalyzer.compute_vif",
         )
         x = work.values
+        if weight is not None and nan_handling == "drop_rows":
+            weight = weight[~data.isna().any(axis=1).to_numpy()]
+            weight = resolve_sample_weight(
+                sample_weight=weight, expected_len=len(work)
+            )
+
+        # Preserve the exact legacy call path for no weight and every
+        # constant-weight vector.
+        if weight is None or bool(np.all(weight == weight[0])):
+            vif_values = [variance_inflation_factor(x, i) for i in range(x.shape[1])]
+        else:
+            from statsmodels.regression.linear_model import WLS
+
+            vif_values = []
+            for i in range(x.shape[1]):
+                others = np.arange(x.shape[1]) != i
+                r_squared = WLS(x[:, i], x[:, others], weights=weight).fit().rsquared
+                vif_values.append(1.0 / (1.0 - r_squared))
         vif_data = pd.DataFrame({
             'feature': work.columns,
-            'VIF': [variance_inflation_factor(x, i) for i in range(x.shape[1])]
+            'VIF': vif_values,
         }).sort_values('VIF', ascending=False).reset_index(drop=True)
 
         return vif_data

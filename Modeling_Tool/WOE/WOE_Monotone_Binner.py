@@ -438,6 +438,31 @@ class MonotoneWOEBinner:
         df_normal = df[mask_normal]
         return df_normal, sv_groups
 
+    @staticmethod
+    def _is_missing_category(value: Any) -> bool:
+        """Return whether one category value is a scalar missing sentinel.
+
+        ``pd.isna`` returns an array for valid hashable composite categories
+        such as tuples.  Those values are categories, not missing sentinels,
+        so only a scalar boolean result may classify a value as missing.
+        """
+        if value is None:
+            return True
+        try:
+            missing = pd.isna(value)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(missing, (bool, np.bool_)) and bool(missing)
+
+    @staticmethod
+    def _category_values_equal(left: Any, right: Any) -> bool:
+        """Safely compare two scalar category values, including tuples."""
+        try:
+            equal = left == right
+        except (TypeError, ValueError):
+            return False
+        return isinstance(equal, (bool, np.bool_)) and bool(equal)
+
     # ── 分组绘图(by-group)用的分箱辅助：数值=edges，类别=取值映射 ──────────────
 
     @staticmethod
@@ -451,12 +476,12 @@ class MonotoneWOEBinner:
         for _, r in wt.iterrows():
             if has_members and isinstance(r["cat_members"], (list, tuple)):
                 members = r["cat_members"]
-            elif has_value and not pd.isna(r["cat_value"]):
+            elif has_value and not MonotoneWOEBinner._is_missing_category(r["cat_value"]):
                 members = [r["cat_value"]]
             else:
                 members = []
             for cv in members:
-                if not pd.isna(cv):
+                if not MonotoneWOEBinner._is_missing_category(cv):
                     m[cv] = int(r["bin"])
         return m
 
@@ -1028,7 +1053,16 @@ class MonotoneWOEBinner:
 
         records = []
         for i, cat in enumerate(cats):
-            grp   = normal[normal[feat] == cat]
+            if isinstance(cat, tuple):
+                # pandas treats tuples as list-like in Series.eq; when the
+                # row count happens to equal the tuple length it may silently
+                # broadcast positionally instead of comparing tuple values.
+                cat_mask = normal[feat].map(
+                    lambda value: self._category_values_equal(value, cat)
+                )
+            else:
+                cat_mask = normal[feat].eq(cat)
+            grp   = normal[cat_mask]
             stats = self._compute_woe_single_bin(grp, norm_total_bad, norm_total_good)
             stats.update(bin=i, cat_value=cat, bin_label=str(cat))
             records.append(stats)
@@ -1047,7 +1081,7 @@ class MonotoneWOEBinner:
 
         woes = woe_table.sort_values("bin")["woe"].values if len(woe_table) > 0 else np.array([])
 
-        return dict(
+        result = dict(
             edges          = [],
             woe_table      = woe_table,
             sv_table       = sv_table,
@@ -1057,6 +1091,78 @@ class MonotoneWOEBinner:
             is_categorical = True,
             categories     = list(cats),
         )
+        if self.small_bin_policy is not None:
+            result = self._enforce_categorical_small_bins(feat, result)
+        return result
+
+    def _categorical_small_bin_violation(
+        self, wt: pd.DataFrame
+    ) -> Optional[tuple[pd.Series, str]]:
+        """Return the first categorical bin violating active G08 limits."""
+        if len(wt) == 0:
+            return None
+        total_n = float(wt["n"].sum())
+        for _, row in wt.iterrows():
+            if self.min_bad_count is not None and row["bad"] < self.min_bad_count:
+                return row, "small_bin_min_bad"
+            if self.min_good_count is not None and row["good"] < self.min_good_count:
+                return row, "small_bin_min_good"
+            if (
+                self.min_bin_size
+                and total_n > 0
+                and float(row["n"]) / total_n < self.min_bin_size
+            ):
+                return row, "small_bin_min_size"
+        return None
+
+    def _enforce_categorical_small_bins(
+        self, feat: str, result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Apply G08 merge/warn/raise semantics to categorical fit bins."""
+        violation = self._categorical_small_bin_violation(result["woe_table"])
+        if violation is None:
+            return result
+        row, reason = violation
+        policy = self.small_bin_policy
+        label = str(row.get("bin_label", row.get("cat_value", row.get("bin", "?"))))
+        message = (
+            f"{feat}: categorical bin {label!r} violates {reason} "
+            f"(n={int(row['n'])}, bad={int(row['bad'])}, good={int(row['good'])}; "
+            f"min_bad_count={self.min_bad_count}, min_good_count={self.min_good_count}, "
+            f"min_bin_size={self.min_bin_size})"
+        )
+        stats = {
+            "bin_label": label,
+            "n": int(row["n"]),
+            "bad": int(row["bad"]),
+            "good": int(row["good"]),
+            "reason": reason,
+            "action": policy,
+        }
+        if policy == "raise":
+            raise BinningPolicyViolation(message)
+        if policy == "warn":
+            result["_small_bin_stats_payload"] = stats
+            warnings.warn(message, UserWarning, stacklevel=3)
+            return result
+
+        # policy == "merge": reuse the categorical bad-rate clustering core.
+        before = int(result["n_bins"])
+        update = self._cluster_cate_one(
+            result,
+            max_bins=max(before, 1),
+            min_bin_size=self.min_bin_size,
+            badrate_tol=None,
+            min_bins=max(1, self.min_n_bins),
+        )
+        if update is not None:
+            result.update(update)
+        stats["n_merges"] = max(0, before - int(result["n_bins"]))
+        stats["remaining_violation"] = (
+            self._categorical_small_bin_violation(result["woe_table"]) is not None
+        )
+        result["_small_bin_stats_payload"] = stats
+        return result
 
     # ─────────────────────────────────────────────────────────────────
     # 公开 API
@@ -1208,6 +1314,11 @@ class MonotoneWOEBinner:
             cat_str = " | CATE" if res.get("is_categorical") else ""
             logger.info(f"  ✓ {feat:40s} | n_bins={nb}{sv_str}{cat_str} | IV={iv:.4f} | mono={mono}")
 
+        def _capture_small_bin_stats(feat, res):
+            payload = res.pop("_small_bin_stats_payload", None)
+            if payload is not None:
+                self._small_bin_stats[feat] = copy.deepcopy(payload)
+
         if n_jobs == 1:
             for feat in all_fit_feats:
                 _, res, err = _fit_one(feat)
@@ -1215,6 +1326,7 @@ class MonotoneWOEBinner:
                     logger.info(f"  ✗ {feat}: 拟合失败 — {err[0]}")
                     print(err[1])
                 else:
+                    _capture_small_bin_stats(feat, res)
                     self._results[feat] = res
                     _log_feat(feat, res)
         else:
@@ -1249,6 +1361,7 @@ class MonotoneWOEBinner:
             # 按原始顺序写回并打印日志
             for feat in all_fit_feats:
                 if feat in feat_ok:
+                    _capture_small_bin_stats(feat, feat_ok[feat])
                     self._results[feat] = feat_ok[feat]
                     _log_feat(feat, feat_ok[feat])
                 elif feat in feat_err:
@@ -1725,6 +1838,7 @@ class MonotoneWOEBinner:
         max_bins: int,
         min_bin_size: float,
         badrate_tol: Optional[float],
+        min_bins: int = 1,
     ) -> Optional[Dict[str, Any]]:
         """
         对单个类别特征，按坏率(bad rate)做凝聚式(agglomerative)聚类：
@@ -1759,7 +1873,10 @@ class MonotoneWOEBinner:
         for _, r in wt.iterrows():
             if "cat_members" in wt.columns and isinstance(r["cat_members"], (list, tuple)):
                 members = list(r["cat_members"])
-            elif "cat_value" in wt.columns and not pd.isna(r["cat_value"]):
+            elif (
+                "cat_value" in wt.columns
+                and not self._is_missing_category(r["cat_value"])
+            ):
                 members = [r["cat_value"]]
             else:
                 members = [r["bin_label"]]
@@ -1788,14 +1905,18 @@ class MonotoneWOEBinner:
             )]
 
         changed = False
-        while len(groups) > 1:
+        # Explicit refine_cate calls retain their historical one-bin floor.
+        # Fit-time G08 governance passes self.min_n_bins so small-bin merges
+        # cannot violate the class-level final-bin lower bound.
+        min_bins = max(1, int(min_bins))
+        while len(groups) > min_bins:
             too_small = (
                 [i for i, g in enumerate(groups)
                  if g["n"] / (total_n + eps) < min_bin_size]
                 if min_bin_size > 0 else []
             )
-            # G08：类别分组的最小坏/好样本数治理（仅 merge 策略在此合并；
-            # warn/raise 在 fit 的数值路径已生效，类别路径同样按 merge 处理）
+            # G08：类别分组的最小坏/好样本数治理。fit 与显式
+            # refine_cate 共用本 merge 核心；warn/raise 由 fit 前置处理。
             if not too_small and self.small_bin_policy == "merge":
                 too_small = [
                     i for i, g in enumerate(groups)
@@ -1966,21 +2087,73 @@ class MonotoneWOEBinner:
                    decimals: Optional[int] = None) -> str:
         """生成普通分箱区间字符串，bin_idx 为 0-based。
 
-        decimals=None  → 使用 .8g（8 位有效数字），确保 load_woe_bins() 反向
-                         重建 edges 时精度足够。
+        decimals=None  → 使用 .8g（8 位有效数字），保持历史可见输出；
+                         精确 round-trip 元数据存于 DataFrame.attrs。
         decimals=N     → 使用 :.Nf（固定 N 位小数），便于人工阅读。
         """
         def _fmt(v: float) -> str:
             return f"{v:.{decimals}f}" if decimals is not None else f"{v:.8g}"
 
+        n_intervals = len(edges) + 1 if edges else 1
+        if bin_idx < 0 or bin_idx >= n_intervals:
+            raise ValueError(
+                f"bin_idx={bin_idx} is outside the {n_intervals} interval(s) "
+                f"described by {len(edges)} edge(s)"
+            )
         if not edges:
             return "(-∞, +∞)"
         if bin_idx == 0:
             return f"(-∞, {_fmt(float(edges[0]))}]"
-        elif bin_idx == n_bins - 1:
+        elif bin_idx == n_intervals - 1:
             return f"({_fmt(float(edges[-1]))}, +∞)"
         else:
             return f"({_fmt(float(edges[bin_idx-1]))}, {_fmt(float(edges[bin_idx]))}]"
+
+    @staticmethod
+    def _format_a_row_identity(frame: pd.DataFrame) -> Dict[str, Any]:
+        """Bind hidden format-A metadata to the exact visible table rows."""
+        def _normalize(value):
+            if isinstance(value, np.generic):
+                value = value.item()
+            if value is None:
+                return ("__smf_none__",)
+            try:
+                missing = pd.isna(value)
+            except (TypeError, ValueError):
+                missing = False
+            if isinstance(missing, (bool, np.bool_)) and bool(missing):
+                return ("__smf_missing__",)
+            if isinstance(value, (str, int, float, bool)):
+                return value
+            return (type(value).__module__, type(value).__qualname__, repr(value))
+
+        return {
+            "columns": tuple(str(column) for column in frame.columns),
+            "rows": tuple(
+                tuple(_normalize(value) for value in row)
+                for row in frame.itertuples(index=False, name=None)
+            ),
+        }
+
+    @staticmethod
+    def _format_a_metadata_digest(metadata: Dict[str, Any]) -> str:
+        """Checksum exact hidden metadata to catch accidental stale mutation."""
+        import hashlib
+        import pickle
+
+        keys = (
+            "schema_version",
+            "is_categorical",
+            "normal_labels",
+            "row_identity",
+            "bin_label_decimals",
+            "edges",
+            "bin_indices",
+            "cat_members",
+            "missing_woe",
+        )
+        payload = tuple((key, metadata.get(key)) for key in keys)
+        return hashlib.sha256(pickle.dumps(payload, protocol=4)).hexdigest()
 
     # ── 1. get_final_bins ────────────────────────────────────────────
 
@@ -2024,6 +2197,10 @@ class MonotoneWOEBinner:
                           pct_bad | pct_good | woe | iv | cumiv
                           is_special (bool, True=特殊值箱)
 
+            精确数值边界、稀疏箱号、missing_woe 和类别成员保存在
+            DataFrame.attrs 中；直接传递或 pickle 往返可精确恢复。CSV/Excel
+            不保留 attrs，回载时以可见 bin_label（默认 .8g）为准。
+
             其中:
               pct_n    = 该箱样本量 / 所有箱样本量之和（含特殊值箱）
               lift     = 该箱 bad_rate / 全局平均 bad_rate
@@ -2055,7 +2232,7 @@ class MonotoneWOEBinner:
             sv_table = vr.get("sv_table", pd.DataFrame())
             if len(sv_table) > 0:
                 sv_rows = []
-                base_bin_no = len(wt) + 1
+                base_bin_no = int(wt["bin_no"].max()) + 1 if len(wt) else 1
                 running_cumiv = float(wt["cumiv"].iloc[-1]) if len(wt) > 0 else 0.0
                 for i, (_, svrow) in enumerate(sv_table.iterrows()):
                     running_cumiv += float(svrow["iv"])
@@ -2125,7 +2302,43 @@ class MonotoneWOEBinner:
             cols = ["bin_no", "bin_label", "n", "bad", "good",
                     "bad_rate", "pct_n", "lift",
                     "pct_bad", "pct_good", "woe", "iv", "cumiv", "is_special"]
-            result[feat] = wt[[c for c in cols if c in wt.columns]]
+            final = wt[[c for c in cols if c in wt.columns]]
+            normal_mask = ~final["is_special"].astype(bool)
+            source_wt = vr["woe_table"].copy().sort_values("bin").reset_index(drop=True)
+            exact_cat_members = None
+            if bool(vr.get("is_categorical")):
+                exact_cat_members = []
+                for _, source_row in source_wt.iterrows():
+                    if (
+                        "cat_members" in source_wt.columns
+                        and isinstance(source_row["cat_members"], (list, tuple))
+                    ):
+                        members = list(source_row["cat_members"])
+                    elif (
+                        "cat_value" in source_wt.columns
+                        and not self._is_missing_category(source_row["cat_value"])
+                    ):
+                        members = [source_row["cat_value"]]
+                    else:
+                        members = [source_row["bin_label"]]
+                    exact_cat_members.append(copy.deepcopy(members))
+
+            format_a_meta = {
+                "schema_version": 2,
+                "is_categorical": bool(vr.get("is_categorical")),
+                "normal_labels": final.loc[normal_mask, "bin_label"].astype(str).tolist(),
+                "row_identity": self._format_a_row_identity(final),
+                "bin_label_decimals": self.bin_label_decimals,
+                "edges": [float(edge) for edge in edges],
+                "bin_indices": source_wt["bin"].astype(int).tolist(),
+                "cat_members": exact_cat_members,
+                "missing_woe": float(vr.get("missing_woe", self.missing_woe)),
+            }
+            format_a_meta["metadata_digest"] = self._format_a_metadata_digest(
+                format_a_meta
+            )
+            final.attrs["smf_woe_format_a"] = format_a_meta
+            result[feat] = final
         return result
 
     # ── 1a2. get_bin_edges ────────────────────────────────────────────
@@ -2181,6 +2394,9 @@ class MonotoneWOEBinner:
             {feature_name -> DataFrame}
             DataFrame 必须包含列: bin_label | n | bad | woe | iv
             （可含 is_special 列；无则假设全为普通箱）
+            SMF 生成且 checksum/行身份校验通过的 DataFrame.attrs 优先用于
+            精确恢复；attrs 缺失或失效时退回可见 bin_label。CSV/Excel 会丢失
+            attrs，因此不能恢复超出可见文本精度的信息。
             类别特征自动识别：若普通箱 bin_label 不是数值区间格式（如 "(-∞, 1.5]"），
             则按类别特征加载，apply_woe 时按取值直接查表。
 
@@ -2232,12 +2448,30 @@ class MonotoneWOEBinner:
             # 格式 A 处理路径
             # ════════════════════════════════════════════════════════
             if fmt == "A":
+                try:
+                    format_a_meta = copy.deepcopy(
+                        getattr(df_bin, "attrs", {}).get("smf_woe_format_a")
+                    )
+                except Exception:
+                    # attrs are advisory metadata.  Malformed/custom objects
+                    # must never prevent the documented visible-label fallback.
+                    format_a_meta = None
                 required_cols = {"bin_label", "n", "bad", "woe", "iv"}
                 missing = required_cols - set(df_bin.columns)
                 if missing:
                     raise ValueError(f"特征 '{feat}' 的分箱表缺少列: {missing}")
 
-                df_bin = df_bin.copy().reset_index(drop=True)
+                try:
+                    df_bin = df_bin.copy().reset_index(drop=True)
+                except Exception:
+                    # pandas deep-copies DataFrame.attrs during copy().  If a
+                    # hostile/custom attr refuses deepcopy, rebuild only the
+                    # visible table values so the caller remains untouched and
+                    # the documented label-based fallback can still proceed.
+                    df_bin = pd.DataFrame(
+                        df_bin.to_numpy(copy=True),
+                        columns=df_bin.columns.copy(),
+                    )
 
                 if "is_special" in df_bin.columns:
                     sv_mask   = df_bin["is_special"].astype(bool)
@@ -2247,34 +2481,221 @@ class MonotoneWOEBinner:
                     df_normal = df_bin.copy()
                     df_sv     = pd.DataFrame()
 
-                # 自动识别类别特征：普通箱标签不全是数值区间格式 → 类别特征
+                # Without verified attrs, retain the historical label heuristic.
                 _norm_labels = df_normal["bin_label"].astype(str).tolist()
-                is_categorical = (
+                inferred_is_categorical = (
                     len(_norm_labels) > 0
-                    and not all(self._looks_like_interval(l) for l in _norm_labels)
+                    and not all(self._looks_like_interval(label) for label in _norm_labels)
                 )
 
+                meta_base_matches = False
+                if (
+                    isinstance(format_a_meta, dict)
+                    and format_a_meta.get("schema_version") == 2
+                    and isinstance(format_a_meta.get("is_categorical"), (bool, np.bool_))
+                    and isinstance(format_a_meta.get("normal_labels"), (list, tuple))
+                    and all(isinstance(label, str) for label in format_a_meta["normal_labels"])
+                    and list(format_a_meta["normal_labels"]) == _norm_labels
+                    and isinstance(format_a_meta.get("metadata_digest"), str)
+                ):
+                    try:
+                        checksum_matches = (
+                            format_a_meta["metadata_digest"]
+                            == self._format_a_metadata_digest(format_a_meta)
+                        )
+                        identity_result = (
+                            format_a_meta.get("row_identity")
+                            == self._format_a_row_identity(df_bin)
+                        )
+                        identity_matches = (
+                            isinstance(identity_result, (bool, np.bool_))
+                            and bool(identity_result)
+                        )
+                        meta_base_matches = checksum_matches and identity_matches
+                    except Exception:
+                        # Digest/equality validation may encounter arbitrary
+                        # user-provided attrs (for example unpicklable values).
+                        # Treat every ordinary validation error as stale metadata.
+                        meta_base_matches = False
+
+                declared_is_categorical = (
+                    bool(format_a_meta["is_categorical"])
+                    if meta_base_matches else inferred_is_categorical
+                )
+                meta_valid = False
+                exact_edges = None
+                exact_bins = None
+                exact_cat_members = None
+
+                if meta_base_matches and declared_is_categorical:
+                    try:
+                        raw_groups = format_a_meta["cat_members"]
+                        raw_bins = format_a_meta["bin_indices"]
+                        raw_edges = format_a_meta["edges"]
+                        valid_shape = (
+                            isinstance(raw_groups, (list, tuple))
+                            and len(raw_groups) == len(_norm_labels)
+                            and isinstance(raw_bins, (list, tuple))
+                            and len(raw_bins) == len(_norm_labels)
+                            and isinstance(raw_edges, (list, tuple))
+                            and len(raw_edges) == 0
+                            and all(
+                                isinstance(value, (int, np.integer))
+                                and not isinstance(value, (bool, np.bool_))
+                                for value in raw_bins
+                            )
+                            and [int(value) for value in raw_bins]
+                            == list(range(len(_norm_labels)))
+                        )
+                        candidate_groups = []
+                        seen_members = set()
+                        if valid_shape:
+                            for raw_group in raw_groups:
+                                if not isinstance(raw_group, (list, tuple)) or not raw_group:
+                                    valid_shape = False
+                                    break
+                                group = copy.deepcopy(list(raw_group))
+                                for member in group:
+                                    if self._is_missing_category(member):
+                                        valid_shape = False
+                                        break
+                                    try:
+                                        hash(member)
+                                    except TypeError:
+                                        valid_shape = False
+                                        break
+                                    if member in seen_members:
+                                        valid_shape = False
+                                        break
+                                    seen_members.add(member)
+                                if not valid_shape:
+                                    break
+                                candidate_groups.append(group)
+                        if (
+                            valid_shape
+                            and [
+                                _CATE_GROUP_SEP.join(str(member) for member in group)
+                                for group in candidate_groups
+                            ] == _norm_labels
+                        ):
+                            exact_cat_members = candidate_groups
+                            meta_valid = True
+                    except Exception:
+                        pass
+
+                elif meta_base_matches:
+                    try:
+                        raw_edges = format_a_meta["edges"]
+                        raw_bins = format_a_meta["bin_indices"]
+                        decimals = format_a_meta["bin_label_decimals"]
+                        valid_decimals = (
+                            decimals is None
+                            or (
+                                isinstance(decimals, (int, np.integer))
+                                and not isinstance(decimals, (bool, np.bool_))
+                            )
+                        )
+                        valid_raw = (
+                            isinstance(raw_edges, (list, tuple))
+                            and isinstance(raw_bins, (list, tuple))
+                            and valid_decimals
+                            and all(
+                                not isinstance(value, (bool, np.bool_))
+                                for value in raw_edges
+                            )
+                            and all(
+                                isinstance(value, (int, np.integer))
+                                and not isinstance(value, (bool, np.bool_))
+                                for value in raw_bins
+                            )
+                        )
+                        candidate_edges = [float(value) for value in raw_edges]
+                        candidate_bins = [int(value) for value in raw_bins]
+                        valid_edges = (
+                            valid_raw
+                            and bool(np.isfinite(candidate_edges).all())
+                            and all(
+                                right > left
+                                for left, right in zip(candidate_edges, candidate_edges[1:])
+                            )
+                        )
+                        valid_bins = (
+                            valid_raw
+                            and len(candidate_bins) == len(_norm_labels)
+                            and all(
+                                right > left
+                                for left, right in zip(candidate_bins, candidate_bins[1:])
+                            )
+                            and all(
+                                0 <= value <= len(candidate_edges)
+                                for value in candidate_bins
+                            )
+                        )
+                        regenerated = (
+                            [
+                                self._bin_label(
+                                    candidate_edges,
+                                    value,
+                                    len(candidate_edges) + 1,
+                                    None if decimals is None else int(decimals),
+                                )
+                                for value in candidate_bins
+                            ]
+                            if valid_edges and valid_bins else []
+                        )
+                        if valid_edges and valid_bins and regenerated == _norm_labels:
+                            exact_edges = candidate_edges
+                            exact_bins = candidate_bins
+                            meta_valid = True
+                    except Exception:
+                        pass
+
+                is_categorical = (
+                    declared_is_categorical if meta_valid else inferred_is_categorical
+                )
                 woe_table = df_normal.copy()
-                woe_table["bin"] = range(len(df_normal))
                 if is_categorical:
-                    edges = []   # 类别特征无数值边界
-                    # 还原成员类别：支持 refine_cate 合并后的 "A | B | C" 标签
-                    # 每个成员 int → float → 原字符串，供 apply_woe 精确匹配
-                    _members = [
-                        [self._infer_cat_value(p) for p in lbl.split(_CATE_GROUP_SEP)]
-                        for lbl in _norm_labels
-                    ]
+                    woe_table["bin"] = range(len(df_normal))
+                    edges = []
+                    if meta_valid and exact_cat_members is not None:
+                        _members = exact_cat_members
+                    else:
+                        # Attr-less tables retain the historical, necessarily
+                        # ambiguous display-label fallback.
+                        _members = [
+                            [self._infer_cat_value(part) for part in label.split(_CATE_GROUP_SEP)]
+                            for label in _norm_labels
+                        ]
                     woe_table["cat_members"] = _members
-                    woe_table["cat_value"]   = [
-                        ms[0] if len(ms) == 1 else np.nan for ms in _members
+                    woe_table["cat_value"] = [
+                        members[0] if len(members) == 1 else np.nan
+                        for members in _members
                     ]
+                elif meta_valid and exact_edges is not None and exact_bins is not None:
+                    edges = exact_edges
+                    woe_table["bin"] = exact_bins
                 else:
                     edges = self._reconstruct_edges(_norm_labels)
+                    # Attr-less tables use their visible labels as source of truth.
+                    woe_table["bin"] = self._compressed_bin_indices(
+                        _norm_labels, edges
+                    )
                 sv_table  = df_sv.copy() if len(df_sv) > 0 else pd.DataFrame()
                 total_iv  = float(df_bin["iv"].sum())
                 n_bins    = len(df_normal)
                 woes      = df_normal["woe"].values if len(df_normal) > 0 else np.array([])
-                missing_woe = 0.0   # 格式 A 无此字段，用中性 WOE
+                if meta_valid:
+                    try:
+                        candidate_missing_woe = float(format_a_meta.get("missing_woe", 0.0))
+                    except Exception:
+                        candidate_missing_woe = 0.0
+                    missing_woe = (
+                        candidate_missing_woe
+                        if np.isfinite(candidate_missing_woe)
+                        else 0.0
+                    )
+                else:
+                    missing_woe = 0.0
 
             # ════════════════════════════════════════════════════════
             # 格式 B 处理路径
@@ -2438,6 +2859,62 @@ class MonotoneWOEBinner:
         return labels
 
     @staticmethod
+    def _compressed_bin_indices(
+        bin_labels: List[str], edges: List[float]
+    ) -> List[int]:
+        """Map exported interval labels to positions in reconstructed edges.
+
+        Sparse fitted tables omit empty bins, so several original boundaries
+        can be unobservable after export. The remaining finite label endpoints
+        define a compressed interval grid with identical missing-WOE behavior.
+        """
+        import re
+
+        interval = re.compile(r"^\(\s*([^,]+)\s*,\s*([^\]\)]+)\s*[\]\)]$")
+
+        def _endpoint(token: str) -> float:
+            compact = token.strip().lower().replace("∞", "inf")
+            try:
+                return float(compact)
+            except ValueError as exc:
+                raise ValueError(f"无法解析数值分箱端点: {token!r}") from exc
+
+        indices: List[int] = []
+        for label in bin_labels:
+            match = interval.match(str(label).strip())
+            if match is None:
+                raise ValueError(f"无法解析数值分箱区间: {label!r}")
+            lower = _endpoint(match.group(1))
+            upper = _endpoint(match.group(2))
+            if np.isposinf(upper):
+                idx = len(edges)
+            elif np.isfinite(upper):
+                try:
+                    idx = edges.index(float(upper))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"数值分箱右端点 {upper!r} 不在重建边界中"
+                    ) from exc
+            else:
+                raise ValueError(f"数值分箱右端点必须有限或 +inf: {label!r}")
+
+            expected_lower = -float("inf") if idx == 0 else float(edges[idx - 1])
+            lower_matches = (
+                np.isneginf(lower)
+                if np.isneginf(expected_lower)
+                else np.isfinite(lower) and float(lower) == expected_lower
+            )
+            if not lower_matches:
+                raise ValueError(
+                    f"数值分箱区间 {label!r} 与重建边界不连续"
+                )
+            indices.append(idx)
+
+        if any(right <= left for left, right in zip(indices, indices[1:])):
+            raise ValueError("数值分箱区间必须按边界严格递增且不能重复")
+        return indices
+
+    @staticmethod
     def _reconstruct_edges(bin_labels: List[str]) -> List[float]:
         """
         从 bin_label 列表反向推断切割点 edges。
@@ -2446,15 +2923,22 @@ class MonotoneWOEBinner:
         """
         import re
         edges = []
-        for lbl in bin_labels[:-1]:   # 最后一箱没有右边界可提取
-            # 匹配 "(xxx, yyy]" 或 "(-∞, yyy]" 格式的右端点
-            m = re.search(r",\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\]", lbl)
-            if m:
+        interval = re.compile(r"^\(\s*([^,]+)\s*,\s*([^\]\)]+)\s*[\]\)]$")
+        for lbl in bin_labels:
+            match = interval.match(str(lbl).strip())
+            if match is None:
+                return []
+            for token in match.groups():
+                compact = token.strip().lower()
+                if "∞" in compact or "inf" in compact:
+                    continue
                 try:
-                    edges.append(float(m.group(1)))
+                    value = float(compact)
                 except ValueError:
-                    pass
-        return edges
+                    return []
+                if np.isfinite(value):
+                    edges.append(value)
+        return sorted(set(edges))
 
     @staticmethod
     def _looks_like_interval(label: str) -> bool:
@@ -2612,51 +3096,6 @@ class MonotoneWOEBinner:
 
             # ── 类别特征：按取值直接查 WOE，不做区间切分 ──
             if vr.get("is_categorical"):
-                # N38 (0.5.0): detect transform-time categories that were not
-                # seen at fit time so drift on categorical features is visible.
-                if unseen_category_policy != "silent":
-                    fit_categories = set(vr.get("categories", []) or [])
-                    if fit_categories:
-                        observed = set(series.dropna().unique().tolist())
-                        unseen = observed - fit_categories
-                        if unseen:
-                            affected_mask = series.isin(unseen)
-                            affected_rows = int(affected_mask.sum())
-                            total_rows = int(len(series))
-                            stats = {
-                                "unseen_values": unseen,
-                                "affected_rows": affected_rows,
-                                "affected_frac": affected_rows / max(total_rows, 1),
-                                "total_rows": total_rows,
-                            }
-                            self._unseen_category_stats[feat] = stats
-                            try:
-                                unseen_preview = sorted(unseen)[:5]
-                            except TypeError:
-                                unseen_preview = list(unseen)[:5]
-                            more_suffix = "..." if len(unseen) > 5 else ""
-                            if unseen_category_policy == "raise":
-                                raise ValueError(
-                                    f"apply_woe: feature {feat!r} has "
-                                    f"{len(unseen)} unseen categories in "
-                                    f"transform data: {unseen_preview}{more_suffix}. "
-                                    f"{affected_rows}/{total_rows} rows affected "
-                                    f"({stats['affected_frac']:.1%}). "
-                                    f"Pass unseen_category_policy='warn' to fill "
-                                    f"with missing_woe and warn, or 'silent' for "
-                                    f"legacy behaviour."
-                                )
-                            else:  # "warn"
-                                warnings.warn(
-                                    f"apply_woe: feature {feat!r} has "
-                                    f"{len(unseen)} unseen categories in "
-                                    f"transform data: {unseen_preview}{more_suffix}. "
-                                    f"Filling with missing_woe={feat_missing_woe}. "
-                                    f"{affected_rows}/{total_rows} rows affected "
-                                    f"({stats['affected_frac']:.1%}).",
-                                    RuntimeWarning,
-                                    stacklevel=2,
-                                )
                 wt = vr["woe_table"]
                 # 原始取值 → WOE（fit 路径，精确匹配；int/float 由 dict 等价性兼容）
                 # refine_cate 聚类后，一个箱含多个类别(cat_members)；逐成员展开建表
@@ -2666,18 +3105,18 @@ class MonotoneWOEBinner:
                     woe_v = float(r["woe"])
                     if "cat_members" in wt.columns and isinstance(r["cat_members"], (list, tuple)):
                         members = r["cat_members"]
-                    elif "cat_value" in wt.columns and not pd.isna(r["cat_value"]):
+                    elif (
+                        "cat_value" in wt.columns
+                        and not self._is_missing_category(r["cat_value"])
+                    ):
                         members = [r["cat_value"]]
                     else:
                         members = []
                     for cv in members:
-                        if pd.isna(cv):
+                        if self._is_missing_category(cv):
                             continue
                         cat_woe_map[cv]            = woe_v   # 精确匹配
                         cat_woe_map_str[str(cv)]   = woe_v   # 类型不一致时回退匹配
-                    # 整箱标签也登记一次（兜底；通常不会命中真实类别）
-                    if "bin_label" in wt.columns:
-                        cat_woe_map_str.setdefault(str(r["bin_label"]), woe_v)
                 nan_woe = float(sv_woe_map.get("__nan__", feat_missing_woe))
                 missing_mask = series.isna()
                 if cat_woe_map:
@@ -2690,6 +3129,47 @@ class MonotoneWOEBinner:
                 if cat_woe_map_str and fallback_mask.any():
                     mapped.loc[fallback_mask] = (
                         series.loc[fallback_mask].astype(str).map(cat_woe_map_str)
+                    )
+
+                # A value is unseen only after both exact matching and the
+                # supported str() dtype fallback fail.
+                unmatched_mask = mapped.isna() & ~missing_mask
+                if unseen_category_policy != "silent" and unmatched_mask.any():
+                    unseen = set(series.loc[unmatched_mask].dropna().unique().tolist())
+                    affected_rows = int(unmatched_mask.sum())
+                    total_rows = int(len(series))
+                    stats = {
+                        "unseen_values": unseen,
+                        "affected_rows": affected_rows,
+                        "affected_frac": affected_rows / max(total_rows, 1),
+                        "total_rows": total_rows,
+                    }
+                    self._unseen_category_stats[feat] = stats
+                    try:
+                        unseen_preview = sorted(unseen)[:5]
+                    except TypeError:
+                        unseen_preview = list(unseen)[:5]
+                    more_suffix = "..." if len(unseen) > 5 else ""
+                    if unseen_category_policy == "raise":
+                        raise ValueError(
+                            f"apply_woe: feature {feat!r} has "
+                            f"{len(unseen)} unseen categories in "
+                            f"transform data: {unseen_preview}{more_suffix}. "
+                            f"{affected_rows}/{total_rows} rows affected "
+                            f"({stats['affected_frac']:.1%}). "
+                            f"Pass unseen_category_policy='warn' to fill "
+                            f"with missing_woe and warn, or 'silent' for "
+                            f"legacy behaviour."
+                        )
+                    warnings.warn(
+                        f"apply_woe: feature {feat!r} has "
+                        f"{len(unseen)} unseen categories in "
+                        f"transform data: {unseen_preview}{more_suffix}. "
+                        f"Filling with missing_woe={feat_missing_woe}. "
+                        f"{affected_rows}/{total_rows} rows affected "
+                        f"({stats['affected_frac']:.1%}).",
+                        RuntimeWarning,
+                        stacklevel=2,
                     )
 
                 out = np.full(len(series), feat_missing_woe, dtype=float)
@@ -2809,7 +3289,7 @@ class MonotoneWOEBinner:
                         bin_idx = np.searchsorted(
                             np.asarray(edges, dtype=float),
                             normal_values[valid_values],
-                            side="right",
+                            side="left",
                         )
                         woe_values = np.full(len(edges) + 1, feat_missing_woe, dtype=float)
                         for bin_key, woe_val in wt_map.items():
