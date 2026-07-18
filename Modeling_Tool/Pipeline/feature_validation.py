@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gc
 import logging
 import warnings
@@ -470,6 +471,11 @@ class FeatureValidationPipeline:
         """Drop per-batch raw/WOE dataframes that are not needed for final merge."""
         woe_artifacts = dict(result.woe_artifacts or {})
         woe_artifacts["by_target"] = {}
+        for key in (
+            "categorical_transform_stats_by_target",
+            "unseen_category_stats_by_target",
+        ):
+            woe_artifacts[key] = copy.deepcopy(woe_artifacts.get(key, {}))
         return FeatureValidationPipelineResult(
             splits={},
             distribution_summary=result.distribution_summary,
@@ -487,7 +493,7 @@ class FeatureValidationPipeline:
             batch_results=result.batch_results,
             selected_features=list(result.selected_features),
             selection_summary=dict(result.selection_summary or {}),
-            screening_artifact=result.screening_artifact,
+            screening_artifact=None,
             config_snapshot=dict(result.config_snapshot or {}),
         )
 
@@ -730,12 +736,41 @@ class FeatureValidationPipeline:
         artifacts: list[dict[str, Any]],
         batch_metadata: pd.DataFrame,
     ) -> dict[str, Any]:
+        valid = [item for item in artifacts if item]
         return {
             "by_target": {},
-            "woe_table": self._concat_frames([item.get("woe_table", pd.DataFrame()) for item in artifacts if item]),
-            "refine_summary": self._concat_frames([item.get("refine_summary", pd.DataFrame()) for item in artifacts if item]),
+            "woe_table": self._concat_frames([item.get("woe_table", pd.DataFrame()) for item in valid]),
+            "refine_summary": self._concat_frames([item.get("refine_summary", pd.DataFrame()) for item in valid]),
+            "categorical_transform_stats_by_target": self._merge_transform_stats(
+                valid, "categorical_transform_stats_by_target"
+            ),
+            "unseen_category_stats_by_target": self._merge_transform_stats(
+                valid, "unseen_category_stats_by_target"
+            ),
             "batch_metadata": batch_metadata,
         }
+
+    @staticmethod
+    def _merge_transform_stats(
+        artifacts: list[dict[str, Any]], key: str
+    ) -> dict[str, Any]:
+        """Deep-merge target/split/feature audit stats without silent overwrite."""
+        merged: dict[str, Any] = {}
+        for artifact in artifacts:
+            payload = artifact.get(key, {}) or {}
+            for target, split_stats in payload.items():
+                target_out = merged.setdefault(target, {})
+                for split, feature_stats in split_stats.items():
+                    split_out = target_out.setdefault(split, {})
+                    for feature, stats in feature_stats.items():
+                        value = copy.deepcopy(stats)
+                        if feature in split_out and split_out[feature] != value:
+                            raise ValueError(
+                                f"conflicting {key} stats for target={target!r}, "
+                                f"split={split!r}, feature={feature!r}"
+                            )
+                        split_out[feature] = value
+        return merged
 
     @staticmethod
     def _concat_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -1247,16 +1282,27 @@ class FeatureValidationPipeline:
                 table = adapter.get_woe_table(fit_features)
                 table.insert(0, "target", target)
                 woe_tables.append(table)
-                woe_splits = {
-                    name: adapter.transform(df, varlist=fit_features)
-                    for name, df in splits.items()
-                }
+                woe_splits = {}
+                categorical_transform_stats_by_split = {}
+                unseen_category_stats_by_split = {}
+                for name, df in splits.items():
+                    woe_splits[name] = adapter.transform(df, varlist=fit_features)
+                    categorical_transform_stats_by_split[name] = copy.deepcopy(
+                        getattr(engine, "_categorical_transform_stats", {})
+                    )
+                    unseen_category_stats_by_split[name] = copy.deepcopy(
+                        getattr(engine, "_unseen_category_stats", {})
+                    )
                 self._plot_woe(engine, adapter, train, fit_features, target)
                 by_target[target] = {
                     "engine": engine,
                     "adapter": adapter,
                     "woe_splits": woe_splits,
                     "features": fit_features,
+                    "categorical_transform_stats_by_split": (
+                        categorical_transform_stats_by_split
+                    ),
+                    "unseen_category_stats_by_split": unseen_category_stats_by_split,
                 }
             except Exception as exc:
                 refine_rows.append({"target": target, "step": "fit", "status": "error", "error": repr(exc)})
@@ -1264,6 +1310,14 @@ class FeatureValidationPipeline:
             "by_target": by_target,
             "woe_table": pd.concat(woe_tables, ignore_index=True) if woe_tables else pd.DataFrame(),
             "refine_summary": pd.DataFrame(refine_rows),
+            "categorical_transform_stats_by_target": {
+                target: copy.deepcopy(item["categorical_transform_stats_by_split"])
+                for target, item in by_target.items()
+            },
+            "unseen_category_stats_by_target": {
+                target: copy.deepcopy(item["unseen_category_stats_by_split"])
+                for target, item in by_target.items()
+            },
         }
 
     def _fit_monotone_binner(

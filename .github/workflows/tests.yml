@@ -122,8 +122,25 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/SuperModelingFactory
         run: |
           set +e
-          python -m pytest --no-header -q -rN 2>&1 | tee pytest-output.log
+          python -m pytest --no-header -q -rN --junitxml=pytest-results.xml 2>&1 | tee pytest-output.log
           status=${PIPESTATUS[0]}
+          skip_status=0
+          if [ "$status" -eq 0 ]; then
+            python - <<'PY'
+          from xml.etree import ElementTree as ET
+
+          root = ET.parse("pytest-results.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          if skipped:
+              print(f"::error title=pytest skipped tests::{skipped} test(s) skipped; the release gate requires zero skips")
+              raise SystemExit(1)
+          PY
+            skip_status=$?
+            if [ "$skip_status" -ne 0 ]; then
+              status="$skip_status"
+            fi
+          fi
           if [ "$status" -ne 0 ]; then
             python - <<'PY'
           from pathlib import Path

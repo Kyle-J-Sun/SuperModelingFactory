@@ -469,6 +469,7 @@ class CorrelationFilter:
         self._corr_matrix_cache = None
         self._corr_matrix_excluded = set()
         self._metric_summary_cache = None
+        self._correlation_decision_trace = []
 
     def _corr_matrix_frame(self, varlist):
         # 0.7.0-R1: mixed correlation base. Numeric cols stay raw so a
@@ -594,9 +595,21 @@ class CorrelationFilter:
     def calculate_vif(df):
         return _BaseCorrelationFilter.calculate_vif(df)
 
+    def _sync_base_state(self):
+        self.correlated_dict = getattr(self._base, "correlated_dict", {})
+        self.filtered_varlist = getattr(self._base, "filtered_varlist", [])
+        self._corr_matrix_cache = getattr(self._base, "_corr_matrix_cache", None)
+        self._corr_matrix_excluded = getattr(self._base, "_corr_matrix_excluded", set())
+        self._metric_summary_cache = getattr(self._base, "_metric_summary_cache", None)
+        self._correlation_decision_trace = getattr(
+            self._base, "_correlation_decision_trace", [],
+        )
+
     def filter_single_iteration(self, varlist):
         if self.woe_binner is None and self.woe_engine == "master":
-            return self._base.filter_single_iteration(varlist)
+            result = self._base.filter_single_iteration(varlist)
+            self._sync_base_state()
+            return result
 
         name_mapping = {"iv": "iv", "ks": "ks_in_gains"}
         high_corr_var = self._high_corr_pairs(varlist)
@@ -617,7 +630,28 @@ class CorrelationFilter:
             selected = summary.sort_values([name_mapping[self.base_metric.lower()]], ascending=False)["var"].iloc[0]
             if selected not in selected_varlist:
                 selected_varlist.append(selected)
-            removed_varlist += [x for x in correlated_list if x != selected and x not in removed_varlist]
+            newly_removed = [
+                x for x in correlated_list
+                if x != selected and x not in removed_varlist
+            ]
+            metric_name = name_mapping[self.base_metric.lower()]
+            metric_map = summary.set_index("var")[metric_name].to_dict()
+            positions = {name: idx for idx, name in enumerate(varlist)}
+            for dropped_var in newly_removed:
+                decision_pair = [selected, dropped_var]
+                decision_pair.sort(key=positions.__getitem__)
+                var_a, var_b = decision_pair
+                corr_value = self._corr_matrix_cache.loc[var_a, var_b]
+                self._correlation_decision_trace.append({
+                    "var_a": var_a,
+                    "var_b": var_b,
+                    "corr": float(corr_value),
+                    "iv_a": float(metric_map.get(var_a, 0.0)),
+                    "iv_b": float(metric_map.get(var_b, 0.0)),
+                    "kept": selected,
+                    "dropped": dropped_var,
+                })
+            removed_varlist += newly_removed
             self.correlated_dict[var] = {"corr": single_var_corr, "gains": summary}
 
         return selected_varlist + [x for x in varlist if x not in (selected_varlist + removed_varlist)]
@@ -625,10 +659,10 @@ class CorrelationFilter:
     def remove_highly_correlated(self, varlist, max_iterations=10):
         if self.woe_binner is None and self.woe_engine == "master":
             result = self._base.remove_highly_correlated(varlist, max_iterations)
-            self.correlated_dict = getattr(self._base, "correlated_dict", {})
-            self.filtered_varlist = getattr(self._base, "filtered_varlist", [])
+            self._sync_base_state()
             return result
 
+        self._correlation_decision_trace = []
         self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         self._metric_summary_cache = None
         self._metric_summary(varlist)
