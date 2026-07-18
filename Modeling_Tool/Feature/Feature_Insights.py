@@ -417,14 +417,38 @@ class CorrelationFilter:
         self.correlated_dict = {}
         self.filtered_varlist = []
         self._corr_matrix_cache = None
+        self._corr_matrix_excluded = set()
         self._metric_summary_cache = None
+
+    def _corr_matrix_frame(self, varlist):
+        # 0.7.0-R1: numeric-subset correlation base. A pure-numeric varlist is
+        # byte-identical to the legacy self.data[varlist].corr() path. Non-numeric
+        # cols (raw Pearson is undefined) are excluded and tracked in
+        # self._corr_matrix_excluded; _high_corr_pairs reindexes them back as NaN
+        # rows/cols so they survive the corr stage instead of crashing the float
+        # cast. At most one raw-value UserWarning per matrix build (no WOE binner).
+        non_numeric = [c for c in varlist if not pd.api.types.is_numeric_dtype(self.data[c])]
+        if not non_numeric:
+            self._corr_matrix_excluded = set()
+            return self.data[varlist]
+        self._corr_matrix_excluded = set(non_numeric)
+        warnings.warn(
+            f"raw-value correlation skips {len(non_numeric)} non-numeric "
+            f"feature(s) {non_numeric[:5]}; they are kept through the corr "
+            f"stage. Set corr_use_woe_bins=True to correlate categorical "
+            f"features via their WOE encoding.",
+            UserWarning,
+            stacklevel=2,
+        )
+        selected = [c for c in varlist if c not in self._corr_matrix_excluded]
+        return self.data[selected]
 
     def _high_corr_pairs(self, varlist):
         if (
             self._corr_matrix_cache is None
-            or not set(varlist).issubset(self._corr_matrix_cache.columns)
+            or not (set(varlist) <= set(self._corr_matrix_cache.columns) | self._corr_matrix_excluded)
         ):
-            self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+            self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         matrix = self._corr_matrix_cache.reindex(index=varlist, columns=varlist)
         values = matrix.to_numpy(dtype=float)
         row_idx, col_idx = np.triu_indices(len(varlist), k=1)
@@ -561,7 +585,7 @@ class CorrelationFilter:
         >>> filter_analyzer = CorrelationFilter(df, 'target')
         >>> keep_vars = filter_analyzer.remove_highly_correlated(['var1', 'var2', 'var3'])
         """
-        self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         self._metric_summary_cache = None
         self._metric_summary(varlist)
         last_keep_list = self.filter_single_iteration(varlist)

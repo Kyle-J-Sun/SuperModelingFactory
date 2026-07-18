@@ -467,14 +467,73 @@ class CorrelationFilter:
         self.correlated_dict = {}
         self.filtered_varlist = []
         self._corr_matrix_cache = None
+        self._corr_matrix_excluded = set()
         self._metric_summary_cache = None
+
+    def _corr_matrix_frame(self, varlist):
+        # 0.7.0-R1: mixed correlation base. Numeric cols stay raw so a
+        # pure-numeric varlist is byte-identical to the legacy .corr() path;
+        # non-numeric cols are WOE-encoded via the screening binner
+        # (corr_use_woe_bins semantics) and renamed back to raw names. Cols that
+        # cannot be encoded go to self._corr_matrix_excluded: they leave the
+        # matrix and survive the corr stage as NaN rows/cols once _high_corr_pairs
+        # reindexes them back in (same as the weighted raw precedent). At most one
+        # UserWarning per matrix build.
+        non_numeric = [c for c in varlist if not pd.api.types.is_numeric_dtype(self.data[c])]
+        if not non_numeric:
+            self._corr_matrix_excluded = set()
+            return self.data[varlist]
+
+        encoded = {}
+        excluded = set()
+        if self.woe_binner is not None:
+            suffix = str(getattr(self.woe_binner, "woe_suffix", "_woe"))
+            try:
+                adapter = as_woe_engine(self.woe_binner, woe_suffix=suffix)
+                suffix = adapter.woe_suffix
+                tx = adapter.transform(self.data.copy(), varlist=non_numeric, suffix=suffix)
+            except (TypeError, ValueError, KeyError, AttributeError, np.linalg.LinAlgError):
+                tx = None
+            for name in non_numeric:
+                column = f"{name}{suffix}"
+                if tx is not None and column in tx.columns and pd.api.types.is_numeric_dtype(tx[column]):
+                    encoded[name] = tx[column].to_numpy()
+                else:
+                    excluded.add(name)
+            if excluded:
+                excluded_list = [c for c in non_numeric if c in excluded]
+                warnings.warn(
+                    f"corr_use_woe_bins=True could not WOE-encode {len(excluded)} "
+                    f"feature(s) {excluded_list[:5]}; they are excluded from the "
+                    f"correlation matrix and kept through the corr stage. Refit the "
+                    f"screening WOE engine to cover them.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        else:
+            excluded = set(non_numeric)
+            warnings.warn(
+                f"raw-value correlation skips {len(non_numeric)} non-numeric "
+                f"feature(s) {non_numeric[:5]}; they are kept through the corr "
+                f"stage. Set corr_use_woe_bins=True to correlate categorical "
+                f"features via their WOE encoding.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self._corr_matrix_excluded = excluded
+        selected = [c for c in varlist if c not in excluded]
+        frame = self.data[selected].copy()
+        for name, values in encoded.items():
+            frame[name] = values
+        return frame
 
     def _high_corr_pairs(self, varlist):
         if (
             self._corr_matrix_cache is None
-            or not set(varlist).issubset(self._corr_matrix_cache.columns)
+            or not (set(varlist) <= set(self._corr_matrix_cache.columns) | self._corr_matrix_excluded)
         ):
-            self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+            self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         matrix = self._corr_matrix_cache.reindex(index=varlist, columns=varlist)
         values = matrix.to_numpy(dtype=float)
         row_idx, col_idx = np.triu_indices(len(varlist), k=1)
@@ -562,7 +621,7 @@ class CorrelationFilter:
             self.filtered_varlist = getattr(self._base, "filtered_varlist", [])
             return result
 
-        self._corr_matrix_cache = self.data[varlist].corr(method=self.method)
+        self._corr_matrix_cache = self._corr_matrix_frame(varlist).corr(method=self.method)
         self._metric_summary_cache = None
         self._metric_summary(varlist)
         last_keep_list = self.filter_single_iteration(varlist)
