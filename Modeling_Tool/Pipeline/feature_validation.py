@@ -114,17 +114,14 @@ class FeatureValidationPipelineConfig:
     # setting group-stability thresholds without dims raises loudly.
     selection_group_dims: list[str] | None = None
     weight_col: str | None = None
-    # OOT governance (G10): None resolves to the legacy True (missing OOT is
-    # replaced by an OOS copy, now with a loud UserWarning). Set False to keep
-    # OOT empty instead — every OOT output is then simply absent. The next
-    # minor release flips the resolved default to False.
-    synthesize_missing_oot: bool | None = None
-    # G00: "all" (legacy) fits the top-level WOE on every new feature;
+    # OOT governance (G10): missing OOT stays empty by default. Set True to
+    # retain the legacy OOS-copy stand-in (with its UserWarning).
+    synthesize_missing_oot: bool | None = False
+    # G00: "all" fits the top-level WOE on every new feature;
     # "post_missing_gate" runs the selection-grade missing-rate gate
     # (missing_rate_threshold) BEFORE the WOE fit so high-missing features
-    # cannot break a target's WOE artifacts. The next minor release flips the
-    # default to "post_missing_gate".
-    woe_fit_scope: Literal["all", "post_missing_gate"] = "all"
+    # cannot break a target's WOE artifacts.
+    woe_fit_scope: Literal["all", "post_missing_gate"] = "post_missing_gate"
 
     write_outputs: bool = True
     write_excel: bool = True
@@ -970,6 +967,12 @@ class FeatureValidationPipeline:
             "woe_fit_query": cfg.woe_fit_query,
             "woe_params": dict(cfg.woe_params or {}),
             "monotone_woe_params": dict(cfg.monotone_woe_params or {}),
+            "synthesize_missing_oot": self._synthesize_missing_oot(),
+            "woe_fit_scope": cfg.woe_fit_scope,
+            "missing_rate_threshold": cfg.missing_rate_threshold,
+            "refine_min_n_bins_policy": dict(cfg.monotone_woe_params or {}).get(
+                "refine_min_n_bins_policy", "warn"
+            ),
             "batch_mode": bool(batch_mode),
         }
 
@@ -1031,9 +1034,9 @@ class FeatureValidationPipeline:
             data["apply_quarter"] = dt.dt.to_period("Q").astype(str)
 
     def _synthesize_missing_oot(self) -> bool:
-        """Resolve the None-default: legacy True until the announced flip."""
+        """Resolve missing-OOT governance without mutating the user config."""
         value = self.config.synthesize_missing_oot
-        return True if value is None else bool(value)
+        return False if value is None else bool(value)
 
     def _split_data(self, data: pd.DataFrame, target_col: str | None) -> dict[str, pd.DataFrame]:
         cfg = self.config

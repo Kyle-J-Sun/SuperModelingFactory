@@ -269,6 +269,7 @@ def calc_equid_dist(y_true, y_score, bins=10, sample_weight=None, **kwargs):
         "s",
         nbins=bins,
         weight_col="w",
+        **kwargs,
     )
 
 

@@ -278,7 +278,7 @@ class MonotoneWOEBinner:
         reference_target: Optional[str] = None,
         direction_conflict_policy: Optional[str] = None,
         missing_bin_strategy: Optional[str] = None,
-        refine_min_n_bins_policy: Optional[str] = None,
+        refine_min_n_bins_policy: Optional[str] = "warn",
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col

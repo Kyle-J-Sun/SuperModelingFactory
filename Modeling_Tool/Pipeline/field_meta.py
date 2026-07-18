@@ -479,7 +479,7 @@ _NESTED_FIELDS = {
         _nested("reference_target", "方向参考目标列。", "text"),
         _nested("direction_conflict_policy", "方向冲突处理。", "select", options=["warn", "raise", "keep"]),
         _nested("missing_bin_strategy", "缺失箱策略（None=按 special_values 推导）。", "select", options=["empirical_special", "fixed_woe", "fail"]),
-        _nested("refine_min_n_bins_policy", "refine 最少箱数策略（None=沿用旧行为）。", "select", options=["warn", "enforce", "raise"]),
+        _nested("refine_min_n_bins_policy", "refine 最少箱数策略（默认 warn；None=沿用 0.6.x 无声旧行为）。", "select", options=["warn", "enforce", "raise"]),
     ],
     "corr_params": [
         _nested("corr_cutpoint", "高相关阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),

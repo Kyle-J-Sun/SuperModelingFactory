@@ -99,17 +99,15 @@ class CreditModelPipelineConfig:
     use_backward_features: bool = True
 
     # --- OOT governance (G10/G11/G12) -----------------------------------
-    # None means "not set explicitly": the effective value is resolved at
-    # run() start — legacy behavior outside candidate_mode, tightened
-    # defaults inside it. Explicit values conflicting with
+    # None means "not set explicitly" for split lists: the effective value is
+    # resolved at run() start. Explicit values conflicting with
     # candidate_mode=True raise at validation time.
-    # NOTE (announced flip): synthesize_missing_oot=None currently resolves
-    # to True (legacy OOS-copy stand-in, now with a loud UserWarning);
-    # search_eval_splits=None resolves to ["oos", "oot"] and
-    # backward_report_splits=None to ["oot"]. The next minor release flips
-    # these resolved defaults to False / ["oos"] / [].
+    # By default, missing OOT is not synthesized; model evaluation runs on
+    # INS/OOS, hyperparameter search evaluates OOS, and backward reports omit
+    # OOT. Set synthesize_missing_oot=True to retain the legacy OOS-copy OOT
+    # stand-in.
     candidate_mode: bool = False
-    synthesize_missing_oot: bool | None = None
+    synthesize_missing_oot: bool | None = False
     evaluation_splits: list[str] | None = None
     forbidden_splits: list[str] = field(default_factory=list)
     search_eval_splits: list[str] | None = None
@@ -137,10 +135,9 @@ class CreditModelPipelineConfig:
     # all_missing_spec_value, persisted in the model artifact metadata.
     # special_score_values: sentinel scores (e.g. [-1]) get their own
     # evaluation bin, excluded from quantile edges and ranking metrics.
-    # gains_ascending: None keeps each underlying path's legacy default;
-    # an explicit bool is threaded through summary/gains/weighted uniformly.
-    # NOTE (announced flip): the next minor release flips the resolved
-    # default of gains_ascending to True (score ascending, bin 1 = low risk).
+    # gains_ascending=True uses score ascending (bin 1 = low risk) across
+    # summary, gains tables, and figures. None retains each legacy path's
+    # historical direction.
     # eval_weight_col: "inherit" (default) reuses weight_col for evaluation
     # and search/backward eval weights; None evaluates unweighted even when
     # training is weighted; any other string names the evaluation weight
@@ -148,7 +145,7 @@ class CreditModelPipelineConfig:
     eval_target_cols: list[str] | None = None
     all_missing_score_value: float | None = None
     special_score_values: list[float] | None = None
-    gains_ascending: bool | None = None
+    gains_ascending: bool | None = True
     eval_weight_col: str | None = "inherit"
 
     screening_artifact: Any | None = None
@@ -454,11 +451,10 @@ class CreditModelPipeline:
     def _resolve_split_governance(self) -> dict[str, Any]:
         """Resolve effective OOT-governance settings (G10/G11/G12).
 
-        Governance config fields default to None ("not set explicitly") and
-        resolve to legacy behavior outside candidate_mode or tightened
-        defaults inside it. Explicit values that contradict
-        candidate_mode=True raise instead of being silently overridden, and
-        the user's config object is never mutated.
+        Split-list config fields default to None ("not set explicitly") and
+        resolve to the package governance defaults. Explicit values that
+        contradict candidate_mode=True raise instead of being silently
+        overridden, and the user's config object is never mutated.
         """
         cfg = self.config
 
@@ -492,24 +488,18 @@ class CreditModelPipeline:
                 )
             forbidden |= {"oot"}
 
-        synthesize = cfg.synthesize_missing_oot
-        if synthesize is None:
-            # Legacy default True (announced flip to False on the next minor
-            # release); candidate_mode never synthesizes.
-            synthesize = not cfg.candidate_mode
-        evaluation_splits = None
+        synthesize = False if cfg.synthesize_missing_oot is None else bool(cfg.synthesize_missing_oot)
+        evaluation_splits = ["ins", "oos"]
         if cfg.evaluation_splits is not None:
             evaluation_splits = _norm(cfg.evaluation_splits, "evaluation_splits")
-        elif cfg.candidate_mode:
-            evaluation_splits = ["ins", "oos"]
         if cfg.search_eval_splits is not None:
             search_eval = _norm(cfg.search_eval_splits, "search_eval_splits")
         else:
-            search_eval = ["oos"] if cfg.candidate_mode else ["oos", "oot"]
+            search_eval = ["oos"]
         if cfg.backward_report_splits is not None:
             backward_report = _norm(cfg.backward_report_splits, "backward_report_splits")
         else:
-            backward_report = [] if cfg.candidate_mode else ["oot"]
+            backward_report = []
         backward_validation = _norm([cfg.backward_validation_split], "backward_validation_split")[0]
 
         # Fail fast on explicit forbidden-split consumption.
@@ -731,8 +721,16 @@ class CreditModelPipeline:
 
         summary: dict[str, Any] = {"initial_features": list(feature_cols)}
         try:
+            # ``feature_screen`` historically receives all three canonical
+            # split keys. Under the 0.7.0 no-synthetic-OOT default, keep that
+            # internal shape with an empty frame rather than fabricating OOS
+            # rows or re-exposing an ``oot`` split to pipeline consumers.
+            screen_splits = splits
+            if "oot" not in screen_splits:
+                screen_splits = dict(splits)
+                screen_splits["oot"] = splits["ins"].iloc[0:0].copy()
             result = feature_screen(
-                splits,
+                screen_splits,
                 feature_cols,
                 cfg.target_col,
                 weight_col=cfg.weight_col,
@@ -1785,8 +1783,12 @@ class CreditModelPipeline:
                 "candidate_mode": self._governance["candidate_mode"],
                 "oot_synthesized": self._governance["oot_synthesized"],
                 "oot_withheld": self._governance["oot_withheld"],
+                "synthesize_missing_oot": self._governance["synthesize_missing_oot"],
                 "evaluation_splits": self._governance["evaluation_splits"],
                 "forbidden_splits": self._governance["forbidden_splits"],
+                "search_eval_splits": self._governance["search_eval_splits"],
+                "backward_validation_split": self._governance["backward_validation_split"],
+                "backward_report_splits": self._governance["backward_report_splits"],
                 "eval_target_cols": list(cfg.eval_target_cols) if cfg.eval_target_cols else None,
                 "all_missing_score_value": cfg.all_missing_score_value,
                 "all_missing_raw_features": (

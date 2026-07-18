@@ -846,6 +846,7 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
             nbins=nbins,
             weight_col=weight_col,
             weighted_binning=weighted_binning,
+            ascending=ascending,
         )
         if retSummary:
             return pd.DataFrame({
@@ -2228,8 +2229,8 @@ class PerformanceEvaluator:
         # spec_values: sentinel scores (e.g. -1 for all-missing overrides)
         # that get their own evaluation bin and are excluded from quantile
         # edges and ranking metrics. ascending: None keeps every underlying
-        # function's own legacy default; an explicit bool is threaded through
-        # summary/gains/plot and the weighted path uniformly.
+        # function's legacy direction; an explicit bool is threaded through
+        # summary, gains, and figures (including weighted paths) uniformly.
         self.spec_values = list(spec_values) if spec_values else []
         self.ascending = ascending
         self.datasets = {}
@@ -2420,6 +2421,7 @@ class PerformanceEvaluator:
                         save_path=fig_save_path,
                         gains_table=gains_table,
                         equal_freq=self.equal_freq,
+                        ascending=self.ascending,
                     )
             if rpt_save_path:
                 fnl_df.to_csv(rpt_save_path, index=False)
@@ -2522,7 +2524,7 @@ class PerformanceEvaluator:
                 tree_binning = self.tree_binning,
                 random_state = self.random_state,
                 return_edges = True,
-                ascending = True
+                ascending = True if self.ascending is None else bool(self.ascending)
             )
 
             if benchmark_bin_edges is None or len(benchmark_bin_edges) < 2:
@@ -2556,7 +2558,8 @@ class PerformanceEvaluator:
                 save_path = save_path,
                 gains_table = gains_table,
                 equal_freq = self.equal_freq,
-                pct_bin_edges = benchmark_bin_edges
+                pct_bin_edges = benchmark_bin_edges,
+                ascending = self.ascending,
             )
 
             import re

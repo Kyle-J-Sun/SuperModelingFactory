@@ -889,7 +889,13 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sampl
         等分分组后各组统计量数据集
     """
     if sample_weight is not None:
-        return _weighted_eval.calc_equid_pct(y_true, y_score, bins=bins, sample_weight=sample_weight)
+        return _weighted_eval.calc_equid_pct(
+            y_true,
+            y_score,
+            bins=bins,
+            ascending=ascending,
+            sample_weight=sample_weight,
+        )
 
     y_true = np.array(y_true)
     y_score = np.array(y_score)
@@ -947,7 +953,12 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
         固定分箱后各组统计量数据集
     """
     if sample_weight is not None:
-        return _weighted_eval.calc_fixed_pct(y_true, y_score, sample_weight=sample_weight)
+        return _weighted_eval.calc_fixed_pct(
+            y_true,
+            y_score,
+            ascending=ascending,
+            sample_weight=sample_weight,
+        )
 
     if bin_edges is None:
         raise ValueError("bin_edges cannot be None when using fixed pct bins.")
@@ -1007,20 +1018,27 @@ def summarize_pct(pct_df, ascending=True):
     bins = pct_df.shape[0]
     interval = 100 / pct_df.shape[0]
 
-    if ascending:
-        pct_info = {
-            'pct_bins': bins,
-            'pct_interval': interval,
-            'pct_top_avgTrue'.format(interval):  pct_df['avg_true'].iloc[bins-1],
-            'pct_btm_avgTrue'.format(interval):  pct_df['avg_true'].iloc[0],
-        }
-    else:
-        pct_info = {
-            'pct_bins': bins,
-            'pct_interval': interval,
-            'pct_top_captureRate'.format(interval):  pct_df['capture_rate'].iloc[bins-1],
-            'pct_btm_captureRate'.format(interval):  pct_df['capture_rate'].iloc[0],
-        }
+    pct_info = {
+        'pct_bins': bins,
+        'pct_interval': interval,
+    }
+
+    # Precomputed gain frames historically only needed thresholds, gain, and
+    # capture_rate. Keep summarize_pct usable for those frames while exposing
+    # target-rate summary keys whenever the richer percentile schema is used.
+    if 'avg_true' in pct_df.columns:
+        top_idx, btm_idx = (bins - 1, 0) if ascending else (0, bins - 1)
+        pct_info.update({
+            'pct_top_avgTrue'.format(interval): pct_df['avg_true'].iloc[top_idx],
+            'pct_btm_avgTrue'.format(interval): pct_df['avg_true'].iloc[btm_idx],
+        })
+
+    if not ascending and 'capture_rate' in pct_df.columns:
+        # Preserve the historical descending-summary keys for direct callers.
+        pct_info.update({
+            'pct_top_captureRate'.format(interval): pct_df['capture_rate'].iloc[bins-1],
+            'pct_btm_captureRate'.format(interval): pct_df['capture_rate'].iloc[0],
+        })
 
     return pct_info
 
@@ -1374,7 +1392,7 @@ def __plot_pct_axes_base(ax, fontdicts):
     ax.set_ylabel('Target rate', fontdict=fontdicts['axislabel'])
 
 
-def __plot_single_pct_axes(pct_df, ax, fontdicts):
+def __plot_single_pct_axes(pct_df, ax, fontdicts, ascending=True):
     """在axes上绘制单个Score分布图.
 
     Parameters
@@ -1397,7 +1415,7 @@ def __plot_single_pct_axes(pct_df, ax, fontdicts):
     ax.plot(X, pct_df['avg_true'], color=palette['ClassicBlueRedGrey'][1], linewidth=2, marker='.', markersize=5, label='True')
     ax.axhline(y=pct_df['cumavg_true'][pct_df.shape[0]-1], linestyle='--', color=palette['ClassicBlueRedGrey'][2], linewidth=2, label='Random')
 
-    pct_info = summarize_pct(pct_df)
+    pct_info = summarize_pct(pct_df, ascending=ascending)
     _b, _i, _top, _btm = pct_info['pct_bins'], pct_info['pct_interval'], pct_info['pct_top_avgTrue'], pct_info['pct_btm_avgTrue']
     ax.set_title("Bins={0}  Top{1:.0f}%={2:.2%}  BTM{1:.0f}%={3:.2%}".format(_b, _i, _top, _btm), fontdict=fontdicts['subtitle'])
     ax.legend(loc=2, fontsize=fontdicts['legend']['size'])
@@ -1524,7 +1542,7 @@ def __plot_multi_cumpct_axes(pct_dfs, ax, fontdicts):
 
 # Gain Curve
 @timeit_decorator
-def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
+def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None, ascending=False):
     """绘制Score分布曲线图.
 
     Parameters
@@ -1537,6 +1555,8 @@ def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_s
         是否展示图片. 默认为True
     save_path: str
         结果图片存放文件地址. 默认值为None, 即不保存
+    ascending: bool, default False
+        Gain 图按分数升序（True）或降序（False）累计。
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Gain Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight'])  #, findfont=zhfont)
@@ -1545,9 +1565,9 @@ def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_s
     models = list(pct_dfs.keys())
     if len(models) == 1:
         pct_df = pct_dfs[models[0]]
-        __plot_single_gain_axes(pct_df, ax, fontdicts)
+        __plot_single_gain_axes(pct_df, ax, fontdicts, ascending=ascending)
     else:
-        __plot_multi_gain_axes(pct_dfs, ax, fontdicts)
+        __plot_multi_gain_axes(pct_dfs, ax, fontdicts, ascending=ascending)
     ax.legend(loc=2, fontsize=fontdicts['legend']['size'])
 
     if to_show:
@@ -1557,7 +1577,7 @@ def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_s
     plt.close()
 
 
-def __plot_gain_axes_base(ax, fontdicts):
+def __plot_gain_axes_base(ax, fontdicts, ascending=False):
     """在axes上绘制Score分布图基础.
 
     Parameters
@@ -1570,11 +1590,12 @@ def __plot_gain_axes_base(ax, fontdicts):
     ax.plot([0,100], [0,1], color='k', linestyle='--', linewidth=1)
     ax.set_xlim([0,100])
     ax.set_ylim([0,1])
-    ax.set_xlabel('Percentile % (Score Descending)', fontdict=fontdicts['axislabel'])
+    direction = 'Ascending' if ascending else 'Descending'
+    ax.set_xlabel(f'Percentile % (Score {direction})', fontdict=fontdicts['axislabel'])
     ax.set_ylabel('gain', fontdict=fontdicts['axislabel'])
 
     
-def __plot_single_gain_axes(pct_df, ax, fontdicts):
+def __plot_single_gain_axes(pct_df, ax, fontdicts, ascending=False):
     """在axes上绘制单个Score分布图.
 
     Parameters
@@ -1586,11 +1607,11 @@ def __plot_single_gain_axes(pct_df, ax, fontdicts):
     fontdicts: dict
         绘图相关字体字典
     """
-    __plot_gain_axes_base(ax, fontdicts)
+    __plot_gain_axes_base(ax, fontdicts, ascending=ascending)
 
     plot_df = pct_df.copy()
     if {'avg_score', 'proportion', 'capture_rate'}.issubset(plot_df.columns):
-        plot_df = plot_df.sort_values('avg_score', ascending=False).reset_index(drop=True)
+        plot_df = plot_df.sort_values('avg_score', ascending=ascending).reset_index(drop=True)
         plot_df['thresholds'] = plot_df['proportion'].cumsum() * 100
         plot_df['gain'] = plot_df['capture_rate'].cumsum()
 
@@ -1600,14 +1621,15 @@ def __plot_single_gain_axes(pct_df, ax, fontdicts):
     Y = np.insert(Y, 0, 0)
     ax.plot(X, Y, color=palette['ClassicBlueRedGrey'][0], linewidth=2, marker='.', markersize=5, label='avgScore')
 
-    pct_info = summarize_pct(plot_df, ascending=False)
+    pct_info = summarize_pct(plot_df, ascending=ascending)
     _b, _i = pct_info['pct_bins'], pct_info['pct_interval']
-    _top = plot_df['capture_rate'].iloc[0] if plot_df.shape[0] > 0 else np.nan
-    _btm = plot_df['capture_rate'].iloc[-1] if plot_df.shape[0] > 0 else np.nan
+    _top_idx, _btm_idx = (-1, 0) if ascending else (0, -1)
+    _top = plot_df['capture_rate'].iloc[_top_idx] if plot_df.shape[0] > 0 else np.nan
+    _btm = plot_df['capture_rate'].iloc[_btm_idx] if plot_df.shape[0] > 0 else np.nan
     ax.set_title("Bins={0}  Top{1:.0f}%={2:.2%}  BTM{1:.0f}%={3:.2%}".format(_b, _i, _top, _btm), fontdict=fontdicts['subtitle'])
 
 
-def __plot_multi_gain_axes(pct_dfs, ax, fontdicts):
+def __plot_multi_gain_axes(pct_dfs, ax, fontdicts, ascending=False):
     """在axes上绘制多个Score分布图.
 
     Parameters
@@ -1619,14 +1641,14 @@ def __plot_multi_gain_axes(pct_dfs, ax, fontdicts):
     fontdicts: dict
         绘图相关字体字典
     """
-    __plot_gain_axes_base(ax, fontdicts)
+    __plot_gain_axes_base(ax, fontdicts, ascending=ascending)
 
     models = list(pct_dfs.keys())
     for i in range(len(models)):
         md = models[i]
         pct_df = pct_dfs[md].copy()
         if {'avg_score', 'proportion', 'capture_rate'}.issubset(pct_df.columns):
-            pct_df = pct_df.sort_values('avg_score', ascending=False).reset_index(drop=True)
+            pct_df = pct_df.sort_values('avg_score', ascending=ascending).reset_index(drop=True)
             pct_df['thresholds'] = pct_df['proportion'].cumsum() * 100
             pct_df['gain'] = pct_df['capture_rate'].cumsum()
         X = np.array(pct_df['thresholds'])
@@ -1636,7 +1658,7 @@ def __plot_multi_gain_axes(pct_dfs, ax, fontdicts):
         ax.plot(X, Y, color=palette['MorandiDark'][i], linewidth=2, marker='.', markersize=5, label='{0} avgTrue'.format(md))
 
 
-def _weighted_gains_to_plot_frames(weighted_gains):
+def _weighted_gains_to_plot_frames(weighted_gains, pct_ascending=True, gain_ascending=False):
     """Convert weighted gains output into the plotting helpers' long schema."""
     if weighted_gains is None or weighted_gains.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1646,8 +1668,8 @@ def _weighted_gains_to_plot_frames(weighted_gains):
     if missing:
         raise KeyError(f"Weighted gains table missing plotting columns: {missing}")
 
-    descending = weighted_gains.reset_index(drop=True).copy()
-    total_bad = float(descending["N_BAD"].sum())
+    gains = weighted_gains.reset_index(drop=True).copy()
+    total_bad = float(gains["N_BAD"].sum())
 
     def _convert(source):
         source = source.reset_index(drop=True)
@@ -1680,10 +1702,10 @@ def _weighted_gains_to_plot_frames(weighted_gains):
             }
         )
 
-    # Percentile charts historically run from low score to high score, while
-    # gain charts run from the highest score downward.
-    percentile_frame = _convert(descending.iloc[::-1])
-    gain_frame = _convert(descending)
+    # An explicit direction governs both plots. The optional defaults retain
+    # the historical mixed behavior for direct callers that leave it unset.
+    percentile_frame = _convert(gains.sort_values("AVG_SCORE", ascending=pct_ascending))
+    gain_frame = _convert(gains.sort_values("AVG_SCORE", ascending=gain_ascending))
     return percentile_frame, gain_frame
 
 
@@ -1696,7 +1718,7 @@ def _set_weighted_axis_title(ax, fontdicts):
 
 
 @timeit_decorator
-def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None):
+def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None, ascending=None):
     """绘制单模型预测效果评价图.
 
     Parameters
@@ -1715,6 +1737,9 @@ def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, 
         是否展示图片. 默认为True
     save_path: str
         结果图片存放文件地址. 默认值为None, 即不保存
+    ascending: bool, optional
+        显式值统一控制收益表、百分位图和 Gain 图的分数方向；None 保留
+        历史百分位升序、Gain 降序的行为。
     
     Returns
     -------
@@ -1746,7 +1771,7 @@ def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, 
         y_true = datasets[d]['y_true']
         y_score = datasets[d]['y_score']
         dataset_weight = datasets[d].get('sample_weight', sample_weight)
-        result.update({d: __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table, equal_freq, pct_bin_edges, sample_weight=dataset_weight)})
+        result.update({d: __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table, equal_freq, pct_bin_edges, sample_weight=dataset_weight, ascending=ascending)})
 
     result_df = pd.DataFrame.from_dict(result, orient='index').reset_index()
 
@@ -1779,7 +1804,7 @@ def resturct_gains(gains_table):
     
     return gains_table
 
-def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None):
+def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None, ascending=None):
     """绘制单模型在单样本集上预测效果评价图.
     包括: ROC、KDE、PCT、Gain四图.
 
@@ -1806,6 +1831,13 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
 #     from Model_Eval_Tool import get_gains_table
     from .Model_Eval_Tool import get_gains_table
     
+    # ``None`` preserves the historical PCT-ascending / gain-descending
+    # split. An explicit bool applies one direction consistently.
+    pct_ascending = True if ascending is None else bool(ascending)
+    gain_ascending = False if ascending is None else bool(ascending)
+    unweighted_gains_ascending = True if ascending is None else bool(ascending)
+    weighted_gains_ascending = False if ascending is None else bool(ascending)
+
     # 清理数据
     mask = np.isfinite(y_score) & np.isfinite(y_true)
     if sample_weight is not None:
@@ -1832,7 +1864,7 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
             include_missing = False,
             score = 'y_score',
             equal_freq = equal_freq,
-            ascending = True ,
+            ascending = unweighted_gains_ascending,
             withSummary = False,
             weight_col = '_sample_weight' if sample_weight is not None else None,
         )
@@ -1847,28 +1879,28 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
             "y_score",
             nbins=bin_count,
             weight_col="w",
+            ascending=weighted_gains_ascending,
         )
-        pct_df, pct_desc_df = _weighted_gains_to_plot_frames(weighted_gains)
+        pct_df, pct_desc_df = _weighted_gains_to_plot_frames(
+            weighted_gains,
+            pct_ascending=pct_ascending,
+            gain_ascending=gain_ascending,
+        )
         if gains_table:
             y_gains = weighted_gains
-        pct_info = {
-            "pct_bins": weighted_gains.shape[0],
-            "pct_interval": 100.0 / weighted_gains.shape[0] if weighted_gains.shape[0] else np.nan,
-            "pct_top_avgTrue": float(weighted_gains["AVG_BAD"].iloc[0]) if len(weighted_gains) else np.nan,
-            "pct_btm_avgTrue": float(weighted_gains["AVG_BAD"].iloc[-1]) if len(weighted_gains) else np.nan,
-        }
+        pct_info = summarize_pct(pct_df, ascending=pct_ascending)
     else:
         if pct_bin_edges is not None:
-            pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=True, sample_weight=sample_weight)
+            pct_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=pct_ascending, sample_weight=sample_weight)
         else:
-            pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, sample_weight=sample_weight)
+            pct_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=pct_ascending, sample_weight=sample_weight)
 
         if gains_table:
             pct_index = pct_df["thresholds"]
             pct_df = resturct_gains(y_gains)
             pct_df["thresholds"] = pct_index
 
-        pct_info = summarize_pct(pct_df, ascending=True)
+        pct_info = summarize_pct(pct_df, ascending=pct_ascending)
     
     if len(y_true) < 2 or len(np.unique(y_true)) < 2:
         # 返回默认性能指标（全部为NaN）
@@ -1884,9 +1916,9 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
     
     if sample_weight is None:
         if pct_bin_edges is not None:
-            pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=False, sample_weight=sample_weight)
+            pct_desc_df = calc_fixed_pct(y_true, y_score, None, bin_edges=pct_bin_edges, ascending=gain_ascending, sample_weight=sample_weight)
         else:
-            pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=False, sample_weight=sample_weight)
+            pct_desc_df = calc_equid_pct(y_true, y_score, None, bins=pct_bins, ascending=gain_ascending, sample_weight=sample_weight)
 
     ax_roc = plt.subplot(nrow, ncol, i*ncol+1)
     __plot_single_roc_axes(roc_df, ax_roc, fontdicts)
@@ -1900,16 +1932,16 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
         sample_weight=sample_weight,
     )
     if sample_weight is None:
-        __plot_single_pct_axes(pct_df, plt.subplot(nrow, ncol, i*ncol+3), fontdicts)
-        __plot_single_gain_axes(pct_desc_df, plt.subplot(nrow, ncol, i*ncol+4), fontdicts)
+        __plot_single_pct_axes(pct_df, plt.subplot(nrow, ncol, i*ncol+3), fontdicts, ascending=pct_ascending)
+        __plot_single_gain_axes(pct_desc_df, plt.subplot(nrow, ncol, i*ncol+4), fontdicts, ascending=gain_ascending)
     else:
         _set_weighted_axis_title(ax_roc, fontdicts)
         _set_weighted_axis_title(ax_kde, fontdicts)
         ax_pct = plt.subplot(nrow, ncol, i * ncol + 3)
-        __plot_single_pct_axes(pct_df, ax_pct, fontdicts)
+        __plot_single_pct_axes(pct_df, ax_pct, fontdicts, ascending=pct_ascending)
         _set_weighted_axis_title(ax_pct, fontdicts)
         ax_gain = plt.subplot(nrow, ncol, i * ncol + 4)
-        __plot_single_gain_axes(pct_desc_df, ax_gain, fontdicts)
+        __plot_single_gain_axes(pct_desc_df, ax_gain, fontdicts, ascending=gain_ascending)
         _set_weighted_axis_title(ax_gain, fontdicts)
 
     info = {
