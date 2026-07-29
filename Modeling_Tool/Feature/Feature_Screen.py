@@ -51,6 +51,10 @@ _MONOTONE_INIT_KEYS = frozenset({
     "direction_conflict_policy",
     "missing_bin_strategy",
     "refine_min_n_bins_policy",
+    "sv_min_bin_size",
+    "sv_small_policy",
+    "sv_woe_smoothing",
+    "sv_smoothing_alpha",
 })
 _MONOTONE_FIT_KEYS = frozenset({"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"})
 

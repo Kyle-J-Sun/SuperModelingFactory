@@ -6,6 +6,7 @@ WOE转换与单调性分析工具包
 import numpy as np
 import pandas as pd
 import logging
+import warnings
 
 from Modeling_Tool.Core.Binning_Tool import (
     _parse_bin_range_bounds,
@@ -203,7 +204,9 @@ class WOETransformer:
 
     def __init__(self, nbins=10, precision=5, min_bin_prop=0.05, include_missing=False,
                  equal_freq=True, fillna=-999999, chi2_config=None, tree_binning_seed=None,
-                 spec_values=None, drop_bin_info=True, ret_woe_table=True):
+                 spec_values=None, drop_bin_info=True, ret_woe_table=True,
+                 sv_min_bin_size=0.0, sv_small_policy="keep",
+                 sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
         """初始化WOE转换器。
 
         参数:
@@ -230,7 +233,33 @@ class WOETransformer:
             是否删除中间分箱信息列
         ret_woe_table : bool, optional
             是否返回WOE映射表
+        sv_min_bin_size : float, optional
+            低占比特殊值箱兜底阈值（占全量样本比例），0.0 = 关闭（保旧行为）
+        sv_small_policy : str, optional
+            'keep'（默认）/'neutral'/'merge_missing'，低占比 SV 箱的处理方式
+        sv_woe_smoothing : str, optional
+            'none'（默认）/'laplace'，SV 箱 WOE 是否向全局坏率收缩
+        sv_smoothing_alpha : float, optional
+            拉普拉斯平滑强度 α（伪计数），0.0 = 数值等价旧 WOE
         """
+        if sv_small_policy not in {"keep", "neutral", "merge_missing"}:
+            raise ValueError(
+                f"sv_small_policy must be one of ['keep', 'neutral', 'merge_missing']; "
+                f"got {sv_small_policy!r}"
+            )
+        if sv_woe_smoothing not in {"none", "laplace"}:
+            raise ValueError(
+                f"sv_woe_smoothing must be one of ['none', 'laplace']; "
+                f"got {sv_woe_smoothing!r}"
+            )
+        if not (0.0 <= sv_min_bin_size < 1.0):
+            raise ValueError(
+                f"sv_min_bin_size must be in [0.0, 1.0); got {sv_min_bin_size}"
+            )
+        if sv_smoothing_alpha < 0.0:
+            raise ValueError(
+                f"sv_smoothing_alpha must be >= 0.0; got {sv_smoothing_alpha}"
+            )
         self.nbins = nbins
         self.precision = precision
         self.min_bin_prop = min_bin_prop
@@ -242,6 +271,162 @@ class WOETransformer:
         self.spec_values = spec_values if spec_values is not None else []
         self.drop_bin_info = drop_bin_info
         self.ret_woe_table = ret_woe_table
+        self.sv_min_bin_size = sv_min_bin_size
+        self.sv_small_policy = sv_small_policy
+        self.sv_woe_smoothing = sv_woe_smoothing
+        self.sv_smoothing_alpha = sv_smoothing_alpha
+
+    # G19: SV-bin governance shares MonotoneWOEBinner's eps so both engines
+    # produce identical numbers for the same counts.
+    _SV_EPS = 1e-6
+
+    def _sv_row_mask(self, woe_table):
+        """识别特殊值箱行：MIN == MAX 且该值属于 spec_values（双条件防误识别）。"""
+        spec_values = list(self.spec_values or [])
+        if not spec_values:
+            return pd.Series(False, index=woe_table.index)
+        return (
+            woe_table["MIN"].isin(spec_values)
+            & (woe_table["MIN"] == woe_table["MAX"])
+            & (woe_table["N"] > 0)
+        )
+
+    def _missing_row_label(self, woe_table, sv_mask):
+        """识别缺失值箱行标签；无缺失箱返回 None。
+
+        fit 路径下 MIN/MAX 聚合的是**原始**变量列，缺失箱因此整箱为 NaN；
+        若调用方在分箱前已 fillna（哨兵进入数据），则 MIN == MAX == fillna。
+        """
+        nan_bin = woe_table["MIN"].isna() & woe_table["MAX"].isna() & (woe_table["N"] > 0)
+        sentinel_bin = (
+            (woe_table["MIN"] == woe_table["MAX"])
+            & (woe_table["MIN"] == self.fillna)
+            & (woe_table["N"] > 0)
+            & ~sv_mask
+        )
+        candidates = woe_table.index[nan_bin | sentinel_bin]
+        return candidates[0] if len(candidates) else None
+
+    def _govern_sv_bins(self, woe_table, var):
+        """对 spec_values 对应的箱行应用 sv_small_policy / sv_woe_smoothing。
+
+        口径与 ``MonotoneWOEBinner._compute_sv_table`` 严格一致：方式1 兜底优先，
+        方式2 平滑只作用于占比达标（或 policy='keep'）的 SV 箱。
+
+        缺失箱同样是一个受治理的 SV 箱（MonotoneWOEBinner 的 sv_table 里
+        ``[Missing]`` 与其它 SV 行同权），因此并入治理行集合；它只是**永远不作为
+        merge 来源**（target-only，不能并入自己）。若仅按 ``_sv_row_mask``
+        取行，缺失箱（MIN/MAX 聚合原始列 ⇒ NaN/NaN）会漏出平滑循环，导致同参数
+        下两引擎的 [Missing] WOE 不一致。
+        """
+        eps = self._SV_EPS
+        total_bad  = float(woe_table["N_BAD"].sum())
+        total_good = float(woe_table["N_GOOD"].sum())
+        n_total = total_bad + total_good
+        p = total_bad / (n_total + eps)
+
+        sv_mask = self._sv_row_mask(woe_table)
+        missing_label = self._missing_row_label(woe_table, sv_mask)
+        governed_idx = list(woe_table.index[sv_mask])
+        if missing_label is not None and missing_label not in governed_idx:
+            governed_idx.append(missing_label)
+        if not governed_idx:
+            return woe_table
+        pending_merge = []
+        for idx in governed_idx:
+            is_small = (
+                self.sv_small_policy != "keep"
+                and self.sv_min_bin_size > 0.0
+                and n_total > 0
+                and float(woe_table.loc[idx, "N"]) / n_total < self.sv_min_bin_size
+                # 缺失箱是 merge 的目标，永远不做来源。
+                and not (self.sv_small_policy == "merge_missing"
+                         and idx == missing_label)
+            )
+            if is_small and self.sv_small_policy == "neutral":
+                woe_table.loc[idx, "WOE"] = 0.0
+                woe_table.loc[idx, "IV"] = 0.0
+            elif is_small:
+                pending_merge.append(idx)
+            elif self.sv_woe_smoothing == "laplace" and self.sv_smoothing_alpha > 0.0:
+                # 与 MonotoneWOEBinner._compute_woe_single_bin 同式：先把箱内
+                # bad_rate 向基准率 p 收缩，再换算回等效 bad/good 计数。
+                a = self.sv_smoothing_alpha
+                n_bad  = float(woe_table.loc[idx, "N_BAD"])
+                n_good = float(woe_table.loc[idx, "N_GOOD"])
+                r = (n_bad + a * p) / (n_bad + n_good + a)
+                pct_bad  = ((n_bad + n_good) * r)         / (total_bad  + eps)
+                pct_good = ((n_bad + n_good) * (1.0 - r)) / (total_good + eps)
+                woe = float(np.log((pct_bad + eps) / (pct_good + eps)))
+                woe_table.loc[idx, "BAD_PCT_PER_BIN"] = pct_bad
+                woe_table.loc[idx, "GOOD_PCT_PER_BIN"] = pct_good
+                woe_table.loc[idx, "WOE"] = woe
+                woe_table.loc[idx, "IV"] = (pct_bad - pct_good) * woe
+        if pending_merge:
+            woe_table = self._merge_sv_into_missing_master(
+                woe_table, pending_merge, missing_label,
+                total_bad, total_good, var,
+            )
+        return woe_table
+
+    def _merge_sv_into_missing_master(self, woe_table, pending_merge, missing_label,
+                                      total_bad, total_good, var):
+        """把低占比 SV 行的 bad/good 并入缺失箱行并重算 WOE。
+
+        与 ``MonotoneWOEBinner._merge_small_into_missing`` 一一对应：被合并行保留
+        自己的行，但存表 WOE 改写为缺失箱重算后的 WOE、IV 置 0，因此 transform
+        侧（``mapping_woe`` / ``convert_single_var_woe``）无需任何改动。
+        无缺失箱时降级为 neutral 并告警。
+
+        N/N_BAD/N_GOOD 是**转移**而非复制（来源行清零），保证 N 列合计不变。
+        """
+        eps = self._SV_EPS
+        if missing_label is None:
+            for idx in pending_merge:
+                warnings.warn(
+                    f"sv_small_policy='merge_missing' but {var!r} has no [Missing] bin; "
+                    f"falling back to 'neutral' for SV "
+                    f"{woe_table.loc[idx, 'MIN']!r}.",
+                    UserWarning, stacklevel=2,
+                )
+                woe_table.loc[idx, "WOE"] = 0.0
+                woe_table.loc[idx, "IV"] = 0.0
+            return woe_table
+        m = missing_label
+        add_bad  = float(woe_table.loc[pending_merge, "N_BAD"].sum())
+        add_good = float(woe_table.loc[pending_merge, "N_GOOD"].sum())
+        new_n    = int(woe_table.loc[m, "N"]) + int(woe_table.loc[pending_merge, "N"].sum())
+        new_bad  = float(woe_table.loc[m, "N_BAD"])  + add_bad
+        new_good = float(woe_table.loc[m, "N_GOOD"]) + add_good
+        pct_bad  = new_bad  / (total_bad  + eps)
+        pct_good = new_good / (total_good + eps)
+        woe = float(np.log((pct_bad + eps) / (pct_good + eps)))
+        woe_table.loc[m, "N"] = new_n
+        woe_table.loc[m, "N_BAD"] = int(new_bad)
+        woe_table.loc[m, "N_GOOD"] = int(new_good)
+        woe_table.loc[m, "AVG_BAD"] = (
+            new_bad / (new_bad + new_good) if (new_bad + new_good) > 0 else np.nan
+        )
+        woe_table.loc[m, "AVG_GOOD"] = (
+            new_good / (new_bad + new_good) if (new_bad + new_good) > 0 else np.nan
+        )
+        woe_table.loc[m, "BAD_PCT_PER_BIN"] = pct_bad
+        woe_table.loc[m, "GOOD_PCT_PER_BIN"] = pct_good
+        woe_table.loc[m, "WOE"] = woe
+        woe_table.loc[m, "IV"] = (pct_bad - pct_good) * woe
+        woe_table.loc[pending_merge, "N"] = 0
+        woe_table.loc[pending_merge, "N_BAD"] = 0
+        woe_table.loc[pending_merge, "N_GOOD"] = 0
+        woe_table.loc[pending_merge, "AVG_BAD"] = np.nan
+        woe_table.loc[pending_merge, "AVG_GOOD"] = np.nan
+        woe_table.loc[pending_merge, "LIFT"] = np.nan
+        woe_table.loc[pending_merge, "BAD_PCT_PER_BIN"] = 0.0
+        woe_table.loc[pending_merge, "GOOD_PCT_PER_BIN"] = 0.0
+        woe_table.loc[pending_merge, "WOE"] = woe
+        woe_table.loc[pending_merge, "IV"] = 0.0
+        # AVG_BAD 已被合并改写，LIFT 依赖其均值，需整表重算。
+        woe_table["LIFT"] = woe_table["AVG_BAD"] / woe_table["AVG_BAD"].mean()
+        return woe_table
 
     def _get_woe_table(self, binning_res, var, dep):
         """根据分箱结果计算WOE表。
@@ -288,8 +473,13 @@ class WOETransformer:
             woe_table, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
         )
 
-        # WOE Mapping Dictionary
         woe_table = woe_table.reset_index(drop=False)
+
+        # ── G19：低占比 SV 箱治理（与 MonotoneWOEBinner 口径对齐）──
+        if self.sv_small_policy != "keep" or self.sv_woe_smoothing != "none":
+            woe_table = self._govern_sv_bins(woe_table, var)
+
+        # WOE Mapping Dictionary
         woe_mapping_dict = dict(zip(woe_table[f"_bin_range_{var}"], woe_table["WOE"]))
 
         return woe_table, woe_mapping_dict
@@ -912,7 +1102,9 @@ def plot_monotonicity_check(data, column, title=None, include_missing=True):
 def woe_transform(train_df, var, dep, nbins, oot_df=None, chi2_config=None, tree_binning_seed=None,
                   precision=5, min_bin_prop=0.05, include_missing=False, equal_freq=True,
                   ascending=True, fillna=-999999, spec_values=None, drop_bin_info=True,
-                  ret_woe_table=True, check_monotonicity=False):
+                  ret_woe_table=True, check_monotonicity=False,
+                  sv_min_bin_size=0.0, sv_small_policy="keep",
+                  sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
     """将变量转换为WOE值。
 
     对单个变量进行分箱并计算WOE值，支持训练集和验证集的转换。
@@ -954,6 +1146,14 @@ def woe_transform(train_df, var, dep, nbins, oot_df=None, chi2_config=None, tree
         是否返回WOE映射表，默认为True
     check_monotonicity : bool, optional
         是否检查单调性，默认为False
+    sv_min_bin_size : float, optional
+        低占比特殊值箱兜底阈值（占全量样本比例），默认0.0（关闭）
+    sv_small_policy : str, optional
+        'keep'（默认）/'neutral'/'merge_missing'
+    sv_woe_smoothing : str, optional
+        'none'（默认）/'laplace'
+    sv_smoothing_alpha : float, optional
+        拉普拉斯平滑强度α，默认0.0
 
     返回:
     --------
@@ -982,7 +1182,11 @@ def woe_transform(train_df, var, dep, nbins, oot_df=None, chi2_config=None, tree
         tree_binning_seed=tree_binning_seed,
         spec_values=spec_values,
         drop_bin_info=drop_bin_info,
-        ret_woe_table=ret_woe_table
+        ret_woe_table=ret_woe_table,
+        sv_min_bin_size=sv_min_bin_size,
+        sv_small_policy=sv_small_policy,
+        sv_woe_smoothing=sv_woe_smoothing,
+        sv_smoothing_alpha=sv_smoothing_alpha,
     )
     return transformer.transform_single(
         train_df=train_df,

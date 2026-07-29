@@ -289,7 +289,9 @@ class WOE_Master(object):
         self.varlist = varlist
 
     def fit(self, nbins=10, equal_freq=True, tree_binning_seed=None, chi2_config=None,
-            precision=5, min_bin_prop=0.05, include_missing=True, fillna=None, spec_values=[]):
+            precision=5, min_bin_prop=0.05, include_missing=True, fillna=None, spec_values=[],
+            sv_min_bin_size=0.0, sv_small_policy="keep",
+            sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
         """Fit WOE binning for variables in varlist.
 
         Args:
@@ -302,6 +304,11 @@ class WOE_Master(object):
             include_missing: bool, include missing value bin (default True)
             fillna: int/float, value to fill missing data
             spec_values: list, special values to handle
+            sv_min_bin_size: float, low-frequency special-value bin threshold as a
+                share of all samples; 0.0 disables the fallback (legacy behaviour)
+            sv_small_policy: str, 'keep' (default) / 'neutral' / 'merge_missing'
+            sv_woe_smoothing: str, 'none' (default) / 'laplace'
+            sv_smoothing_alpha: float, Laplace smoothing strength alpha (pseudo-counts)
         Returns:
             None, updates self.woe_dict attribute
         """
@@ -323,6 +330,10 @@ class WOE_Master(object):
                                     ascending=True,
                                     fillna=fillna,
                                     spec_values=spec_values,
+                                    sv_min_bin_size=sv_min_bin_size,
+                                    sv_small_policy=sv_small_policy,
+                                    sv_woe_smoothing=sv_woe_smoothing,
+                                    sv_smoothing_alpha=sv_smoothing_alpha,
                                     drop_bin_info=True,
                                     ret_woe_table=True)
             woe_table = woe_res[-1]
@@ -381,7 +392,9 @@ class WOE_Master(object):
         return data_woe
 
     def update_woe(self, varlist, nbins=10, equal_freq=True, tree_binning_seed=None, chi2_config=None,
-                   precision=5, min_bin_prop=0.05, include_missing=True, fillna=None, spec_values=[]):
+                   precision=5, min_bin_prop=0.05, include_missing=True, fillna=None, spec_values=[],
+                   sv_min_bin_size=0.0, sv_small_policy="keep",
+                   sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
         """Update WOE binning for specified variables.
 
         Args:
@@ -395,6 +408,11 @@ class WOE_Master(object):
             include_missing: bool, include missing value bin (default True)
             fillna: int/float, value to fill missing data
             spec_values: list, special values to handle
+            sv_min_bin_size: float, low-frequency special-value bin threshold as a
+                share of all samples; 0.0 disables the fallback (legacy behaviour)
+            sv_small_policy: str, 'keep' (default) / 'neutral' / 'merge_missing'
+            sv_woe_smoothing: str, 'none' (default) / 'laplace'
+            sv_smoothing_alpha: float, Laplace smoothing strength alpha (pseudo-counts)
         Returns:
             None, updates self.woe_dict attribute
         """
@@ -417,6 +435,10 @@ class WOE_Master(object):
                                     ascending=True,
                                     fillna=fillna,
                                     spec_values=spec_values,
+                                    sv_min_bin_size=sv_min_bin_size,
+                                    sv_small_policy=sv_small_policy,
+                                    sv_woe_smoothing=sv_woe_smoothing,
+                                    sv_smoothing_alpha=sv_smoothing_alpha,
                                     drop_bin_info=True,
                                     ret_woe_table=True)
             woe_table = woe_res[-1]

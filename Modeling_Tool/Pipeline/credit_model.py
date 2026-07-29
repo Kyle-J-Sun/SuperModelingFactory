@@ -62,11 +62,30 @@ class CreditModelPipelineConfig:
     woe_engine: str = "equal_freq"
     woe_fit_query: str | None = None
     extra_eval_datasets: dict[str, pd.DataFrame] | None = None
+    # sv_* govern special-value (SV) WOE bins only; the defaults below reproduce
+    # pre-0.8.0 behavior bit-for-bit. They reach WOE_Master via fit(**woe_params)
+    # and MonotoneWOEBinner via __init__(**monotone_woe_params).
     woe_params: dict[str, Any] = field(
-        default_factory=lambda: {"nbins": 10, "equal_freq": True, "min_bin_prop": 0.05}
+        default_factory=lambda: {
+            "nbins": 10,
+            "equal_freq": True,
+            "min_bin_prop": 0.05,
+            "sv_min_bin_size": 0.0,
+            "sv_small_policy": "keep",
+            "sv_woe_smoothing": "none",
+            "sv_smoothing_alpha": 0.0,
+        }
     )
     monotone_woe_params: dict[str, Any] = field(
-        default_factory=lambda: {"n_init_bins": 20, "min_bin_size": 0.03, "min_n_bins": 2}
+        default_factory=lambda: {
+            "n_init_bins": 20,
+            "min_bin_size": 0.03,
+            "min_n_bins": 2,
+            "sv_min_bin_size": 0.0,
+            "sv_small_policy": "keep",
+            "sv_woe_smoothing": "none",
+            "sv_smoothing_alpha": 0.0,
+        }
     )
 
     train_models: list[str] = field(default_factory=lambda: ["lr", "lgb", "xgb", "cat"])

@@ -66,11 +66,31 @@ class FeatureValidationPipelineConfig:
     woe_enabled: bool = True
     woe_fit_query: str | None = None
     woe_engine: str = "monotone"
+    # sv_* govern special-value (SV) WOE bins only; the defaults below reproduce
+    # pre-0.8.0 behavior bit-for-bit. Monotone-side sv_* keys only survive because
+    # they are listed in _MONOTONE_INIT_KEYS below — unlisted keys are dropped
+    # silently, so the two lists must be kept in sync.
     woe_params: dict[str, Any] = field(
-        default_factory=lambda: {"nbins": 10, "equal_freq": True, "min_bin_prop": 0.05}
+        default_factory=lambda: {
+            "nbins": 10,
+            "equal_freq": True,
+            "min_bin_prop": 0.05,
+            "sv_min_bin_size": 0.0,
+            "sv_small_policy": "keep",
+            "sv_woe_smoothing": "none",
+            "sv_smoothing_alpha": 0.0,
+        }
     )
     monotone_woe_params: dict[str, Any] = field(
-        default_factory=lambda: {"n_init_bins": 20, "min_bin_size": 0.03, "min_n_bins": 2}
+        default_factory=lambda: {
+            "n_init_bins": 20,
+            "min_bin_size": 0.03,
+            "min_n_bins": 2,
+            "sv_min_bin_size": 0.0,
+            "sv_small_policy": "keep",
+            "sv_woe_smoothing": "none",
+            "sv_smoothing_alpha": 0.0,
+        }
     )
     categorical_features: list[str] | None = None
     monotone_refine_cate_enabled: bool = False
@@ -170,6 +190,10 @@ class FeatureValidationPipeline:
         "direction_conflict_policy",
         "missing_bin_strategy",
         "refine_min_n_bins_policy",
+        "sv_min_bin_size",
+        "sv_small_policy",
+        "sv_woe_smoothing",
+        "sv_smoothing_alpha",
     }
     _MONOTONE_FIT_KEYS = {"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"}
 

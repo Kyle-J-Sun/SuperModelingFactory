@@ -245,6 +245,18 @@ class MonotoneWOEBinner:
                          显示 N 位小数（:.Nf），例如 N=2 时 1234.5678 → 1234.57。
                          注意：较低的精度会使 load_woe_bins(get_final_bins()) 的
                          round-trip 边界稍有误差，但通常可忽略。
+    sv_min_bin_size    : 低占比 SV 兜底阈值（SV 箱占**全量**样本的占比），
+                         默认 0.0 = 关闭。
+    sv_small_policy    : 占比 < sv_min_bin_size 的 SV 箱如何处理，
+                         'keep'（默认，经验 WOE，零行为变更）/
+                         'neutral'（woe=iv=0）/
+                         'merge_missing'（bad/good 并入 [Missing] 箱后重算，
+                         被合并行的存表 WOE 改写为 [Missing] 的 WOE；
+                         无 [Missing] 箱时降级 'neutral' 并告警）。
+    sv_woe_smoothing   : SV 箱 WOE 是否向全局坏率收缩，'none'（默认）/'laplace'。
+    sv_smoothing_alpha : 平滑强度 α（伪计数），默认 0.0（数值等价旧 WOE）。
+                         方式1 优先：低占比箱走兜底后**不再**平滑；平滑只作用于
+                         占比达标（或 policy='keep'）的 SV 箱。
 
     fit() 参数（传入 fit() 方法，不在 __init__ 中设置）
     -------------------------------------------------------
@@ -279,6 +291,10 @@ class MonotoneWOEBinner:
         direction_conflict_policy: Optional[str] = None,
         missing_bin_strategy: Optional[str] = None,
         refine_min_n_bins_policy: Optional[str] = "warn",
+        sv_min_bin_size: float = 0.0,
+        sv_small_policy: str = "keep",
+        sv_woe_smoothing: str = "none",
+        sv_smoothing_alpha: float = 0.0,
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col
@@ -344,9 +360,32 @@ class MonotoneWOEBinner:
                     "missing_bin_strategy='fixed_woe' conflicts with NaN in special_values: "
                     "missing rows would get an empirical bin, not the fixed missing_woe constant."
                 )
+        # ── SV 箱治理参数（G19；默认 keep/none/0.0 = 旧行为，零行为变更） ──
+        if sv_small_policy not in {"keep", "neutral", "merge_missing"}:
+            raise ValueError(
+                f"sv_small_policy must be one of ['keep', 'neutral', 'merge_missing']; "
+                f"got {sv_small_policy!r}"
+            )
+        if sv_woe_smoothing not in {"none", "laplace"}:
+            raise ValueError(
+                f"sv_woe_smoothing must be one of ['none', 'laplace']; "
+                f"got {sv_woe_smoothing!r}"
+            )
+        if not (0.0 <= sv_min_bin_size < 1.0):
+            raise ValueError(
+                f"sv_min_bin_size must be in [0.0, 1.0); got {sv_min_bin_size}"
+            )
+        if sv_smoothing_alpha < 0.0:
+            raise ValueError(
+                f"sv_smoothing_alpha must be >= 0.0; got {sv_smoothing_alpha}"
+            )
         self.min_bad_count = min_bad_count
         self.min_good_count = min_good_count
         self.small_bin_policy = small_bin_policy
+        self.sv_min_bin_size = sv_min_bin_size
+        self.sv_small_policy = sv_small_policy
+        self.sv_woe_smoothing = sv_woe_smoothing
+        self.sv_smoothing_alpha = sv_smoothing_alpha
         self.monotone_direction = monotone_direction
         self.reference_target = reference_target
         self.direction_conflict_policy = direction_conflict_policy
@@ -514,16 +553,31 @@ class MonotoneWOEBinner:
         return pd.Series(0, index=sub.index)
 
     def _compute_woe_single_bin(
-        self, sub: pd.DataFrame, total_bad: float, total_good: float
+        self, sub: pd.DataFrame, total_bad: float, total_good: float,
+        smooth: bool = False,
     ) -> Dict[str, float]:
-        """计算某子集的 bad/good/woe/iv 等统计量。"""
+        """计算某子集的 bad/good/woe/iv 等统计量。
+
+        ``smooth=True`` 允许 G19 的拉普拉斯平滑生效（仅 SV 箱路径显式开启，
+        普通箱调用保持 ``smooth=False``、口径不变）。
+        """
         eps = self.eps
         n    = len(sub)
         bad  = float(sub[self.target_col].sum())
         good = float((sub[self.target_col] == 0).sum())
         bad_rate = bad / (bad + good) if (bad + good) > 0 else 0.0
-        pct_bad  = bad  / (total_bad  + eps)
-        pct_good = good / (total_good + eps)
+        if smooth and self.sv_woe_smoothing == "laplace" and self.sv_smoothing_alpha > 0.0:
+            # 把箱内 bad_rate 向全局基准率 p 收缩，再换算回等效 bad/good 计数。
+            # 该式在 alpha→∞ 时 bad_rate→p，WOE→0（严格单调收缩到中性）；
+            # 直接给 pct_bad/pct_good 加伪计数则会收敛到 logit(p) 而非 0。
+            a = self.sv_smoothing_alpha
+            p = total_bad / (total_bad + total_good + eps)
+            r = (bad + a * p) / (bad + good + a)
+            pct_bad  = ((bad + good) * r)         / (total_bad  + eps)
+            pct_good = ((bad + good) * (1.0 - r)) / (total_good + eps)
+        else:
+            pct_bad  = bad  / (total_bad  + eps)
+            pct_good = good / (total_good + eps)
         woe = math.log((pct_bad + eps) / (pct_good + eps))
         iv  = (pct_bad - pct_good) * woe
         return dict(n=n, bad=int(bad), good=int(good),
@@ -577,16 +631,120 @@ class MonotoneWOEBinner:
         """
         计算所有特殊值的独立 WOE 明细，返回 DataFrame。
         每行对应一个特殊值，bin_label 为 '[sv=xxx]' 或 '[Missing]'。
+
+        G19：当 sv_small_policy / sv_woe_smoothing 启用时，按固定顺序决策
+        （方式1 兜底优先，方式2 平滑仅作用于占比达标的保留箱），并额外产出
+        ``sv_policy_applied`` 审计列。
         """
+        governance_on = (
+            self.sv_small_policy != "keep" or self.sv_woe_smoothing != "none"
+        )
+        n_total = total_bad + total_good
         records = []
+        missing_row_idx = None
         for sv, sv_df in sv_groups.items():
             if len(sv_df) == 0:
                 continue
-            stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
+            if not governance_on:
+                stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
+            else:
+                label = _sv_label(sv)
+                is_small = (
+                    self.sv_small_policy != "keep"
+                    and self.sv_min_bin_size > 0.0
+                    and n_total > 0
+                    and len(sv_df) / n_total < self.sv_min_bin_size
+                    # [Missing] is the merge *target*, never a merge source.
+                    and not (self.sv_small_policy == "merge_missing"
+                             and label == "[Missing]")
+                )
+                if is_small and self.sv_small_policy == "neutral":
+                    stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
+                    stats["woe"] = 0.0
+                    stats["iv"] = 0.0
+                    stats["sv_policy_applied"] = "neutral"
+                elif is_small:
+                    # merge_missing：先留经验值，全部 SV 收集完后再合并
+                    stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
+                    stats["sv_policy_applied"] = "pending_merge"
+                else:
+                    stats = self._compute_woe_single_bin(
+                        sv_df, total_bad, total_good, smooth=True
+                    )
+                    stats["sv_policy_applied"] = "keep"
+                if label == "[Missing]":
+                    missing_row_idx = len(records)
             stats["bin_label"] = _sv_label(sv)
             stats["sv"] = sv
             records.append(stats)
-        return pd.DataFrame(records) if records else pd.DataFrame()
+        sv_table = pd.DataFrame(records) if records else pd.DataFrame()
+        if (
+            governance_on
+            and self.sv_small_policy == "merge_missing"
+            and len(sv_table) > 0
+        ):
+            sv_table = self._merge_small_into_missing(
+                sv_table, missing_row_idx, total_bad, total_good
+            )
+        return sv_table
+
+    def _merge_small_into_missing(
+        self, sv_table: pd.DataFrame, missing_row_idx: Optional[int],
+        total_bad: float, total_good: float,
+    ) -> pd.DataFrame:
+        """把 pending_merge 的低占比 SV 行并入 [Missing] 行并重算 WOE。
+
+        被合并行保留自己的行，但其存表 WOE 被改写为 [Missing] 重算后的 WOE，
+        iv 置 0（避免与合并目标重复计入总 IV）。这样 apply_woe 的
+        ``bin_label -> woe`` 映射天然指向缺失箱口径，transform 侧零改动。
+        无 [Missing] 箱时降级为 neutral 并告警。
+
+        n/bad/good 是**转移**而非复制：合并目标加上、来源行清零。否则
+        ``sv_table["n"].sum()`` 会重复计数，进而污染 pct_n/lift 与
+        transform 侧的 fit_missing_rate 漂移基线。
+        """
+        pend = sv_table["sv_policy_applied"] == "pending_merge"
+        if not pend.any():
+            return sv_table
+        if missing_row_idx is None:
+            for i in sv_table.index[pend]:
+                warnings.warn(
+                    f"sv_small_policy='merge_missing' but feature has no [Missing] bin; "
+                    f"falling back to 'neutral' for SV {sv_table.loc[i, 'sv']!r}.",
+                    UserWarning, stacklevel=2,
+                )
+                sv_table.loc[i, "woe"] = 0.0
+                sv_table.loc[i, "iv"] = 0.0
+                sv_table.loc[i, "sv_policy_applied"] = "neutral(fallback)"
+            return sv_table
+        m = missing_row_idx
+        new_n    = int(sv_table.loc[m, "n"])    + int(sv_table.loc[pend, "n"].sum())
+        new_bad  = float(sv_table.loc[m, "bad"])  + float(sv_table.loc[pend, "bad"].sum())
+        new_good = float(sv_table.loc[m, "good"]) + float(sv_table.loc[pend, "good"].sum())
+        pct_bad  = new_bad  / (total_bad  + self.eps)
+        pct_good = new_good / (total_good + self.eps)
+        woe = math.log((pct_bad + self.eps) / (pct_good + self.eps))
+        sv_table.loc[m, "n"] = new_n
+        sv_table.loc[m, "bad"] = int(new_bad)
+        sv_table.loc[m, "good"] = int(new_good)
+        sv_table.loc[m, "bad_rate"] = (
+            new_bad / (new_bad + new_good) if (new_bad + new_good) > 0 else 0.0
+        )
+        sv_table.loc[m, "pct_bad"] = pct_bad
+        sv_table.loc[m, "pct_good"] = pct_good
+        sv_table.loc[m, "woe"] = woe
+        sv_table.loc[m, "iv"] = (pct_bad - pct_good) * woe
+        sv_table.loc[m, "sv_policy_applied"] = "merge_target"
+        sv_table.loc[pend, "n"] = 0
+        sv_table.loc[pend, "bad"] = 0
+        sv_table.loc[pend, "good"] = 0
+        sv_table.loc[pend, "bad_rate"] = 0.0
+        sv_table.loc[pend, "pct_bad"] = 0.0
+        sv_table.loc[pend, "pct_good"] = 0.0
+        sv_table.loc[pend, "woe"] = woe
+        sv_table.loc[pend, "iv"] = 0.0
+        sv_table.loc[pend, "sv_policy_applied"] = "merged_into_missing"
+        return sv_table
 
     @staticmethod
     def _is_monotone(woe_values: np.ndarray) -> bool:
