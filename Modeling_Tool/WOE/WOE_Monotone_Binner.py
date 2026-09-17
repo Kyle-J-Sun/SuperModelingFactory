@@ -564,10 +564,11 @@ class MonotoneWOEBinner:
             sv_policy_applied 决策、不在组内重判占比：keep → 经验值（拟合启用
             平滑时按拟合时的平滑参数平滑）；neutral / neutral(fallback) → 0；
             merged_into_missing → 行并入该组 [Missing]；merge_target → 合并后经验值（不平滑）
-          - 单类箱：组内 bad 或 good 为 0 的箱（普通箱、特殊值箱）不计入，与筛选 IV
-            的 iv_guard 口径一致，避免 eps 把个别空类箱放大成虚高 IV
-        以整份拟合样本为一组时，两部分之和等于 vr["iv"]——前提是拟合样本各箱两类
-        齐全、没有落不进任何箱的取值（如 -inf），且特殊值决策可得：本次 fit 所得，或经
+          - 单类箱：组内 bad 或 good 为 0 且未经平滑的箱（普通箱、merge_target、未启用
+            laplace 的特殊值箱）不计入，与筛选 IV 的 iv_guard 口径一致，避免 eps 把个别
+            空类箱放大成虚高 IV；laplace 平滑过的特殊值箱 WOE 有限，照常计入
+        以整份拟合样本为一组时，两部分之和等于 vr["iv"]——前提是拟合样本中未经平滑的
+        箱两类齐全、没有落不进任何箱的取值（如 -inf），且特殊值决策可得：本次 fit 所得，或经
         get_final_bins → load_woe_bins 的 Format-A attrs 恢复。CSV/Excel 回载（attrs
         丢失）与格式 B 不带决策，特殊值箱一律按 keep 经验值计。
         """
@@ -594,6 +595,10 @@ class MonotoneWOEBinner:
                         else ["keep"] * len(sv_table))
             # load_woe_bins 恢复的拟合平滑参数优先；fit 所得的分箱沿用实例参数
             smoothing = vr.get("sv_smoothing") or {}
+            method = smoothing.get("woe_smoothing")
+            method = self.sv_woe_smoothing if method is None else method
+            alpha = smoothing.get("smoothing_alpha")
+            alpha = self.sv_smoothing_alpha if alpha is None else alpha
             labels = list(sv_table["bin_label"])
             # 多个特殊值渲染成同一标签时取第一个非空子集（与柱图匹配口径一致）
             rows_by_label: Dict[str, pd.DataFrame] = {}
@@ -612,13 +617,14 @@ class MonotoneWOEBinner:
                     rows = pd.concat(parts) if parts else None
                 if rows is None or len(rows) == 0:
                     continue
+                smooth = policy_recorded and policy != "merge_target"
                 stats = self._compute_woe_single_bin(
-                    rows, full_bad, full_good,
-                    smooth=policy_recorded and policy != "merge_target",
-                    woe_smoothing=smoothing.get("woe_smoothing"),
-                    smoothing_alpha=smoothing.get("smoothing_alpha"),
+                    rows, full_bad, full_good, smooth=smooth,
+                    woe_smoothing=method, smoothing_alpha=alpha,
                 )
-                if stats["bad"] > 0 and stats["good"] > 0:
+                # 平滑后的单类箱 WOE 有限、不会被 eps 放大，照常计入
+                smoothed = smooth and method == "laplace" and alpha > 0.0
+                if smoothed or (stats["bad"] > 0 and stats["good"] > 0):
                     iv_sv += stats["iv"]
         return iv_normal, iv_sv
 
@@ -4019,8 +4025,8 @@ class MonotoneWOEBinner:
                                 + 该组 WOE 线（WOE y 轴跨 panel 统一，便于对比）
           - 标题："{feat}:  IV_range={min}−{max}"
           - 各组 IV（图例 / 子图标题）：组内口径——以该组自身 bad/good 为分母，
-            含特殊值 / 缺失箱并沿用拟合时的 SV 治理决策；组内只有单一类别的箱不计入
-            （iv_guard 口径），详见 _group_iv_for_plot
+            含特殊值 / 缺失箱并沿用拟合时的 SV 治理决策；组内只有单一类别且未经 laplace
+            平滑的箱不计入（iv_guard 口径），详见 _group_iv_for_plot
           - 各组 WOE 折线：以全量 bad/good 为基准（对两类齐全的箱 = 组内 WOE + 常数
             ln(该组 bad 占全量 bad 的比例 / 该组 good 占全量 good 的比例)），便于跨组比较水平
 
@@ -4471,7 +4477,7 @@ class MonotoneWOEBinner:
 
         - 柱高 = 该箱样本 / 该组总样本（组内占比），good/bad 堆叠，含特殊值箱
         - WOE 相对全量基准计算；WOE y 轴范围跨全部 panel 统一，便于横向对比
-        - 子图标题中的 IV 为组内口径（见 _group_iv_for_plot；组内单一类别的箱不计入）
+        - 子图标题中的 IV 为组内口径（见 _group_iv_for_plot；组内单一类别且未经平滑的箱不计入）
         - 文件名后缀 _by_{group_name}，与 pooled / clustered 模式一致
         """
         # ── guard（与单图路径一致）──
