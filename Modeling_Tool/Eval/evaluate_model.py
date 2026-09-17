@@ -146,7 +146,11 @@ def summarize_pr(pr_df):
     pr_info: dict
         P-R曲线统计信息字典
     """
-    equalind = np.argmin(abs(pr_df['precision'] - pr_df['recall']))
+    gap = abs(pr_df['precision'] - pr_df['recall'])
+    if not gap.notna().any():
+        # 精确率或召回率全为 NaN（如样本只有一个类别）：平衡点无定义
+        return {'bep_index': np.nan, 'bep_threshold': np.nan, 'bep_precision': np.nan, 'bep_recall': np.nan}
+    equalind = np.argmin(gap)
     pr_info = {
         'bep_index': equalind, 
         'bep_threshold': pr_df['thresholds'][equalind], 
@@ -331,6 +335,10 @@ def summarize_roc(roc_df):
         return {'auc': np.nan, 'ks_index': np.nan, 'ks_threshold': np.nan, 'ks': np.nan}
     
     f = roc_df['tpr'] - roc_df['fpr']
+    if not f.notna().any():
+        # 只有一个类别时 TPR 或 FPR 全为 NaN：AUC、KS 及其阈值都无定义。以前 argmax
+        # 返回 -1 后按标签取 thresholds[-1] 抛 KeyError，整个评估失败
+        return {'auc': np.nan, 'ks_index': np.nan, 'ks_threshold': np.nan, 'ks': np.nan}
     roc_info = {
         'auc': auc(roc_df['fpr'], roc_df['tpr']),
         'ks_index': np.argmax(f),
@@ -388,11 +396,12 @@ def __plot_ks_axes(roc_df, ax):
     ax.plot(X, roc_df['tpr'], color=palette['ClassicBlueRedGrey'][1], label='True Positive Rate', linewidth=2)
 
     roc_info = summarize_roc(roc_df)
-    ks_vector = [
-        [X[roc_info['ks_index']], X[roc_info['ks_index']]], 
-        [roc_df['fpr'][roc_info['ks_index']], roc_df['tpr'][roc_info['ks_index']]],
-        ]
-    ax.plot(ks_vector[0], ks_vector[1], linewidth=4, color=palette['ClassicBlueRedGrey'][2], label='KS')
+    if not pd.isna(roc_info['ks_index']):
+        ks_vector = [
+            [X[roc_info['ks_index']], X[roc_info['ks_index']]],
+            [roc_df['fpr'][roc_info['ks_index']], roc_df['tpr'][roc_info['ks_index']]],
+            ]
+        ax.plot(ks_vector[0], ks_vector[1], linewidth=4, color=palette['ClassicBlueRedGrey'][2], label='KS')
     ax.set_title('Threshold={0:.3f}  KS={1:.3f}'.format(roc_info['ks_threshold'], roc_info['ks']), fontsize=15)
     ax.legend(loc=1, fontsize=12)
 
@@ -1934,8 +1943,9 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
 
         pct_info = summarize_pct(pct_df, ascending=pct_ascending)
     
-    if len(y_true) < 2 or len(np.unique(y_true)) < 2:
-        # 返回默认性能指标（全部为NaN）
+    if len(y_true) < 2:
+        # 有效样本不足两行：返回默认性能指标（全部为NaN）。只有一个类别时照常汇总与出图，
+        # N / avgTrue / avgScore / 分位目标率都有定义，只有 KS / AUC 为 NaN
         return {
             'N': np.nan, 
             'avgTrue': np.nan, 
