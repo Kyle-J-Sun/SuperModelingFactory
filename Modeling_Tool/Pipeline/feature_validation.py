@@ -81,6 +81,8 @@ class FeatureValidationPipelineConfig:
             "sv_smoothing_alpha": 0.0,
         }
     )
+    # unseen_special_policy (monotone only): declared special values absent from
+    # the fit sample — "normal_bin" (legacy) or "neutral" placeholder bins.
     monotone_woe_params: dict[str, Any] = field(
         default_factory=lambda: {
             "n_init_bins": 20,
@@ -90,6 +92,7 @@ class FeatureValidationPipelineConfig:
             "sv_small_policy": "keep",
             "sv_woe_smoothing": "none",
             "sv_smoothing_alpha": 0.0,
+            "unseen_special_policy": "normal_bin",
         }
     )
     categorical_features: list[str] | None = None
@@ -194,6 +197,7 @@ class FeatureValidationPipeline:
         "sv_small_policy",
         "sv_woe_smoothing",
         "sv_smoothing_alpha",
+        "unseen_special_policy",
     }
     _MONOTONE_FIT_KEYS = {"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"}
 
@@ -498,6 +502,7 @@ class FeatureValidationPipeline:
         for key in (
             "categorical_transform_stats_by_target",
             "unseen_category_stats_by_target",
+            "unseen_special_stats_by_target",
         ):
             woe_artifacts[key] = copy.deepcopy(woe_artifacts.get(key, {}))
         return FeatureValidationPipelineResult(
@@ -770,6 +775,9 @@ class FeatureValidationPipeline:
             ),
             "unseen_category_stats_by_target": self._merge_transform_stats(
                 valid, "unseen_category_stats_by_target"
+            ),
+            "unseen_special_stats_by_target": self._merge_transform_stats(
+                valid, "unseen_special_stats_by_target"
             ),
             "batch_metadata": batch_metadata,
         }
@@ -1309,6 +1317,7 @@ class FeatureValidationPipeline:
                 woe_splits = {}
                 categorical_transform_stats_by_split = {}
                 unseen_category_stats_by_split = {}
+                unseen_special_stats_by_split = {}
                 for name, df in splits.items():
                     woe_splits[name] = adapter.transform(df, varlist=fit_features)
                     categorical_transform_stats_by_split[name] = copy.deepcopy(
@@ -1316,6 +1325,9 @@ class FeatureValidationPipeline:
                     )
                     unseen_category_stats_by_split[name] = copy.deepcopy(
                         getattr(engine, "_unseen_category_stats", {})
+                    )
+                    unseen_special_stats_by_split[name] = copy.deepcopy(
+                        getattr(engine, "_unseen_special_stats", {})
                     )
                 self._plot_woe(engine, adapter, train, fit_features, target)
                 by_target[target] = {
@@ -1327,6 +1339,7 @@ class FeatureValidationPipeline:
                         categorical_transform_stats_by_split
                     ),
                     "unseen_category_stats_by_split": unseen_category_stats_by_split,
+                    "unseen_special_stats_by_split": unseen_special_stats_by_split,
                 }
             except Exception as exc:
                 refine_rows.append({"target": target, "step": "fit", "status": "error", "error": repr(exc)})
@@ -1340,6 +1353,10 @@ class FeatureValidationPipeline:
             },
             "unseen_category_stats_by_target": {
                 target: copy.deepcopy(item["unseen_category_stats_by_split"])
+                for target, item in by_target.items()
+            },
+            "unseen_special_stats_by_target": {
+                target: copy.deepcopy(item["unseen_special_stats_by_split"])
                 for target, item in by_target.items()
             },
         }

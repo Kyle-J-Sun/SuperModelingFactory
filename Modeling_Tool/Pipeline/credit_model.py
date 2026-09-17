@@ -28,6 +28,19 @@ from ._common import (
 )
 
 
+def _any_column_has_value(frame: pd.DataFrame, columns: list[str], value: Any) -> bool:
+    """Whether any of ``columns`` in ``frame`` holds ``value`` (dtype-incompatible columns never do)."""
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        try:
+            if bool(frame[column].eq(value).any()):
+                return True
+        except TypeError:
+            continue
+    return False
+
+
 @dataclass
 class CreditModelPipelineConfig:
     output_dir: str = "output"
@@ -76,6 +89,10 @@ class CreditModelPipelineConfig:
             "sv_smoothing_alpha": 0.0,
         }
     )
+    # unseen_special_policy (monotone only): declared special values absent from
+    # the fit sample — "normal_bin" (legacy) or "neutral" placeholder bins.
+    # Without an explicit "special_values" key the monotone self-fit declares the
+    # legacy -999999 sentinel only when the WOE fit sample contains it.
     monotone_woe_params: dict[str, Any] = field(
         default_factory=lambda: {
             "n_init_bins": 20,
@@ -85,6 +102,7 @@ class CreditModelPipelineConfig:
             "sv_small_policy": "keep",
             "sv_woe_smoothing": "none",
             "sv_smoothing_alpha": 0.0,
+            "unseen_special_policy": "normal_bin",
         }
     )
 
@@ -901,14 +919,15 @@ class CreditModelPipeline:
         )
 
         if cfg.woe_engine.lower() == "monotone":
-            params = merge_dict(
-                {
-                    "feature_cols": feature_cols,
-                    "target_col": cfg.target_col,
-                    "special_values": [-999999],
-                },
-                cfg.monotone_woe_params,
-            )
+            defaults = {"feature_cols": feature_cols, "target_col": cfg.target_col}
+            if "special_values" not in cfg.monotone_woe_params:
+                # 默认哨兵 -999999 只在拟合样本里真的出现时才声明：没出现时声明与否
+                # 分箱、打分完全一致，声明只会触发"声明了但没出现"告警（unseen_special_policy=
+                # 'neutral' 下还会给每个特征加占位箱）。显式传入的 special_values 不受影响。
+                defaults["special_values"] = (
+                    [-999999] if _any_column_has_value(fit_ins, feature_cols, -999999) else []
+                )
+            params = merge_dict(defaults, cfg.monotone_woe_params)
             # fit()-only kwargs must not reach MonotoneWOEBinner.__init__ —
             # n_jobs / chi2_p / chi2_init_size in monotone_woe_params used to
             # raise TypeError on this self-fit path (the screening-side

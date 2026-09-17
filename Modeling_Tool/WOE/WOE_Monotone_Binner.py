@@ -70,7 +70,18 @@ warnings.filterwarnings("ignore")
 _SPECIAL_BIN_PREFIX = "__special__"   # 内部用于标记特殊箱的前缀
 _CATE_GROUP_SEP = " | "               # refine_cate 合并多个类别后，bin_label 的成员分隔符
 # 拟合后 sv_table["sv_policy_applied"] 的合法取值（pending_merge 只在拟合中途出现）
-_SV_POLICIES = frozenset({"keep", "neutral", "neutral(fallback)", "merged_into_missing", "merge_target"})
+_SV_POLICIES = frozenset({
+    "keep", "neutral", "neutral(fallback)", "merged_into_missing", "merge_target", "unseen_at_fit",
+})
+
+def _is_numeric_special(value) -> bool:
+    """声明的特殊值是否是数值（int / float / numpy 数值，排除 bool 与 NaN）。"""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        return False
+    return not math.isnan(float(value))
+
 
 def _sv_label(sv) -> str:
     """将特殊值转为分箱标签，nan → '[Missing]'，其余 → '[sv=xxx]'"""
@@ -259,6 +270,14 @@ class MonotoneWOEBinner:
     sv_smoothing_alpha : 平滑强度 α（伪计数），默认 0.0（数值等价旧 WOE）。
                          方式1 优先：低占比箱走兜底后**不再**平滑；平滑只作用于
                          占比达标（或 policy='keep'）的 SV 箱。
+    unseen_special_policy : 声明了、但拟合样本里一行都没有的数值特殊值如何处理。
+                         'normal_bin'（默认，旧行为）：不建箱，apply_woe 按普通数值
+                         归箱（如 -1 落入最低箱），by-group 图与组 IV 同口径；
+                         'neutral'：拟合时追加占位特殊值箱（n=0、woe=missing_woe、
+                         iv=0、sv_policy_applied='unseen_at_fit'），打分 / 筛选 / 图表
+                         都把这些取值当特殊值，组 IV 不计入。NaN 与类别特征不适用。
+                         两种策略下 fit 与 apply_woe 都会记录（normal_bin 时 fit 告警）
+                         这类取值，见 _unseen_special_at_fit / _unseen_special_stats。
 
     fit() 参数（传入 fit() 方法，不在 __init__ 中设置）
     -------------------------------------------------------
@@ -297,6 +316,7 @@ class MonotoneWOEBinner:
         sv_small_policy: str = "keep",
         sv_woe_smoothing: str = "none",
         sv_smoothing_alpha: float = 0.0,
+        unseen_special_policy: str = "normal_bin",
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col
@@ -381,6 +401,16 @@ class MonotoneWOEBinner:
             raise ValueError(
                 f"sv_smoothing_alpha must be >= 0.0; got {sv_smoothing_alpha}"
             )
+        if unseen_special_policy not in {"normal_bin", "neutral"}:
+            raise ValueError(
+                f"unseen_special_policy must be one of ['normal_bin', 'neutral']; "
+                f"got {unseen_special_policy!r}"
+            )
+        self.unseen_special_policy = unseen_special_policy
+        # {feat: [declared numeric special values with no rows in the fit sample]}
+        self._unseen_special_at_fit: Dict[str, list] = {}
+        # apply_woe: per-feature rows carrying such values in the latest call
+        self._unseen_special_stats: Dict[str, dict] = {}
         self.min_bad_count = min_bad_count
         self.min_good_count = min_good_count
         self.small_bin_policy = small_bin_policy
@@ -526,9 +556,52 @@ class MonotoneWOEBinner:
                     m[cv] = int(r["bin"])
         return m
 
+    @staticmethod
+    def _sv_table_entries(sv_table: pd.DataFrame) -> list:
+        """按 apply_woe 的口径解析特殊值箱标签，返回 [(label, key, is_placeholder)]。
+
+        key：'[Missing]' → None；'[sv=x]' → float(x)，无法转数值时为原字符串。
+        is_placeholder：sv_policy_applied == 'unseen_at_fit'。
+        """
+        import re
+
+        if len(sv_table) == 0 or "bin_label" not in sv_table.columns:
+            return []
+        policies = (
+            list(sv_table["sv_policy_applied"])
+            if "sv_policy_applied" in sv_table.columns
+            else [None] * len(sv_table)
+        )
+        entries = []
+        for label, policy in zip(sv_table["bin_label"], policies):
+            label = str(label)
+            if label == "[Missing]":
+                key: Any = None
+            else:
+                m = re.match(r"\[sv=(.*)\]$", label)
+                if not m:
+                    continue
+                try:
+                    key = float(m.group(1))
+                except (ValueError, OverflowError):
+                    key = m.group(1)
+            entries.append((label, key, policy == "unseen_at_fit"))
+        return entries
+
+    @staticmethod
+    def _series_eq(series: pd.Series, value) -> np.ndarray:
+        """与 apply_woe 相同的取值匹配（dtype 不兼容时退回 object 比较）。"""
+        try:
+            return series.eq(value).to_numpy(dtype=bool, na_value=False)
+        except TypeError:
+            return series.astype(object).eq(value).to_numpy(dtype=bool, na_value=False)
+
     def _split_special_for_plot(self, df: pd.DataFrame, feat: str, vr: Dict):
         """分组绘图用的特殊值拆分。
-        数值特征：沿用 _split_special（按 special_values 拆分）。
+        数值特征：以拟合表为准（与 apply_woe 同口径）——只把表里有箱（含 unseen_at_fit
+                  占位箱）的特殊值拆出，按标签解析出的取值匹配；表里没有箱的声明特殊值
+                  apply_woe 会按普通数值归箱，这里同样留在普通行里。NaN 永远不进普通箱，
+                  声明了 NaN 或表里有 [Missing] 箱时拆为 [Missing]。
         类别特征：仅把 NaN 拆为 [Missing]（与 _categorical_fit_one 口径一致），
                   数值不视为特殊值。
         """
@@ -538,7 +611,114 @@ class MonotoneWOEBinner:
             if bool(nan_mask.any()):
                 sv_groups[float("nan")] = df[nan_mask]
             return df[~nan_mask], sv_groups
-        return self._split_special(df, feat)
+        entries = self._sv_table_entries(vr.get("sv_table", pd.DataFrame()))
+        values = df[feat]
+        nan_arr = values.isna().to_numpy()
+        normal_arr = ~nan_arr
+        sv_groups = {}
+        if self._sv_has_nan or any(key is None for _, key, _ in entries):
+            sv_groups[float("nan")] = df[nan_arr]
+        for label, key, _ in entries:
+            # 以标签原文作键，保证 _sv_label(键) 与表里的 bin_label 一致
+            text = label[len("[sv="):-1]
+            if key is None or text in sv_groups:
+                continue
+            # 每行只归入第一个匹配的箱：表里两行解析成同一数值（如格式 B 按 [-1, -1.0]
+            # 造出的两行）时不重复计数
+            sv_arr = self._series_eq(values, key) & normal_arr
+            sv_groups[text] = df[sv_arr]
+            normal_arr &= ~sv_arr
+        return df[normal_arr], sv_groups
+
+    def _declared_numeric_specials(self) -> list:
+        """声明的数值特殊值（排除 NaN / bool / 非数值），按数值去重，保留首次出现的写法。"""
+        out: list = []
+        for sv in self._sv_numeric:
+            if _is_numeric_special(sv) and not any(float(sv) == float(v) for v in out):
+                out.append(sv)
+        return out
+
+    def _record_unseen_special_values(self) -> None:
+        """fit 末尾调用：记录声明了、但拟合样本里一行都没有的数值特殊值。
+
+        以拟合表为准按数值比较（-1 与 -1.0 视为同一取值）。normal_bin 下整次 fit 汇总
+        成一条告警（warnings + logger.warning）；neutral 下这些取值已有 unseen_at_fit
+        占位箱，只记录不告警。
+        """
+        unseen: Dict[str, list] = {}
+        declared = self._declared_numeric_specials()
+        for feat, vr in self._results.items():
+            if vr.get("is_categorical") or not declared:
+                continue
+            observed = {
+                key for _, key, is_placeholder in self._sv_table_entries(vr.get("sv_table", pd.DataFrame()))
+                if isinstance(key, float) and not is_placeholder
+            }
+            values = [sv for sv in declared if float(sv) not in observed]
+            if values:
+                unseen[feat] = values
+        self._unseen_special_at_fit = unseen
+        if unseen and getattr(self, "unseen_special_policy", "normal_bin") == "normal_bin":
+            pairs = [(feat, sv) for feat, values in unseen.items() for sv in values]
+            preview = ", ".join(f"{feat}={sv!r}" for feat, sv in pairs[:5])
+            more = "..." if len(pairs) > 5 else ""
+            message = (
+                f"{len(pairs)} declared special value(s) never occur in the fit sample "
+                f"across {len(unseen)} feature(s) (e.g. {preview}{more}). With "
+                f"unseen_special_policy='normal_bin' apply_woe bins them as ordinary numbers "
+                f"(each lands in whichever normal bin its value falls into); pass "
+                f"unseen_special_policy='neutral' to score them with missing_woe instead. "
+                f"Details: _unseen_special_at_fit."
+            )
+            logger.warning(message)
+            warnings.warn(message, UserWarning, stacklevel=3)
+
+    def _unseen_special_hits(self, series: pd.Series, sv_table: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """apply_woe 用：数据中出现、但拟合样本里没有真实行的数值特殊值。
+
+        以拟合表为准按数值比较：unseen_at_fit 占位箱 → 'neutral'（得占位箱 WOE）；
+        声明了但表里没有箱 → 'normal_bin'（按普通数值归箱）。无命中时返回 None。
+        取值按本实例声明的写法报告，未声明时用表里解析出的数值。
+        """
+        entries = self._sv_table_entries(sv_table)
+        table_keys = {key for _, key, _ in entries if isinstance(key, float)}
+        woe_by_label: Dict[str, float] = {}
+        if entries and "woe" in sv_table.columns:
+            for label, woe in zip(sv_table["bin_label"], sv_table["woe"]):
+                woe_by_label.setdefault(str(label), float(woe))
+        placeholder_woe: Dict[float, float] = {}
+        for label, key, is_placeholder in entries:
+            if (is_placeholder and isinstance(key, float) and key not in placeholder_woe
+                    and label in woe_by_label):
+                placeholder_woe[key] = woe_by_label[label]
+        declared = self._declared_numeric_specials()
+        spelling = {float(sv): sv for sv in declared}
+        candidates = [(key, "neutral") for key in placeholder_woe]
+        candidates += [(sv, "normal_bin") for sv in declared if float(sv) not in table_keys]
+        if not candidates:
+            return None
+
+        # 逐个取值比较即可：Series.isin 预筛在大表上反而比逐值 eq 慢一个数量级
+        hit_values: list = []
+        handled = set()
+        neutral_woe = set()
+        hit_mask = np.zeros(len(series), dtype=bool)
+        for value, how in candidates:
+            mask = self._series_eq(series, value)
+            if mask.any():
+                hit_values.append(spelling.get(float(value), value))
+                handled.add(how)
+                hit_mask |= mask
+                if how == "neutral":
+                    neutral_woe.add(placeholder_woe[value])
+        if not hit_values:
+            return None
+        return {
+            "values": hit_values,
+            "mask": hit_mask,
+            "handled_as": handled.pop() if len(handled) == 1 else "mixed",
+            "neutral_woe": sorted(neutral_woe),
+        }
 
     def _assign_normal_bins(self, sub: pd.DataFrame, feat: str, vr: Dict,
                             fitted_edges: list) -> pd.Series:
@@ -609,7 +789,7 @@ class MonotoneWOEBinner:
             merged_rows = [rows_by_label[lb] for lb, policy in zip(labels, policies)
                            if policy == "merged_into_missing" and lb in rows_by_label]
             for lb, policy in zip(labels, policies):
-                if policy in ("neutral", "neutral(fallback)", "merged_into_missing"):
+                if policy in ("neutral", "neutral(fallback)", "merged_into_missing", "unseen_at_fit"):
                     continue
                 rows = rows_by_label.get(lb)
                 if policy == "merge_target":
@@ -715,6 +895,10 @@ class MonotoneWOEBinner:
         G19：当 sv_small_policy / sv_woe_smoothing 启用时，按固定顺序决策
         （方式1 兜底优先，方式2 平滑仅作用于占比达标的保留箱），并额外产出
         ``sv_policy_applied`` 审计列。
+
+        unseen_special_policy='neutral' 时，样本数为 0 的声明数值特殊值在全部治理
+        决策之后追加占位行（n=0、woe=missing_woe、iv=0、
+        sv_policy_applied='unseen_at_fit'），不参与小占比判断 / 合并 / 平滑。
         """
         governance_on = (
             self.sv_small_policy != "keep" or self.sv_woe_smoothing != "none"
@@ -722,8 +906,14 @@ class MonotoneWOEBinner:
         n_total = total_bad + total_good
         records = []
         missing_row_idx = None
+        unseen_values = []
         for sv, sv_df in sv_groups.items():
             if len(sv_df) == 0:
+                if (
+                    getattr(self, "unseen_special_policy", "normal_bin") == "neutral"
+                    and _is_numeric_special(sv)
+                ):
+                    unseen_values.append(sv)
                 continue
             if not governance_on:
                 stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
@@ -766,6 +956,26 @@ class MonotoneWOEBinner:
             sv_table = self._merge_small_into_missing(
                 sv_table, missing_row_idx, total_bad, total_good
             )
+        # 占位箱按数值去重：与真实行、与其它占位箱都不重复（-1 与 -1.0 视为同一取值）
+        taken = {key for _, key, _ in self._sv_table_entries(sv_table) if isinstance(key, float)}
+        placeholder_svs = []
+        for sv in unseen_values:
+            if float(sv) not in taken:
+                taken.add(float(sv))
+                placeholder_svs.append(sv)
+        if placeholder_svs:
+            placeholders = pd.DataFrame([
+                dict(n=0, bad=0, good=0, bad_rate=0.0, pct_bad=0.0, pct_good=0.0,
+                     woe=float(self.missing_woe), iv=0.0, bin_label=_sv_label(sv), sv=sv,
+                     sv_policy_applied="unseen_at_fit")
+                for sv in placeholder_svs
+            ])
+            if len(sv_table) == 0:
+                sv_table = placeholders
+            else:
+                if "sv_policy_applied" not in sv_table.columns:
+                    sv_table = sv_table.assign(sv_policy_applied="keep")
+                sv_table = pd.concat([sv_table, placeholders], ignore_index=True)
         return sv_table
 
     def _merge_small_into_missing(
@@ -1610,6 +1820,8 @@ class MonotoneWOEBinner:
                     print(tb)
 
         self._is_fitted = True
+        # 放在 _is_fitted 之后：告警被设为 error 时 fit 抛错，但分箱结果仍处于已拟合状态
+        self._record_unseen_special_values()
         n_mono = sum(1 for v in self._results.values() if v["is_monotonic"])
         method = "greedy+chi2" if chi2_binning else "greedy"
         logger.info(f"[MonotoneWOEBinner] 拟合完成 ({method}): "
@@ -2403,7 +2615,8 @@ class MonotoneWOEBinner:
         return hashlib.sha256(pickle.dumps(payload, protocol=4)).hexdigest()
 
     def _format_a_sv_decisions(self, vr: Dict) -> Optional[Dict[str, Any]]:
-        """拟合时的 SV 治理决策（逐行 sv_policy_applied + 平滑参数）；未启用 SV 治理时为 None。"""
+        """拟合时的 SV 决策（逐行 sv_policy_applied + 平滑参数）；表里没有 sv_policy_applied 列
+        （未启用 SV 治理、也没有 unseen_at_fit 占位箱）时为 None。"""
         sv_table = vr.get("sv_table", pd.DataFrame())
         if len(sv_table) == 0 or "sv_policy_applied" not in sv_table.columns:
             return None
@@ -2643,7 +2856,9 @@ class MonotoneWOEBinner:
                 format_a_meta
             )
             # SV 治理决策单独存放、单独校验：不进 metadata_digest，旧版本加载器
-            # 对新键无感知且仍能验证原有字段；未启用 SV 治理时不写，attrs 与旧版一致
+            # 对新键无感知且仍能验证原有字段；表里没有 sv_policy_applied 列（未启用 SV 治理
+            # 且无 unseen_at_fit 占位箱）时不写，attrs 与旧版一致。含 unseen_at_fit 的决策
+            # 会被 0.8.1 加载器整体拒收（其合法取值表里没有该值），打分不受影响
             sv_decisions = self._format_a_sv_decisions(vr)
             if sv_decisions is not None:
                 format_a_meta["sv_decisions"] = sv_decisions
@@ -2729,6 +2944,7 @@ class MonotoneWOEBinner:
         self (支持链式调用)
         """
         self._results = {}
+        self._unseen_special_at_fit = {}
 
         for feat, payload in bins_dict.items():
 
@@ -3307,9 +3523,11 @@ class MonotoneWOEBinner:
         将 data 中的特征原始数值转换为 WOE 值，添加 *_woe 列。
 
         特殊值处理：
-          - 若某值在 special_values 中，直接查 sv_table 获取对应 WOE
+          - 若某值在 sv_table 中有箱，直接查 sv_table 获取对应 WOE（含
+            unseen_special_policy='neutral' 的 unseen_at_fit 占位箱 → missing_woe）
           - NaN：若 nan 在 special_values 中则查 sv_table；否则填 missing_woe
-          - 普通值：按 edges 做 pd.cut，然后查 woe_table
+          - 普通值：按 edges 做 pd.cut，然后查 woe_table；声明了、但拟合样本里没出现
+            且表里无箱的特殊值同样按普通数值归箱（normal_bin），并记录 / 告警
 
         类别特征(cate_feats)处理：
           - 按取值直接查表取 WOE（不做区间切分）
@@ -3353,6 +3571,18 @@ class MonotoneWOEBinner:
             transform missing rate ≥ 50% that exceeds the fit-time missing
             rate by ≥ 30pp (upstream column likely broken/renamed/re-typed).
             Reset at the start of every ``apply_woe`` call.
+        _unseen_special_stats : Dict[str, dict]
+            Numeric features whose transform data carries declared special
+            values that never occurred in the fit sample:
+            ``{"values", "affected_rows", "affected_frac", "total_rows",
+            "handled_as"}`` with ``handled_as`` ``"normal_bin"`` (binned as
+            ordinary numbers), ``"neutral"`` (unseen_at_fit placeholder →
+            missing_woe) or ``"mixed"``. Recorded even in silent mode; one
+            RuntimeWarning plus ``logger.warning`` per feature unless
+            ``unseen_category_policy="silent"``. Mapped WOE values are
+            unaffected. Reset at the start of every call, so it describes the
+            latest call only (adapters that transform in feature blocks leave
+            just the last block's features).
 
         Returns
         -------
@@ -3383,6 +3613,7 @@ class MonotoneWOEBinner:
         # Reset per-call so callers can inspect stats from the *latest* run only.
         self._unseen_category_stats = {}
         self._categorical_transform_stats = {}
+        self._unseen_special_stats = {}
 
         selected_features = (
             list(self._results)
@@ -3420,10 +3651,16 @@ class MonotoneWOEBinner:
                         if m:
                             raw = m.group(1)
                             try:
-                                sv_woe_map[float(raw)] = sv_woe_val
-                                sv_woe_map[int(float(raw))] = sv_woe_val
+                                numeric = float(raw)
                             except (ValueError, OverflowError):
                                 sv_woe_map[raw] = sv_woe_val
+                            else:
+                                # 只用 float 键：整数值的 int 与 float 本就是同一个 dict 键；
+                                # 0.8.1 及之前额外加 int(float) 键，会把非整数特殊值截断成
+                                # 普通取值（如 0.5 → 0）。非有限值照旧保留原文键
+                                sv_woe_map[numeric] = sv_woe_val
+                                if not math.isfinite(numeric):
+                                    sv_woe_map[raw] = sv_woe_val
 
             # ── 类别特征：按取值直接查 WOE，不做区间切分 ──
             if vr.get("is_categorical"):
@@ -3602,6 +3839,39 @@ class MonotoneWOEBinner:
                 if mask.any():
                     out[mask] = float(sv_woe)
                     special_mask |= mask
+
+            # 声明了、但拟合样本里没出现的数值特殊值：只记录 / 告警，映射结果不变
+            unseen_hits = self._unseen_special_hits(series, sv_table)
+            if unseen_hits is not None:
+                n_rows = int(len(series))
+                affected_rows = int(unseen_hits["mask"].sum())
+                handled_as = unseen_hits["handled_as"]
+                self._unseen_special_stats[feat] = {
+                    "values": unseen_hits["values"],
+                    "affected_rows": affected_rows,
+                    "affected_frac": affected_rows / max(n_rows, 1),
+                    "total_rows": n_rows,
+                    "handled_as": handled_as,
+                }
+                if unseen_category_policy != "silent":
+                    placeholder_woe = ", ".join(f"{w:g}" for w in unseen_hits["neutral_woe"])
+                    outcome = {
+                        # 按拟合表的实际处理描述，不引用本实例的参数（加载的表可能来自另一种策略）
+                        "normal_bin": "they were binned as ordinary numbers "
+                                      "(the fitted table has no special bin for them)",
+                        "neutral": f"they were scored with the placeholder WOE {placeholder_woe} "
+                                   f"(unseen_at_fit bin)",
+                        "mixed": "some were binned as ordinary numbers and some scored "
+                                 f"with the placeholder WOE {placeholder_woe}",
+                    }[handled_as]
+                    message = (
+                        f"apply_woe: feature {feat!r} has {affected_rows}/{n_rows} rows "
+                        f"({affected_rows / max(n_rows, 1):.1%}) with special value(s) "
+                        f"{unseen_hits['values']} that never occurred in the fit sample; "
+                        f"{outcome}."
+                    )
+                    logger.warning(message)
+                    warnings.warn(message, RuntimeWarning, stacklevel=2)
 
             normal_mask = ~(is_missing | special_mask)
             if normal_mask.any():
