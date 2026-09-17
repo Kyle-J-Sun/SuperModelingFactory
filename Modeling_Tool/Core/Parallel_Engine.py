@@ -189,9 +189,15 @@ class ParallelApplyEngine:
         func_args: tuple[Any, ...],
         func_kwargs: dict[str, Any],
     ) -> None:
+        # joblib < 1.6 vendors cloudpickle; joblib >= 1.6 dropped the copy and depends on
+        # the cloudpickle package. Resolve the serializer outside the check below so an
+        # import problem is never reported as a non-serializable callable.
         try:
             from joblib.externals import cloudpickle
+        except ImportError:
+            import cloudpickle
 
+        try:
             cloudpickle.dumps((func, func_args, func_kwargs))
         except Exception as exc:
             raise TypeError(
