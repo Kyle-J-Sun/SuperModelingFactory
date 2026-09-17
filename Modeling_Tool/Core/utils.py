@@ -1696,7 +1696,9 @@ def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
     if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
         bad_values = data[bad_pct]
         good_values = data[good_pct]
-        woe = np.log(bad_values / good_values)
+        # 某一类占比为 0 的箱 WOE 为 ±inf（历来如此，调用方自行处理），不为此告警
+        with np.errstate(divide="ignore"):
+            woe = np.log(bad_values / good_values)
         iv = (bad_values - good_values) * woe
     else:
         woe = 0 if fillwoe else np.nan

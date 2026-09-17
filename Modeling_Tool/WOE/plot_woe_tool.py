@@ -192,14 +192,14 @@ def plot_woe_group(woe_grp_df, var_rename = None, to_show=True, save_dir=None):
         结果图片存放的文件夹
     """
     var_name = woe_grp_df["Var_Name"].iloc[0]
-    summary_df = woe_grp_df.groupby(["Group_Name"]).agg({"iv": sum, "n": sum, "n1": sum})
+    summary_df = woe_grp_df.groupby(["Group_Name"]).agg({"iv": "sum", "n": "sum", "n1": "sum"})
     summary_df["tr"] = summary_df["n1"] / summary_df["n"]
 
     iv_dict = {x: round(y, 5) for x, y in zip(summary_df.index, summary_df["iv"])}
     tr_dict = {x: round(y, 5) for x, y in zip(summary_df.index, summary_df["tr"])}
     N_dict = {x: y for x, y in zip(summary_df.index, summary_df["n"])}
     X = woe_grp_df["Bin_No"].drop_duplicates()
-    Xticks = woe_grp_df.groupby(["Bin_No"]).agg({"Bin_Value": max})["Bin_Value"]
+    Xticks = woe_grp_df.groupby(["Bin_No"]).agg({"Bin_Value": "max"})["Bin_Value"]
 
     gs = list(set(woe_grp_df["Group_Name"]))
     gs.sort()

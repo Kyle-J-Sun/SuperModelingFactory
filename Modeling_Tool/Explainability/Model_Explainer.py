@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import importlib.metadata
+import inspect
 import sys
 import warnings
 
@@ -517,13 +518,20 @@ class ModelExplainer:
             table["importance_pct"] = table["mean_abs_shap"] / total if total else 0.0
         return table
 
-    def summary_plot(self, X=None, max_display=20, plot_type="dot", show=True, save_path=None):
-        """SHAP summary (beeswarm / bar) plot."""
+    def summary_plot(self, X=None, max_display=20, plot_type="dot", show=True, save_path=None, random_state=0):
+        """SHAP summary (beeswarm / bar) plot.
+
+        ``random_state`` seeds the point jitter through shap's ``rng`` argument
+        (shap >= 0.47), so the plot no longer depends on NumPy's global RNG;
+        older shap versions ignore it.
+        """
         shap = _lazy_shap()
         import matplotlib.pyplot as plt
 
         values, X_used = self._ensure_values(X)
         kwargs = {"max_display": max_display, "plot_type": plot_type, "show": False}
+        if "rng" in inspect.signature(shap.summary_plot).parameters:
+            kwargs["rng"] = np.random.default_rng(random_state)
         if not isinstance(X_used, pd.DataFrame) and self.feature_names is not None:
             kwargs["feature_names"] = self.feature_names
         shap.summary_plot(values, X_used, **kwargs)

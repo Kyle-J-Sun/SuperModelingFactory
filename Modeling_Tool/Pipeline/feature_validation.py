@@ -13,6 +13,8 @@ import pandas as pd
 
 _logger = logging.getLogger(__name__)
 
+from Modeling_Tool._utils.frames import concat_non_empty
+
 from ._common import (
     apply_woe_fit_query,
     as_list,
@@ -1193,7 +1195,10 @@ class FeatureValidationPipeline:
             item = df.copy()
             item["_smf_split"] = name
             frames.append(item)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        # The empty OOT placeholder (object columns) must not take part in dtype
+        # resolution: it turned int features into object, which the distribution
+        # summary then reported as categorical.
+        return concat_non_empty(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def _feature_source_frame(self, new_features: list[str], incumbent_features: list[str]) -> pd.DataFrame:
         return pd.DataFrame(
@@ -1226,7 +1231,12 @@ class FeatureValidationPipeline:
         q = self.config.distribution_params.get("q")
         spec_missing_value = self.config.distribution_params.get("spec_missing_value")
         feature_block_size = self.config.distribution_params.get("feature_block_size", 128)
-        numeric_features = [col for col in features if pd.api.types.is_numeric_dtype(data[col])]
+        # bool flags go to the categorical table: describe() drops bool columns
+        # mixed with numeric ones, so they used to vanish from the report.
+        numeric_features = [
+            col for col in features
+            if pd.api.types.is_numeric_dtype(data[col]) and not pd.api.types.is_bool_dtype(data[col])
+        ]
         categorical_features = [col for col in features if col not in numeric_features]
         tables: dict[str, pd.DataFrame] = {}
         for name, group_cols in self._group_specs(include_global=True).items():

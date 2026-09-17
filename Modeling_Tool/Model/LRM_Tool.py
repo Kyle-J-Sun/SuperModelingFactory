@@ -112,6 +112,19 @@ def lr_varimp(model):
     return varimp_df.sort_values('importance', ascending=False).reset_index(drop=True)
 
 
+def _predict_positive_proba(model, x_arr):
+    """P(y=1) for a design matrix given as a numpy array.
+
+    A model fitted on a DataFrame gets the same column names back (values are
+    taken by position, so predictions are unchanged); this avoids sklearn's
+    "X does not have valid feature names" warning.
+    """
+    names_in = getattr(model, 'feature_names_in_', None)
+    if names_in is not None and x_arr.ndim == 2 and x_arr.shape[1] == len(names_in):
+        x_arr = pd.DataFrame(x_arr, columns=names_in)
+    return model.predict_proba(x_arr)[:, 1]
+
+
 def fast_lr_pvalues(model, x, feature_names):
     """Coefficient p-values for a fitted sklearn LogisticRegression via the
     observed Fisher information — same formula as get_lr_statsmodel_summary
@@ -121,7 +134,7 @@ def fast_lr_pvalues(model, x, feature_names):
     from scipy import stats
 
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
-    prob = model.predict_proba(x_arr)[:, 1]
+    prob = _predict_positive_proba(model, x_arr)
     w = prob * (1 - prob)
     X_design = np.hstack([np.ones((x_arr.shape[0], 1)), x_arr])
     fisher = X_design.T @ (X_design * w[:, None])
@@ -174,7 +187,7 @@ def get_lr_statsmodel_summary(model, x, y, feature_names=None):
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
     y_arr = y.values if hasattr(y, 'values') else np.array(y)
 
-    prob = model.predict_proba(x_arr)[:, 1]
+    prob = _predict_positive_proba(model, x_arr)
     w = prob * (1 - prob)
     W = np.diag(w)
     X_design = np.hstack([np.ones((x_arr.shape[0], 1)), x_arr])
@@ -214,7 +227,7 @@ def _compute_log_likelihood(model, x, y, sample_weight=None):
     y_arr = y.values if hasattr(y, 'values') else np.array(y)
     weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
 
-    prob = model.predict_proba(x_arr)[:, 1]
+    prob = _predict_positive_proba(model, x_arr)
     prob = np.clip(prob, 1e-15, 1 - 1e-15)
     point_ll = y_arr * np.log(prob) + (1 - y_arr) * np.log(1 - prob)
     if weight is None:
@@ -434,16 +447,19 @@ class FeatureSelectionAnalyzer:
 
         # Preserve the exact legacy call path for no weight and every
         # constant-weight vector.
-        if weight is None or bool(np.all(weight == weight[0])):
-            vif_values = [variance_inflation_factor(x, i) for i in range(x.shape[1])]
-        else:
-            from statsmodels.regression.linear_model import WLS
+        # A perfectly collinear feature has R² = 1 and VIF = inf; that is the
+        # expected result, not a floating-point problem worth a warning.
+        with np.errstate(divide="ignore"):
+            if weight is None or bool(np.all(weight == weight[0])):
+                vif_values = [variance_inflation_factor(x, i) for i in range(x.shape[1])]
+            else:
+                from statsmodels.regression.linear_model import WLS
 
-            vif_values = []
-            for i in range(x.shape[1]):
-                others = np.arange(x.shape[1]) != i
-                r_squared = WLS(x[:, i], x[:, others], weights=weight).fit().rsquared
-                vif_values.append(1.0 / (1.0 - r_squared))
+                vif_values = []
+                for i in range(x.shape[1]):
+                    others = np.arange(x.shape[1]) != i
+                    r_squared = WLS(x[:, i], x[:, others], weights=weight).fit().rsquared
+                    vif_values.append(1.0 / (1.0 - r_squared))
         vif_data = pd.DataFrame({
             'feature': work.columns,
             'VIF': vif_values,

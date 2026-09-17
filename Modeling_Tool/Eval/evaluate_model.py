@@ -596,6 +596,36 @@ def _plot_weighted_kde_line(values, weights, ax, color, label):
         ax.plot(centers, density, color=color, linewidth=1.5, label=label)
 
 
+def _non_nan_1d(values):
+    """distplot 的输入处理：转 1 维 float 数组并去掉 NaN（inf 保留）。"""
+    values = np.asarray(values, dtype=float)
+    if values.ndim > 1:
+        values = values.squeeze()
+    return values[~np.isnan(values)]
+
+
+def _anchor_like_distplot(values, ax):
+    """distplot 未指定 color 时先画再删一个 (均值, 0) 点取默认颜色；这个点仍计入坐标轴
+    数据范围，使纵轴包含 0。照做一遍，保证只有 KDE 曲线的图（多模型、近似常数分数）
+    坐标范围不变。"""
+    anchor, = ax.plot(values.mean() if values.size else np.nan, 0)
+    anchor.remove()
+
+
+def _plot_score_hist(values, bins, ax, **hist_kws):
+    """等价于已弃用的 ``sns.distplot(values, bins=bins, hist=True, kde=False, hist_kws=...)``。"""
+    values = _non_nan_1d(values)
+    _anchor_like_distplot(values, ax)
+    ax.hist(values, bins, orientation="vertical", **hist_kws)
+
+
+def _plot_score_kde(values, bw_method, ax, color, label):
+    """等价于已弃用的 ``sns.distplot(values, hist=False, kde=True, kde_kws={'bw': ...})``。"""
+    values = _non_nan_1d(values)
+    _anchor_like_distplot(values, ax)
+    sns.kdeplot(x=values, ax=ax, color=color, label=label, bw_method=bw_method)
+
+
 def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts, sample_weight=None):
     """在axes上绘制单个kde图.
     
@@ -615,12 +645,12 @@ def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts, sample_weight=N
     __plot_kde_axes_base(ax, fontdicts)
 
     if sample_weight is None:
-        sns.distplot(y_score, bins=bins, hist=True, kde=False, ax=ax,
-                     hist_kws={'density': True, 'rwidth': 0.95, 'color': palette['ClassicBlueRedGrey'][2], 'alpha': 1, 'label': 'Total'}, )
-        sns.distplot(y_score[np.where(y_true==0)], bins=bins, hist=False, kde=True,
-                     kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][0], 'label': 'Neg KDE'}, )
-        sns.distplot(y_score[np.where(y_true==1)], hist=False, kde=True,
-                     kde_kws={'bw': 1/bins/2, 'color': palette['ClassicBlueRedGrey'][1], 'label': 'Pos KDE'}, )
+        _plot_score_hist(y_score, bins, ax, density=True, rwidth=0.95,
+                         color=palette['ClassicBlueRedGrey'][2], alpha=1, label='Total')
+        _plot_score_kde(y_score[np.where(y_true==0)], 1/bins/2, ax,
+                        color=palette['ClassicBlueRedGrey'][0], label='Neg KDE')
+        _plot_score_kde(y_score[np.where(y_true==1)], 1/bins/2, ax,
+                        color=palette['ClassicBlueRedGrey'][1], label='Pos KDE')
         true_mean = np.mean(y_true)
         score_mean = np.mean(y_score)
         title = 'N={0:,}  True={1:.2%}  Score={2:.2%}'.format(
@@ -687,8 +717,8 @@ def __plot_multi_kde_axes(y_true, y_score_dict, bins, ax, fontdicts):
     for i in range(len(models)):
         md = models[i]
         y_score = np.array(y_score_dict[md])
-        sns.distplot(y_score, bins=bins, hist=False, kde=True, ax=ax,
-                     kde_kws={'bw': 1/bins/2, 'color': palette['MorandiDark'][i], 'label': '{0} (Score={1:.2%})'.format(md, np.mean(y_score))}, )
+        _plot_score_kde(y_score, 1/bins/2, ax, color=palette['MorandiDark'][i],
+                        label='{0} (Score={1:.2%})'.format(md, np.mean(y_score)))
         ax.axvline(x=np.mean(y_score), linestyle='--', linewidth=1, color=palette['MorandiDark'][i])
     ax.axvline(x=np.mean(y_true), linestyle='-', linewidth=1, color=palette['ClassicGreyRed'][0], label='True')
 
@@ -720,7 +750,7 @@ def __agg(df):
         group_cols = ['y_group', 'thresholds']
     else:
         group_cols = ['thresholds']
-    df_agg = df.groupby(group_cols).agg(
+    df_agg = df.groupby(group_cols, observed=False).agg(
         min_score=pd.NamedAgg(column='y_score', aggfunc='min'),
         max_score=pd.NamedAgg(column='y_score', aggfunc='max'),
         n=pd.NamedAgg(column='y_true', aggfunc='count'),
@@ -987,7 +1017,9 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
     pct_df = __agg(df)
 
     avg_true = np.mean(y_true)
-    pct_df['lift'] = [x / avg_true for x in pct_df['cumavg_true']]
+    # 没有坏样本时 avg_true 为 0，lift 为 NaN / inf（结果照旧），不为此告警
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct_df['lift'] = [x / avg_true for x in pct_df['cumavg_true']]
     pct_df['gain'] = np.cumsum(pct_df['capture_rate'])
 
     return pct_df

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from Modeling_Tool.Core.Binning_Tool import get_bin_range_list, super_binning
 from Modeling_Tool.Core.utils import load_model, calc_iv, calc_woe
+from Modeling_Tool._utils.frames import concat_non_empty
 from .evaluate_model import evaluate_performance
 from . import weighted_eval_utils as _weighted_eval
 
@@ -133,7 +134,9 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
     
 
     if add_func is not None:
-        gains_table_add = res.groupby(["_bin_num", "_bin_range"], dropna=False).apply(add_func)
+        # 显式选中全部列（含分组列）：add_func 照旧能看到 _bin_num / _bin_range，
+        # 也不触发 pandas 对 apply 默认包含分组列的弃用告警
+        gains_table_add = res.groupby(["_bin_num", "_bin_range"], dropna=False)[res.columns.unique().tolist()].apply(add_func)
         gains_table = gains_table.merge(gains_table_add, right_index = True, left_index = True, how = 'left')
     
     if retSummary:
@@ -510,7 +513,8 @@ def _get_perf_summary_single(train,
     oos_gains['index'] = 'oos'
     oot_gains['index'] = 'oot'
     
-    gains_summ = pd.concat([ins_gains, oos_gains, oot_gains])
+    # 缺失样本集的占位空表不参与拼接，否则整数列（N_BUMP / N_BINS）会被它变成 object
+    gains_summ = concat_non_empty([ins_gains, oos_gains, oot_gains])
     
     model_eval_result_df = model_eval_result_df.merge(gains_summ, on = ['index'], how = 'left')
 
@@ -2609,7 +2613,7 @@ class PerformanceEvaluator:
                 gains_summ_list.append(gains_res)
 
             if gains_summ_list:
-                gains_summ = pd.concat(gains_summ_list)
+                gains_summ = concat_non_empty(gains_summ_list)
                 model_eval_result_df = model_eval_result_df.merge(gains_summ, on = ['index'], how = 'left')
 
             return model_eval_result_df

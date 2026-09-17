@@ -540,7 +540,7 @@ def cre_pvt(df, var_name, tgt_name):
     >>> df_pvt = cre_pvt(df, var_name='income', tgt_name='default')
     """
     
-    df_pvt = df.groupby(var_name)[tgt_name].value_counts().unstack().fillna(0)
+    df_pvt = df.groupby(var_name, observed=False)[tgt_name].value_counts().unstack().fillna(0)
     df_pvt["n"] = df_pvt[0] + df_pvt[1]
     df_pvt["tr"] = df_pvt[1] / df_pvt["n"]
 
@@ -694,7 +694,9 @@ def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', righ
     
     i = 0
     reverse = not ascending
-    edges = sorted([round(x, precision) for x in edges], reverse = reverse)
+    # 极大边界（如 float 最大值）按精度取整会溢出成 inf，历来如此，不为此告警
+    with np.errstate(over="ignore"):
+        edges = sorted([round(x, precision) for x in edges], reverse = reverse)
     res = []
     while i < len(edges) - 1:
         left = edges[i]
@@ -935,7 +937,9 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
     >>> binned, edges = quick_binning(data, 'income', nbins=10, equal_freq=True)
     """
     
-    binning_series = data[column].round(precision)
+    # values near the float limits overflow when rounded, as they always did
+    with np.errstate(over="ignore"):
+        binning_series = data[column].round(precision)
     
     if include_missing:
         binning_series = binning_series.fillna(fillna)
@@ -986,14 +990,17 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
     if len(spec_values) > 0:
         fnl_breakpoints = sorted(list(set(list(fnl_breakpoints) + spec_values)))
         
-    binned, bin_edges = pd.cut(
-        binning_series, 
-        bins = fnl_breakpoints, 
-        labels = labels, 
-        right = right, 
-        include_lowest = include_lowest, 
-        retbins = True
-    )
+    # pandas rounds the edges to format interval labels; float-max edges overflow
+    # to inf there as they always did, so the numpy notice is not useful
+    with np.errstate(over="ignore"):
+        binned, bin_edges = pd.cut(
+            binning_series, 
+            bins = fnl_breakpoints, 
+            labels = labels, 
+            right = right, 
+            include_lowest = include_lowest, 
+            retbins = True
+        )
     
     orig_cat = [x for x in binned.cat.categories.tolist()]
     if ascending:

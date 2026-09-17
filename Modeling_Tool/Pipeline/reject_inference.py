@@ -767,7 +767,9 @@ class RejectInferencePipeline:
         cfg = self.config
         bad_scores = approved.loc[approved[cfg.target_col] == 1, cfg.score_col]
         if len(bad_scores.dropna()) == 0:
-            fallback = float(approved[cfg.score_col].median())
+            scores = approved[cfg.score_col]
+            # 全 NaN 时中位数就是 NaN（下方报错），不必让 numpy 为空切片告警
+            fallback = float(scores.median()) if scores.notna().any() else float("nan")
             if not np.isfinite(fallback):
                 raise ValueError(
                     "Cannot derive default hard cutoff: no valid bad-sample scores and "

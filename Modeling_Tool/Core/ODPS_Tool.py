@@ -6,7 +6,11 @@ import threading
 logger = logging.getLogger(__name__)
 import pandas as pd
 from odps import ODPS, options
-from odps.models import Schema, Column, Partition
+from odps.models import Column, Partition
+try:
+    from odps.models import TableSchema as Schema
+except ImportError:  # older pyodps only ships the Schema name
+    from odps.models import Schema
 
 # Available only in newer pandas versions. Older Airflow images should skip it.
 try:

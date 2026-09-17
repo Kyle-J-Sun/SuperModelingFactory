@@ -241,7 +241,12 @@ class ExcelMaster(ExcelWorkbook):
         start_col = loc[1] if loc else self.curr_col
         written_range = [start_row, start_col, start_row + nrows - 1, start_col + ncols - 1]
         
-        worksheet.merge_range(*written_range, text, self.dict_cell_format[cformat])
+        if nrows == 1 and ncols == 1:
+            # xlsxwriter refuses to merge a single cell and writes nothing, so a
+            # one-column table used to lose its title; write the cell directly.
+            worksheet.write(start_row, start_col, text, self.dict_cell_format[cformat])
+        else:
+            worksheet.merge_range(*written_range, text, self.dict_cell_format[cformat])
 
         if self.verbose:
             logging.info(f"Merged Cells: {self.to_cell_range_text(*written_range)}")

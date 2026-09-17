@@ -358,14 +358,14 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
     woe_grp_df[['woe', 'iv']] = woe_grp_df[['woe', 'iv']].replace([np.inf, -np.inf], np.nan)
 
     var_name = woe_grp_df["var"].iloc[0]
-    summary_df = woe_grp_df.groupby([grp_name]).agg({"iv": sum, "n": sum, "n_bad": sum})
+    summary_df = woe_grp_df.groupby([grp_name]).agg({"iv": "sum", "n": "sum", "n_bad": "sum"})
     summary_df["avg_bad"] = summary_df["n_bad"] / summary_df["n"]
 
     iv_dict = {x: round(y, 5) for x, y in zip(summary_df.index, summary_df["iv"])}
     tr_dict = {x: round(y, 5) for x, y in zip(summary_df.index, summary_df["avg_bad"])}
     N_dict = {x: y for x, y in zip(summary_df.index, summary_df["n"])}
     X = woe_grp_df["bin_num"].drop_duplicates()
-    Xticks = woe_grp_df.groupby(["bin_num"]).agg({"bin_range": max})["bin_range"]
+    Xticks = woe_grp_df.groupby(["bin_num"]).agg({"bin_range": "max"})["bin_range"]
 
     gs = list(set(woe_grp_df[grp_name]))
     gs.sort()
