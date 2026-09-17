@@ -69,6 +69,8 @@ warnings.filterwarnings("ignore")
 
 _SPECIAL_BIN_PREFIX = "__special__"   # 内部用于标记特殊箱的前缀
 _CATE_GROUP_SEP = " | "               # refine_cate 合并多个类别后，bin_label 的成员分隔符
+# 拟合后 sv_table["sv_policy_applied"] 的合法取值（pending_merge 只在拟合中途出现）
+_SV_POLICIES = frozenset({"keep", "neutral", "neutral(fallback)", "merged_into_missing", "merge_target"})
 
 def _sv_label(sv) -> str:
     """将特殊值转为分箱标签，nan → '[Missing]'，其余 → '[sv=xxx]'"""
@@ -552,25 +554,97 @@ class MonotoneWOEBinner:
                           labels=False, right=True)
         return pd.Series(0, index=sub.index)
 
+    def _group_iv_for_plot(self, grp_df: pd.DataFrame, feat: str, vr: Dict,
+                           fitted_edges: list) -> tuple:
+        """分组绘图用的组内 IV，返回 (普通箱 IV, 特殊值箱 IV)。
+
+        与拟合时 vr["iv"] 同口径，只把样本换成该组：
+          - 普通箱：按拟合分箱归箱，分母 = 该组落入普通箱的行的 bad/good
+          - 特殊值箱：分母 = 该组全部行的 bad/good，沿用拟合时的
+            sv_policy_applied 决策、不在组内重判占比：keep → 经验值（拟合启用
+            平滑时按拟合时的平滑参数平滑）；neutral / neutral(fallback) → 0；
+            merged_into_missing → 行并入该组 [Missing]；merge_target → 合并后经验值（不平滑）
+          - 单类箱：组内 bad 或 good 为 0 的箱（普通箱、特殊值箱）不计入，与筛选 IV
+            的 iv_guard 口径一致，避免 eps 把个别空类箱放大成虚高 IV
+        以整份拟合样本为一组时，两部分之和等于 vr["iv"]——前提是拟合样本各箱两类
+        齐全、没有落不进任何箱的取值（如 -inf），且特殊值决策可得：本次 fit 所得，或经
+        get_final_bins → load_woe_bins 的 Format-A attrs 恢复。CSV/Excel 回载（attrs
+        丢失）与格式 B 不带决策，特殊值箱一律按 keep 经验值计。
+        """
+        target = self.target_col
+        normal_df, sv_groups = self._split_special_for_plot(grp_df, feat, vr)
+        sub = normal_df[[feat, target]].dropna(subset=[feat]).copy()
+        sub["_bin"] = self._assign_normal_bins(sub, feat, vr, fitted_edges)
+        sub = sub[sub["_bin"].notna()]
+        norm_bad  = float(sub[target].sum())
+        norm_good = float((sub[target] == 0).sum())
+        iv_normal = 0.0
+        for _, bin_rows in sub.groupby("_bin"):
+            stats = self._compute_woe_single_bin(bin_rows, norm_bad, norm_good)
+            if stats["bad"] > 0 and stats["good"] > 0:
+                iv_normal += stats["iv"]
+
+        iv_sv = 0.0
+        sv_table = vr.get("sv_table", pd.DataFrame())
+        if len(sv_table) > 0:
+            full_bad  = float(grp_df[target].sum())
+            full_good = float((grp_df[target] == 0).sum())
+            policy_recorded = "sv_policy_applied" in sv_table.columns
+            policies = (list(sv_table["sv_policy_applied"]) if policy_recorded
+                        else ["keep"] * len(sv_table))
+            # load_woe_bins 恢复的拟合平滑参数优先；fit 所得的分箱沿用实例参数
+            smoothing = vr.get("sv_smoothing") or {}
+            labels = list(sv_table["bin_label"])
+            # 多个特殊值渲染成同一标签时取第一个非空子集（与柱图匹配口径一致）
+            rows_by_label: Dict[str, pd.DataFrame] = {}
+            for sv, rows in sv_groups.items():
+                lb = _sv_label(sv)
+                if lb not in rows_by_label or len(rows_by_label[lb]) == 0:
+                    rows_by_label[lb] = rows
+            merged_rows = [rows_by_label[lb] for lb, policy in zip(labels, policies)
+                           if policy == "merged_into_missing" and lb in rows_by_label]
+            for lb, policy in zip(labels, policies):
+                if policy in ("neutral", "neutral(fallback)", "merged_into_missing"):
+                    continue
+                rows = rows_by_label.get(lb)
+                if policy == "merge_target":
+                    parts = [r for r in [rows, *merged_rows] if r is not None and len(r) > 0]
+                    rows = pd.concat(parts) if parts else None
+                if rows is None or len(rows) == 0:
+                    continue
+                stats = self._compute_woe_single_bin(
+                    rows, full_bad, full_good,
+                    smooth=policy_recorded and policy != "merge_target",
+                    woe_smoothing=smoothing.get("woe_smoothing"),
+                    smoothing_alpha=smoothing.get("smoothing_alpha"),
+                )
+                if stats["bad"] > 0 and stats["good"] > 0:
+                    iv_sv += stats["iv"]
+        return iv_normal, iv_sv
+
     def _compute_woe_single_bin(
         self, sub: pd.DataFrame, total_bad: float, total_good: float,
-        smooth: bool = False,
+        smooth: bool = False, *, woe_smoothing: Optional[str] = None,
+        smoothing_alpha: Optional[float] = None,
     ) -> Dict[str, float]:
         """计算某子集的 bad/good/woe/iv 等统计量。
 
         ``smooth=True`` 允许 G19 的拉普拉斯平滑生效（仅 SV 箱路径显式开启，
-        普通箱调用保持 ``smooth=False``、口径不变）。
+        普通箱调用保持 ``smooth=False``、口径不变）。``woe_smoothing`` /
+        ``smoothing_alpha`` 为 None 时取实例参数；分组 IV 借此传入加载时恢复的拟合参数。
         """
         eps = self.eps
         n    = len(sub)
         bad  = float(sub[self.target_col].sum())
         good = float((sub[self.target_col] == 0).sum())
         bad_rate = bad / (bad + good) if (bad + good) > 0 else 0.0
-        if smooth and self.sv_woe_smoothing == "laplace" and self.sv_smoothing_alpha > 0.0:
+        method = self.sv_woe_smoothing if woe_smoothing is None else woe_smoothing
+        alpha  = self.sv_smoothing_alpha if smoothing_alpha is None else smoothing_alpha
+        if smooth and method == "laplace" and alpha > 0.0:
             # 把箱内 bad_rate 向全局基准率 p 收缩，再换算回等效 bad/good 计数。
             # 该式在 alpha→∞ 时 bad_rate→p，WOE→0（严格单调收缩到中性）；
             # 直接给 pct_bad/pct_good 加伪计数则会收敛到 logit(p) 而非 0。
-            a = self.sv_smoothing_alpha
+            a = alpha
             p = total_bad / (total_bad + total_good + eps)
             r = (bad + a * p) / (bad + good + a)
             pct_bad  = ((bad + good) * r)         / (total_bad  + eps)
@@ -2313,6 +2387,72 @@ class MonotoneWOEBinner:
         payload = tuple((key, metadata.get(key)) for key in keys)
         return hashlib.sha256(pickle.dumps(payload, protocol=4)).hexdigest()
 
+    @staticmethod
+    def _format_a_sv_decisions_digest(metadata_digest: Any, sv_decisions: Any) -> str:
+        """Checksum persisted SV decisions, bound to the base digest (and so to the rows)."""
+        import hashlib
+        import pickle
+
+        payload = (metadata_digest, sv_decisions)
+        return hashlib.sha256(pickle.dumps(payload, protocol=4)).hexdigest()
+
+    def _format_a_sv_decisions(self, vr: Dict) -> Optional[Dict[str, Any]]:
+        """拟合时的 SV 治理决策（逐行 sv_policy_applied + 平滑参数）；未启用 SV 治理时为 None。"""
+        sv_table = vr.get("sv_table", pd.DataFrame())
+        if len(sv_table) == 0 or "sv_policy_applied" not in sv_table.columns:
+            return None
+        smoothing = vr.get("sv_smoothing") or {
+            "woe_smoothing": self.sv_woe_smoothing,
+            "smoothing_alpha": self.sv_smoothing_alpha,
+        }
+        try:
+            method = str(smoothing["woe_smoothing"])
+            alpha = float(smoothing["smoothing_alpha"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(alpha):
+            # 无法可靠往返的平滑参数：不写决策（加载后按无决策处理），绝不让导出失败
+            return None
+        return {
+            "policies": [str(policy) for policy in sv_table["sv_policy_applied"]],
+            "woe_smoothing": method,
+            "smoothing_alpha": alpha,
+        }
+
+    def _restore_format_a_sv_decisions(
+        self, metadata: Dict[str, Any], n_sv_rows: int
+    ) -> Optional[tuple]:
+        """校验并取回 Format-A attrs 中的 SV 决策，返回 (policies, 平滑参数)；
+        缺失、被改动或取值非法时返回 None（按无决策处理）。"""
+        try:
+            decisions = metadata.get("sv_decisions")
+            if not isinstance(decisions, dict):
+                return None
+            if metadata.get("sv_decisions_digest") != self._format_a_sv_decisions_digest(
+                metadata.get("metadata_digest"), decisions
+            ):
+                return None
+            policies = decisions.get("policies")
+            method = decisions.get("woe_smoothing")
+            alpha = decisions.get("smoothing_alpha")
+            valid = (
+                isinstance(policies, (list, tuple))
+                and len(policies) == n_sv_rows
+                and all(isinstance(policy, str) and policy in _SV_POLICIES for policy in policies)
+                and isinstance(method, str)
+                and method in {"none", "laplace"}
+                and isinstance(alpha, (int, float, np.integer, np.floating))
+                and not isinstance(alpha, (bool, np.bool_))
+                and bool(np.isfinite(alpha))
+                and float(alpha) >= 0.0
+            )
+            if not valid:
+                return None
+            return list(policies), {"woe_smoothing": method, "smoothing_alpha": float(alpha)}
+        except Exception:
+            # attrs are advisory: any validation error means "no usable decisions".
+            return None
+
     # ── 1. get_final_bins ────────────────────────────────────────────
 
     def get_direction_summary(self) -> pd.DataFrame:
@@ -2355,7 +2495,8 @@ class MonotoneWOEBinner:
                           pct_bad | pct_good | woe | iv | cumiv
                           is_special (bool, True=特殊值箱)
 
-            精确数值边界、稀疏箱号、missing_woe 和类别成员保存在
+            精确数值边界、稀疏箱号、missing_woe、类别成员，以及启用 SV 治理时
+            逐行的 sv_policy_applied 与平滑参数保存在
             DataFrame.attrs 中；直接传递或 pickle 往返可精确恢复。CSV/Excel
             不保留 attrs，回载时以可见 bin_label（默认 .8g）为准。
 
@@ -2495,6 +2636,14 @@ class MonotoneWOEBinner:
             format_a_meta["metadata_digest"] = self._format_a_metadata_digest(
                 format_a_meta
             )
+            # SV 治理决策单独存放、单独校验：不进 metadata_digest，旧版本加载器
+            # 对新键无感知且仍能验证原有字段；未启用 SV 治理时不写，attrs 与旧版一致
+            sv_decisions = self._format_a_sv_decisions(vr)
+            if sv_decisions is not None:
+                format_a_meta["sv_decisions"] = sv_decisions
+                format_a_meta["sv_decisions_digest"] = self._format_a_sv_decisions_digest(
+                    format_a_meta["metadata_digest"], sv_decisions
+                )
             final.attrs["smf_woe_format_a"] = format_a_meta
             result[feat] = final
         return result
@@ -2553,8 +2702,8 @@ class MonotoneWOEBinner:
             DataFrame 必须包含列: bin_label | n | bad | woe | iv
             （可含 is_special 列；无则假设全为普通箱）
             SMF 生成且 checksum/行身份校验通过的 DataFrame.attrs 优先用于
-            精确恢复；attrs 缺失或失效时退回可见 bin_label。CSV/Excel 会丢失
-            attrs，因此不能恢复超出可见文本精度的信息。
+            精确恢复（含 SV 治理决策，另有独立 checksum）；attrs 缺失或失效时退回
+            可见 bin_label。CSV/Excel 会丢失 attrs，因此不能恢复超出可见文本精度的信息。
             类别特征自动识别：若普通箱 bin_label 不是数值区间格式（如 "(-∞, 1.5]"），
             则按类别特征加载，apply_woe 时按取值直接查表。
 
@@ -2601,6 +2750,8 @@ class MonotoneWOEBinner:
 
             # 类别特征标记（格式 A 自动识别；格式 B 暂不支持类别特征）
             is_categorical = False
+            # 拟合时的 SV 平滑参数（仅格式 A 且 attrs 校验通过时恢复）
+            sv_smoothing = None
 
             # ════════════════════════════════════════════════════════
             # 格式 A 处理路径
@@ -2839,6 +2990,13 @@ class MonotoneWOEBinner:
                         _norm_labels, edges
                     )
                 sv_table  = df_sv.copy() if len(df_sv) > 0 else pd.DataFrame()
+                if meta_base_matches and len(sv_table) > 0:
+                    restored_sv = self._restore_format_a_sv_decisions(
+                        format_a_meta, len(sv_table)
+                    )
+                    if restored_sv is not None:
+                        sv_table["sv_policy_applied"] = restored_sv[0]
+                        sv_smoothing = restored_sv[1]
                 total_iv  = float(df_bin["iv"].sum())
                 n_bins    = len(df_normal)
                 woes      = df_normal["woe"].values if len(df_normal) > 0 else np.array([])
@@ -2970,6 +3128,8 @@ class MonotoneWOEBinner:
                 is_monotonic = self._is_monotone(woes) if len(woes) > 1 else True,
                 n_bins       = n_bins,
             )
+            if sv_smoothing is not None:
+                res["sv_smoothing"] = sv_smoothing
             if is_categorical:
                 res["is_categorical"] = True
                 res["categories"] = (
@@ -3858,6 +4018,11 @@ class MonotoneWOEBinner:
           - "small_multiples" : 每个 group 一个子图 panel，各画该组组内占比柱
                                 + 该组 WOE 线（WOE y 轴跨 panel 统一，便于对比）
           - 标题："{feat}:  IV_range={min}−{max}"
+          - 各组 IV（图例 / 子图标题）：组内口径——以该组自身 bad/good 为分母，
+            含特殊值 / 缺失箱并沿用拟合时的 SV 治理决策；组内只有单一类别的箱不计入
+            （iv_guard 口径），详见 _group_iv_for_plot
+          - 各组 WOE 折线：以全量 bad/good 为基准（对两类齐全的箱 = 组内 WOE + 常数
+            ln(该组 bad 占全量 bad 的比例 / 该组 good 占全量 good 的比例)），便于跨组比较水平
 
         Parameters
         ----------
@@ -3905,6 +4070,8 @@ class MonotoneWOEBinner:
             n_sv      = len(sv_df)
             n_total   = n_normal + n_sv
             iv_overall = vr["iv"]
+            # 普通箱真实箱号（拟合箱号可能不连续，如 [0, 2, 3]）：分组统计按箱号取行、按位置画
+            normal_bin_ids = [int(b) - 1 for b in normal_df["bin_no"]]
 
             x_normal = np.arange(n_normal)
             x_sv     = np.arange(n_normal, n_total)
@@ -4071,7 +4238,8 @@ class MonotoneWOEBinner:
                 cmap_colors = plt.cm.tab10(np.linspace(0, 0.9, min(max(n_groups,1), 10)))
                 group_ivs = []
 
-                # WOE 基准：全量 total_bad / total_good（各组 WOE 相对全量，保证跨组可比）
+                # WOE 基准：全量 total_bad / total_good（各组 WOE 相对全量，保证跨组可比；
+                # 组 IV 另按组内口径计算，见 _group_iv_for_plot）
                 all_normal_df, all_sv_groups = self._split_special_for_plot(_df_for_group, feat, vr)
                 all_normal_sub = all_normal_df[[feat, self.target_col]].dropna(subset=[feat]).copy()
                 all_normal_sub["_bin"] = self._assign_normal_bins(
@@ -4086,12 +4254,12 @@ class MonotoneWOEBinner:
                     all_n_full = len(all_normal_sub)
                     pct_good_n_grp = np.zeros(n_normal)
                     pct_bad_n_grp  = np.zeros(n_normal)
-                    for b in range(n_normal):
+                    for xi, b in enumerate(normal_bin_ids):
                         grp_b  = all_normal_sub[all_normal_sub["_bin"] == b]
                         bad_b  = float(grp_b[self.target_col].sum())
                         good_b = float((grp_b[self.target_col] == 0).sum())
-                        pct_good_n_grp[b] = good_b / (all_n_full + eps) if all_n_full > 0 else 0.0
-                        pct_bad_n_grp[b]  = bad_b  / (all_n_full + eps) if all_n_full > 0 else 0.0
+                        pct_good_n_grp[xi] = good_b / (all_n_full + eps) if all_n_full > 0 else 0.0
+                        pct_bad_n_grp[xi]  = bad_b  / (all_n_full + eps) if all_n_full > 0 else 0.0
                     # 全量特殊值箱比例（分母 = 全量行数）
                     all_sv_n = len(_df_for_group)
                     pct_good_sv_grp = np.zeros(n_sv)
@@ -4100,7 +4268,7 @@ class MonotoneWOEBinner:
                         for si, sv_row in enumerate(sv_df.itertuples()):
                             matched_sv_df = None
                             for sv_key, sv_sub in all_sv_groups.items():
-                                if _sv_label(sv_key) == sv_row.bin_label:
+                                if _sv_label(sv_key) == sv_row.bin_label and len(sv_sub) > 0:
                                     matched_sv_df = sv_sub
                                     break
                             if matched_sv_df is not None and len(matched_sv_df) > 0:
@@ -4148,20 +4316,18 @@ class MonotoneWOEBinner:
                     pct_good_n_g = np.zeros(n_normal)
                     pct_bad_n_g  = np.zeros(n_normal)
                     grp_woe = []
-                    grp_iv  = 0.0
-                    for b in range(n_normal):
+                    for xi, b in enumerate(normal_bin_ids):
                         bin_rows = grp_sub[grp_sub["_bin"] == b]
                         bad_b  = float(bin_rows[self.target_col].sum())
                         good_b = float((bin_rows[self.target_col] == 0).sum())
-                        pct_good_n_g[b] = good_b / (n_grp + eps)
-                        pct_bad_n_g[b]  = bad_b  / (n_grp + eps)
+                        pct_good_n_g[xi] = good_b / (n_grp + eps)
+                        pct_bad_n_g[xi]  = bad_b  / (n_grp + eps)
                         if len(bin_rows) == 0:
                             grp_woe.append(np.nan)
                             continue
                         pct_bad_w  = bad_b  / (all_total_bad  + eps)
                         pct_good_w = good_b / (all_total_good + eps)
                         woe_b = math.log((pct_bad_w + eps) / (pct_good_w + eps))
-                        grp_iv += (pct_bad_w - pct_good_w) * woe_b
                         grp_woe.append(woe_b)
 
                     # ── clustered：画该组组内占比柱（边框用组色，与 WOE 折线对应）──
@@ -4176,7 +4342,7 @@ class MonotoneWOEBinner:
                             for si, sv_row in enumerate(sv_df.itertuples()):
                                 matched_sv_df = None
                                 for sv_key, sv_sub in grp_sv_groups.items():
-                                    if _sv_label(sv_key) == sv_row.bin_label:
+                                    if _sv_label(sv_key) == sv_row.bin_label and len(sv_sub) > 0:
                                         matched_sv_df = sv_sub
                                         break
                                 if matched_sv_df is not None and len(matched_sv_df) > 0:
@@ -4206,6 +4372,8 @@ class MonotoneWOEBinner:
                                     color=clr, linewidth=1.5, marker="o",
                                     markersize=4, zorder=5, label=lbl)
                     else:
+                        # 组 IV 取组内口径（含特殊值箱）；WOE 折线仍相对全量基准
+                        grp_iv = sum(self._group_iv_for_plot(grp_df_full, feat, vr, fitted_edges))
                         group_ivs.append(round(grp_iv, 4))
                         lbl = f"{grp_val}  N={n_grp:,}  TR={tr:.1%}  IV={grp_iv:.3f}"
                         ax_woe.plot(x_normal, grp_woe, color=clr,
@@ -4303,6 +4471,7 @@ class MonotoneWOEBinner:
 
         - 柱高 = 该箱样本 / 该组总样本（组内占比），good/bad 堆叠，含特殊值箱
         - WOE 相对全量基准计算；WOE y 轴范围跨全部 panel 统一，便于横向对比
+        - 子图标题中的 IV 为组内口径（见 _group_iv_for_plot；组内单一类别的箱不计入）
         - 文件名后缀 _by_{group_name}，与 pooled / clustered 模式一致
         """
         # ── guard（与单图路径一致）──
@@ -4316,13 +4485,15 @@ class MonotoneWOEBinner:
         vr = self._results[feat]
         fitted_edges = list(vr["edges"])
         eps = self.eps
+        # 普通箱真实箱号（可能不连续）：按箱号取行、按位置画
+        normal_bin_ids = [int(b) - 1 for b in normal_df["bin_no"]]
 
         all_labels = (
             [str(b) for b in normal_df["bin_label"]]
             + ([str(b) for b in sv_df["bin_label"]] if n_sv > 0 else [])
         )
 
-        # WOE 基准：全量 total_bad / total_good
+        # WOE 基准：全量 total_bad / total_good（组 IV 另按组内口径，见 _group_iv_for_plot）
         all_normal_df, _ = self._split_special_for_plot(_df_for_group, feat, vr)
         all_normal_sub = all_normal_df[[feat, self.target_col]].dropna(subset=[feat]).copy()
         all_normal_sub["_bin"] = self._assign_normal_bins(
@@ -4370,13 +4541,12 @@ class MonotoneWOEBinner:
             pct_bad_n_g  = np.zeros(n_normal)
             grp_woe = []
             grp_br  = []      # 各箱组内 bad_rate（用于数据标签）
-            grp_iv  = 0.0
-            for b in range(n_normal):
+            for xi, b in enumerate(normal_bin_ids):
                 bin_rows = grp_sub[grp_sub["_bin"] == b]
                 bad_b  = float(bin_rows[self.target_col].sum())
                 good_b = float((bin_rows[self.target_col] == 0).sum())
-                pct_good_n_g[b] = good_b / (n_grp + eps)
-                pct_bad_n_g[b]  = bad_b  / (n_grp + eps)
+                pct_good_n_g[xi] = good_b / (n_grp + eps)
+                pct_bad_n_g[xi]  = bad_b  / (n_grp + eps)
                 if len(bin_rows) == 0:
                     grp_woe.append(np.nan)
                     grp_br.append(np.nan)
@@ -4385,7 +4555,6 @@ class MonotoneWOEBinner:
                 pct_bad_w  = bad_b  / (all_total_bad  + eps)
                 pct_good_w = good_b / (all_total_good + eps)
                 woe_b = math.log((pct_bad_w + eps) / (pct_good_w + eps))
-                grp_iv += (pct_bad_w - pct_good_w) * woe_b
                 grp_woe.append(woe_b)
 
             # 特殊值箱：组内占比 + WOE（相对全量基准）+ 组内 bad_rate
@@ -4397,7 +4566,7 @@ class MonotoneWOEBinner:
                 for si, sv_row in enumerate(sv_df.itertuples()):
                     matched_sv_df = None
                     for sv_key, sv_sub in grp_sv_groups.items():
-                        if _sv_label(sv_key) == sv_row.bin_label:
+                        if _sv_label(sv_key) == sv_row.bin_label and len(sv_sub) > 0:
                             matched_sv_df = sv_sub
                             break
                     if matched_sv_df is not None and len(matched_sv_df) > 0:
@@ -4436,6 +4605,8 @@ class MonotoneWOEBinner:
                 ax_woe.plot(x_normal, [np.nan] * n_normal, color="#2E75B6",
                             linewidth=1.8, marker="o", markersize=5, zorder=5)
             else:
+                # 组 IV 取组内口径（含特殊值箱）；WOE 折线仍相对全量基准
+                grp_iv = sum(self._group_iv_for_plot(grp_df_full, feat, vr, fitted_edges))
                 group_ivs.append(round(grp_iv, 4))
                 iv_disp = grp_iv
                 ax_woe.plot(x_normal, grp_woe, color="#2E75B6",
