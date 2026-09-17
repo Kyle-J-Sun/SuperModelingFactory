@@ -24,7 +24,6 @@ import os
 import sys
 import copy
 import logging
-import warnings
 import functools
 from collections import OrderedDict
 from typing import Optional, List, Dict, Union, Any, Tuple
@@ -36,9 +35,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
-
-# Suppress warnings for cleaner output
-warnings.filterwarnings('ignore')
 
 
 def _resolve_backward_perf_weight_col(

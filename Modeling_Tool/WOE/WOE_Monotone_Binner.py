@@ -60,7 +60,6 @@ import matplotlib.ticker as mticker
 
 matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = "DejaVu Sans"
-warnings.filterwarnings("ignore")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
