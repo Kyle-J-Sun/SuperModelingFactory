@@ -2741,12 +2741,19 @@ class MonotoneWOEBinner:
                 # 格式 B（dict with edges / woe_map / bin_df）
                 fmt = "B"
             elif isinstance(payload, dict):
-                # 格式 A 包在 dict 里（不常见，兼容）
+                # 格式 A 包在 dict 里（不常见，兼容）；DataFrame 不能用 `or` 取值（真值有歧义）
                 fmt = "A"
-                df_bin = payload.get("bin_df") or payload.get("df")
+                df_bin = payload.get("bin_df")
+                if df_bin is None:
+                    df_bin = payload.get("df")
                 if df_bin is None:
                     raise ValueError(
                         f"特征 '{feat}': dict 格式既无 'woe_map' 也无 'bin_df'，无法识别格式"
+                    )
+                if not isinstance(df_bin, pd.DataFrame):
+                    raise ValueError(
+                        f"特征 '{feat}': dict 包装的分箱表必须是 DataFrame，"
+                        f"收到 {type(df_bin).__name__}"
                     )
             else:
                 raise ValueError(
