@@ -36,7 +36,7 @@ def select_sample_seed(master_df, oot_split_col, model, tgt_name, seed_range = (
     for seed in tqdm(range(seed_range[0], seed_range[1])):
 
         train_df = master_df.loc[master_df[oot_split_col].isin([1])]
-        oot_df = master_df.loc[master_df[oot_split_col].isin([2])]
+        oot_df = master_df.loc[master_df[oot_split_col].isin([2])].copy()
 
         sampler = SampleSplitter(test_size = (1 - ins_prop), random_state=seed, stratify=True)
         mdl_df, val_df = sampler.split_df(train_df, tgt_name)

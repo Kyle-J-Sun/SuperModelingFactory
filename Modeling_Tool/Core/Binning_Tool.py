@@ -2,11 +2,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 import pandas as pd
+pd.options.mode.chained_assignment = None  # default='warn'
 import numpy as np
 from scipy.stats import chi2_contingency, chi2
 from Modeling_Tool._utils.frames import as_binning_numeric
 
-pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -706,6 +706,9 @@ def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', righ
 
 def _materialize_bin_columns(data, binned, bin_range_list, bin_num_col, bin_range_col):
     """Attach categorical bin numbers and labels without Python row callbacks."""
+    # The two bin columns are ours to add: work on our own frame so callers that
+    # pass a slice or their own DataFrame never get these columns written back.
+    data = data.copy(deep = False)
     codes = binned.cat.codes.to_numpy(dtype=np.intp, copy=False)
     range_values = np.empty(len(codes), dtype=object)
     range_values[:] = np.nan

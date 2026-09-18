@@ -260,6 +260,7 @@ def _get_gains_table_single(data, dep, nbins = 10, precision = 5, min_bin_prop =
         return -3
     
     if score is None:
+        data = data.copy()  # the scored column is ours; do not leave it on the caller's frame
         data['_mdl_scr'] = model.predict_proba(data.loc[:, varlist])[:, 1]
         score = '_mdl_scr'
         
@@ -709,6 +710,7 @@ def _get_cust_gains_table_single(data, dep, nbins = 10, precision = 5, min_bin_p
         return -3
     
     if score is None:
+        data = data.copy()  # the scored column is ours; do not leave it on the caller's frame
         data['_mdl_scr'] = model.predict_proba(data.loc[:, varlist])[:, 1]
         score = '_mdl_scr'
         

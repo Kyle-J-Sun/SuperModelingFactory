@@ -43,6 +43,7 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
     --------
     >>> plot_woe(woe_df, var_rename='年龄', save_dir='./output')
     """
+    woe_df = woe_df.copy()  # plotting must not rename or rewrite the caller's frame
     woe_df.columns = [x.lower() for x in woe_df.columns]
     woe_df[['woe', 'iv']] = woe_df[['woe', 'iv']].replace([np.inf, -np.inf], 0)
 
@@ -354,6 +355,7 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
     """
 
 
+    woe_grp_df = woe_grp_df.copy()  # plotting must not rename or rewrite the caller's frame
     woe_grp_df.columns = [x.lower() for x in woe_grp_df.columns]
     woe_grp_df[['woe', 'iv']] = woe_grp_df[['woe', 'iv']].replace([np.inf, -np.inf], np.nan)
 

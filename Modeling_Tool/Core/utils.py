@@ -1856,7 +1856,7 @@ def scoring(data, model, varlist, scr_name, keeplist = None, all_missing_spec_va
     nohit_condition = (pd.isnull(fnl_data[varlist]).sum(axis = 1) == len(varlist))
     if fnl_data[nohit_condition].shape[0] > 0:
         
-        all_missing_data = fnl_data[nohit_condition]
+        all_missing_data = fnl_data[nohit_condition].copy()
         other_data = fnl_data[~nohit_condition]
         
         
