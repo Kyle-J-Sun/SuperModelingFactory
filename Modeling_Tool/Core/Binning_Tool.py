@@ -6,11 +6,6 @@ import numpy as np
 from scipy.stats import chi2_contingency, chi2
 from Modeling_Tool._utils.frames import as_binning_numeric
 
-# Available only in newer pandas versions. Older Airflow images should skip it.
-try:
-    pd.set_option('future.no_silent_downcasting', True)
-except (KeyError, ValueError):
-    pass
 pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

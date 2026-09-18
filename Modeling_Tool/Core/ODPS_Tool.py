@@ -12,11 +12,6 @@ try:
 except ImportError:  # older pyodps only ships the Schema name
     from odps.models import Schema
 
-# Available only in newer pandas versions. Older Airflow images should skip it.
-try:
-    pd.set_option('future.no_silent_downcasting', True)
-except (KeyError, ValueError):
-    pass
 pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

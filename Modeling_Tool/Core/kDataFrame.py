@@ -5,11 +5,6 @@ from pandas import DataFrame
 from pandas import Series
 import numpy as np
 
-# Available only in newer pandas versions. Older Airflow images should skip it.
-try:
-    pd.set_option('future.no_silent_downcasting', True)
-except (KeyError, ValueError):
-    pass
 pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
