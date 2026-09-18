@@ -6,7 +6,6 @@ import numpy as np
 from datetime import datetime
 import pdb, re
 from PIL import Image
-pd.options.mode.chained_assignment = None
 
 from ExcelMaster.ExcelFormatTool import ExcelFormat
 from ExcelMaster.Utility import *

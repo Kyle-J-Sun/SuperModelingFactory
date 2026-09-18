@@ -35,7 +35,6 @@ def write_var_info(em, ws, var, var_name, data_dict, var_info_title = "", skipby
 def plot_woe(em, ws, var, woe_bins, x_col, spec_missing_value = -99999, chart_size = (20, 5), var_name = "var_name", description = "", skipby = "row"):
     """ Plot WOE Table. """
     
-    pd.options.mode.chained_assignment = None
 
     em.gap_number = 1
     single_var_bin = woe_bins[woe_bins[var_name] == var]

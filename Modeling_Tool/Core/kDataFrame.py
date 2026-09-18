@@ -5,7 +5,6 @@ from pandas import DataFrame
 from pandas import Series
 import numpy as np
 
-pd.options.mode.chained_assignment = None  # default='warn'
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 

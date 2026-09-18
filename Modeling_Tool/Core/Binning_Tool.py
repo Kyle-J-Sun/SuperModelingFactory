@@ -2,7 +2,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 import pandas as pd
-pd.options.mode.chained_assignment = None  # default='warn'
 import numpy as np
 from scipy.stats import chi2_contingency, chi2
 from Modeling_Tool._utils.frames import as_binning_numeric
