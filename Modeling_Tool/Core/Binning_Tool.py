@@ -4,6 +4,7 @@ logger = logging.getLogger(__name__)
 import pandas as pd
 import numpy as np
 from scipy.stats import chi2_contingency, chi2
+from Modeling_Tool._utils.frames import as_binning_numeric
 
 # Available only in newer pandas versions. Older Airflow images should skip it.
 try:
@@ -939,7 +940,7 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
     
     # values near the float limits overflow when rounded, as they always did
     with np.errstate(over="ignore"):
-        binning_series = data[column].round(precision)
+        binning_series = as_binning_numeric(data[column]).round(precision)
     
     if include_missing:
         binning_series = binning_series.fillna(fillna)

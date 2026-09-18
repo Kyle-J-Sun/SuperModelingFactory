@@ -2,9 +2,26 @@
 """Shared DataFrame helpers."""
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
+import numpy as np
 import pandas as pd
+
+
+def as_binning_numeric(values: Any) -> Any:
+    """Return ``values`` with a bool dtype replaced by 0/1, everything else as is.
+
+    numpy refuses to take percentiles of bool arrays ("numpy boolean subtract"),
+    so a bool feature used to fail every quantile-based binner — and with it WOE
+    fitting, PSI, IV and the pipelines built on them — while the same column
+    stored as int8 binned fine. Nullable booleans keep their missing values.
+    """
+    if isinstance(values, pd.Series):
+        if not pd.api.types.is_bool_dtype(values.dtype):
+            return values
+        return values.astype("Int8" if isinstance(values.dtype, pd.BooleanDtype) else "int8")
+    array = np.asarray(values)
+    return array.astype(np.int8) if array.dtype == bool else array
 
 
 def concat_non_empty(frames: Iterable[Optional[pd.DataFrame]], *, ignore_index: bool = False) -> pd.DataFrame:

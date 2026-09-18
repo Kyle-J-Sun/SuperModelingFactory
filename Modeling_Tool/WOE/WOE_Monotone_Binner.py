@@ -58,6 +58,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
+from Modeling_Tool._utils.frames import as_binning_numeric
+
 matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = "DejaVu Sans"
 
@@ -1355,7 +1357,7 @@ class MonotoneWOEBinner:
         total_good = float((df[self.target_col] == 0).sum())
 
         # 2. 对普通行进行贪心单调分箱
-        col = df_normal[feat].dropna()
+        col = as_binning_numeric(df_normal[feat]).dropna()
         n   = len(col)
 
         if n < 10:
