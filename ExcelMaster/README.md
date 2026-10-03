@@ -1,186 +1,148 @@
 # ExcelMaster
 
-程序化 Excel 报告引擎 —— 专为数据科学和模型验证工作流设计的 Excel 工作簿生成库。
+A programmatic Excel report engine for data-science and model-validation workflows, installed with
+[SuperModelingFactory](../README.md) (`pip install supermodelingfactory`).
 
-## 概述
+ExcelMaster wraps [`xlsxwriter`](https://xlsxwriter.readthedocs.io/) and adds a **cursor**: every write call advances the
+current row/column, so you stack tables, images, and charts on a sheet without computing cell coordinates by hand.
 
-ExcelMaster 封装了 `xlsxwriter` 引擎，提供三层抽象来程序化生成格式化的 Excel 工作簿。它采用**光标追踪**模式 — 每次写入操作自动推进当前行/列位置，使调用方可以流式排列内容而无需手动计算坐标。
-
-## 架构
-
-```
-ExcelMaster/
-├── ExcelFormatTool.py    # 格式定义层 —— 50+ 预设单元格格式
-├── ExcelMaster.py        # 核心引擎 —— 光标流式写入、图表、条件格式
-├── Template.py           # 分析报告模板 —— PVA/Bivar/GridSearch 等
-└── Utility.py            # 工具函数 —— 颜色/路径/PSI 处理等
-```
-
-### 类继承体系
-
-```
-ExcelFormat (ExcelFormatTool.py)
-    │  初始化 xlsxwriter 工作簿，定义格式库
-    │
-    ▼
-ExcelWorkbook (ExcelMaster.py)
-    │  工作簿级操作：条件格式、图表基架、图片清理
-    │
-    ▼
-ExcelMaster (ExcelMaster.py)
-    │  工作表级操作：光标追踪、流式写入、图表嵌入
-```
-
-## 快速开始
+## Quickstart
 
 ```python
-from ExcelMaster.ExcelMaster import ExcelMaster
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 
-# 1. 创建 ExcelMaster 实例
-em = ExcelMaster('report.xlsx')
+from ExcelMaster.ExcelMaster import ExcelMaster
 
-# 2. 添加工作表
-ws = em.add_worksheet('模型性能', zoom_perc=100)
+perf = pd.DataFrame({"index": ["train", "test"], "KS": [0.44, 0.41], "AUC": [0.79, 0.77]})
+bands = pd.DataFrame({
+    "score_bin": [f"B{i}" for i in range(1, 6)],
+    "bad_count": [5, 12, 30, 55, 90],
+    "good_count": [95, 88, 70, 45, 10],
+})
+bands["bad_rate"] = bands["bad_count"] / (bands["bad_count"] + bands["good_count"])
 
-# 3. 流式写入 DataFrame
-df = pd.DataFrame({'KS': [0.45, 0.42], 'AUC': [0.78, 0.75]})
-em.write_dataframe(
-    ws, df,
-    title='模型性能对比',
-    titleformat='BLUE_H2',     # 预设格式：蓝色加粗 14pt
-    headerformat='ORANGE_H4',  # 预设格式：橙色背景加粗
-    valueformat='NUM%.4'       # 数字格式：4 位小数百分比
-)
+plt.figure(figsize=(4, 3)); plt.plot([0, 1], [0, 1]); plt.savefig("roc.png", dpi=100); plt.close()
 
-# 4. 插入图片
-em.insert_image(ws, 'roc_curve.png', figScale=(600, 400))
+em = ExcelMaster("report.xlsx", verbose=False)           # `verbose` is a required argument
+ws = em.add_worksheet("Performance", zoom_perc=100)
 
-# 5. 写入双轴图表
+em.merge_col(ws, ncols=6, text="Model performance summary", cformat="BLUE_H2")
+em.write_dataframe(ws, perf, title="KS / AUC", titleformat="BLUE_H4",
+                   headerformat="ORANGE_H4", valueformat="----")
+em.insert_image(ws, "roc.png", figScale=(0.8, 0.8))      # x/y scale factors, not pixels
 em.write_duo_chart(
-    ws, chart_df,
-    y1_list=['bad_count', 'good_count'],
-    y2_list=['bad_rate'],
-    x='score_bin',
-    c1_type='column', c2_type='line',
-    title='分数分布与坏账率',
-    chart_size=(800, 400)
+    ws, bands,
+    y1_list=["bad_count", "good_count"], y2_list=["bad_rate"], x="score_bin",
+    c1_type="column", c2_type="line",
+    y1_axis_range=(0, 100), y2_axis_range=(0, 1),
+    title="Score band distribution and bad rate",
+    chart_size=(15, 9),                                   # (rows, columns) measured in cells
 )
+em.write_dataframe(ws, bands, title="Score bands", valueformat="----")
 
-# 6. 关闭（自动保存）
-em.close_workbook()
+em.close_workbook()                                       # writes the file
 ```
 
-## 核心 API
+## How it works
 
-### ExcelMaster 类
+```
+ExcelFormat    (ExcelFormatTool.py)   creates the xlsxwriter workbook and the preset format library
+    ▼
+ExcelWorkbook  (ExcelMaster.py)       workbook-level helpers: conditional formats, borders, chart scaffolding
+    ▼
+ExcelMaster    (ExcelMaster.py)       worksheet-level API: cursor, tables, text, images, charts
+```
 
-主要的用户接口类，继承自 `ExcelWorkbook`（继承自 `ExcelFormat`）。
+- **Cursor.** `ExcelMaster` tracks `curr_row` / `curr_col`. After each write the cursor moves down (`skipby='row'`, the
+  default) or right (`skipby='col'`) by the size of what was written plus `gap_number` blank cells (default 2; set
+  `em.gap_number = 1` to tighten). Read it with `get_curr_loc()`, move it with `reset_curr_loc((row, col))`, or pass
+  `loc=(row, col)` to a single call. Coordinates are zero-based.
+- **Return value.** Pass `retCellRange="value"` to get `[first_row, first_col, last_row, last_col]` of what was written
+  (or `"text"` for an `A1:C7`-style range), which you can feed to formatting calls.
+- **Hidden chart data.** Chart source data is written to hidden worksheets named `__CHRT_DATA_<N>`, so the visible sheet
+  stays clean.
+- **Constructor:** `ExcelMaster(filepath, verbose, gap_number=2, init_loc=(0, 0))`.
 
-#### 工作表管理
+## API
 
-| 方法 | 说明 |
-|------|------|
-| `add_worksheet(name, hide_grid, zoom_perc, tab_color)` | 添加工作表，支持缩放、网格线、标签颜色 |
-| `reset_curr_loc(loc)` | 重置光标到指定位置 |
-| `get_curr_loc()` | 获取当前光标位置 |
+### Worksheets and cursor
 
-#### 内容写入
+| Method | Description |
+|---|---|
+| `add_worksheet(name, hide_grid=True, reset_loc=True, cell_scale=True, auto_fit=False, zoom_perc=100, tab_color=None)` | Add a sheet and (by default) reset the cursor |
+| `get_curr_loc(toCell=False)` | Current cursor, as `(row, col)` or as an `A1` string |
+| `reset_curr_loc(loc=(0, 0))` | Move the cursor |
+| `close_workbook()` | Finalize and save the `.xlsx` file |
 
-| 方法 | 说明 |
-|------|------|
-| `merge_col(ws, ncols, text, cformat, skipby)` | 合并单元格并写入标题，自动推进光标 |
-| `write_dataframe(ws, df, title, titleformat, headerformat, valueformat, skipby)` | 写入 DataFrame + 可选标题行 |
-| `write_text_content(ws, input_text, txt_path)` | 写入多行文本，支持内联格式标签 |
-| `write_text_by_dict(ws, dict_cells)` | 按单元格坐标字典批量写入 |
+### Writing content
 
-#### 图表
+| Method | Description |
+|---|---|
+| `write_dataframe(worksheet, df, loc=None, title=None, index=False, header=True, skipby='row', titleformat='BLUE_H4', headerformat='TABLE_HEADER', valueformat='----', retCellRange=None)` | Write a DataFrame with an optional title row |
+| `merge_col(worksheet, loc=None, nrows=1, ncols=1, text='', skipby='row', cformat='BLUE_H4', retCellRange=None)` | Merge cells and write a heading |
+| `write_text_content(worksheet, input_text=None, txt_path=None, loc=None, retCellRange=None)` | Write multi-line text. Prefix a segment with `{FORMAT_NAME}` to style it, for example `"{BLUE_H2} Title\n{B} Bold {I} italic"` |
+| `write_text_by_dict(worksheet, dict_cells)` | Write at explicit cells, for example `{"M1:O2": ["Merged cell", "BLUE_H2"]}` |
+| `insert_image(worksheet, figPath, figScale=(1, 1), loc=None, skipby='row', retCellRange=None)` | Insert an image; `figScale` multiplies its width and height |
 
-| 方法 | 说明 |
-|------|------|
-| `write_chart(ws, df, y_list, x, title, chart_type, chart_size)` | 写入柱状图/折线图/饼图 |
-| `write_duo_chart(ws, df, y1_list, y2_list, x, c1_type, c2_type)` | 双 Y 轴组合图表 |
-| `write_combined_chart(ws, chart1, chart2)` | 合并两个图表对象 |
+### Charts
 
-#### 图片
+| Method | Description |
+|---|---|
+| `write_chart(worksheet, df, y_list, x=None, title='', chart_size=(30, 13), chart_type='line', ...)` | `chart_type` is `'line'`, `'column'`, `'stacked_column'`, or `'pie'` |
+| `write_duo_chart(worksheet, df, y1_list, y2_list=None, x=None, c1_type='column', c2_type='line', y1_axis_range=(0, 1), y2_axis_range=None, ..., title='', chart_size=(30, 13))` | Combined chart with a secondary y axis |
+| `write_combined_chart(worksheet, chart1, chart2, ...)` | Merge two chart objects obtained with `retChart=True` |
 
-| 方法 | 说明 |
-|------|------|
-| `insert_image(ws, figPath, figScale, loc)` | 插入缩放后的图片，按图片尺寸推进光标 |
+`chart_size` is `(rows, columns)` in worksheet cells (not pixels).
 
-#### 格式化
+### Formatting
 
-| 方法 | 说明 |
-|------|------|
-| `set_color_scale(worksheet, cell_range, colors)` | 2-3 色渐变条件格式 |
-| `set_data_bar(worksheet, cell_range, bar_color)` | 数据条条件格式 |
-| `set_border_line(worksheet, valuerange, border_line)` | 绘制边框 |
-
-### 预设格式库
-
-`ExcelFormat.dict_cell_format` 提供了 50+ 个可直接引用的格式名称：
-
-| 格式名 | 效果 |
-|--------|------|
-| `H1` ~ `H4` | 标题（18pt~12pt 加粗） |
-| `BLUE_H1` ~ `BLUE_H4` | 蓝色背景标题 (`#C5D9F1`) |
-| `ORANGE_H1` ~ `ORANGE_H4` | 橙色背景标题 (`#FABF8F`) |
-| `YELLOW_BG` | 黄色高亮背景 |
-| `BOLD`, `UNDERLINE`, `ITALIC` | 字体样式 |
-| `BOLD_RED` | 红色加粗 |
-| `NUM`, `NUM%.1` ~ `NUM%.4` | 数字/百分比格式 |
-| `COMMA` | 千分位分隔 |
-| `----` | 全边框 |
-| `RED` | 红色字体 |
-
-自定义格式：
+| Method | Description |
+|---|---|
+| `set_color_scale(worksheet, cell_range, colors=('#F8696B', '#FFEB84', '#63BE7B'))` | 3-color (or 2-color) scale; `cell_range` is `"D20:D24"` or `[row1, col1, row2, col2]` |
+| `set_data_bar(worksheet, cell_range, bar_color='#63C384')` | Data bars |
+| `set_border_line(worksheet, valuerange, border_line=1)` | Border around every cell in a range |
+| `set_cell_format(worksheet, cell_range, cformat, cell_condition=None)` | Apply a preset or custom format |
+| `add_new_format(format_dict, format_name)` | Register a custom format, then use `format_name` anywhere a format is accepted |
 
 ```python
-em.add_new_format({'font_name': '微软雅黑', 'font_size': 12, 'bold': True}, 'MY_TITLE')
+em.add_new_format({"font_name": "Arial", "font_size": 12, "bold": True}, "MY_TITLE")
 ```
 
-### 报告模板 (Template.py)
+### Preset formats
 
-提供预构建的分析报告函数，可直接使用：
+All presets are in `em.dict_cell_format` (87 entries). Commonly used:
 
-| 函数 | 说明 |
-|------|------|
-| `get_pva_report(em, ws, gains_result, ...)` | 群体稳定性分析报告 |
-| `get_bivar_report(em, ws, attr_info, bivar, ...)` | 双变量分析报告（柱状图+折线图） |
-| `get_means_chart_report(em, ws, means_rpt, ...)` | 分组均值图表报告 |
-| `get_grid_search_report(em, ws, rs_perf, ...)` | 网格搜索结果报告 |
-| `get_grid_boxplot_report(em, ws, perf_res, ...)` | 网格搜索箱线图报告 |
-| `get_var_reduct_report(em, ws, vr_perf, ...)` | 变量削减过程报告 |
-| `get_seg_perf_comparison_report(...)` | 分段性能对比报告（含 Lift 计算） |
+| Names | Effect |
+|---|---|
+| `BLUE_H1`, `BLUE_H2`, `BLUE_H3`, `BLUE_H4` | Bold titles, blue-grey background (`#C5D9F1`), dark-blue text; 18 / 16 / 14 / 12 pt |
+| `ORANGE_H1` … `ORANGE_H4` | Same sizes on an orange background (`#FABF8F`) |
+| `TABLE_HEADER` | Bold, centered table header (default `headerformat`) |
+| `----`, `BORDER`, `BORDER_CENTER` | Plain cell with border (`----` is the default `valueformat`) |
+| `NUM%.1` … `NUM%.4` | Percentage with 1 to 4 decimals (`0.0%` … `0.0000%`) |
+| `NUM_COMMA` (also `NUM,`) | Integer with thousands separator (`#,##0`) |
+| `B`, `I`, `BU`, `BIU` | Bold / italic / bold-underline / bold-italic-underline text |
+| `RED`, `TEXT_RED`, `BG_LIGHT_YELLOW` | Red text; light-yellow highlight |
+| `#`, `##`, `HEADER_1` … `HEADER_4` | Plain heading text (18 / 16 pt …) without a background |
 
-### 工具函数 (Utility.py)
+List every name with `sorted(em.dict_cell_format)`.
 
-| 函数 | 说明 |
-|------|------|
-| `input_validation(x, sep)` | 输入验证（接受 DataFrame/CSV/SAS 路径） |
-| `get_color_set(n)` | 获取 n 个差异化颜色 |
-| `color_hex2rgb(hex_code)` | 十六进制颜色转 RGB |
-| `convert_perc_str_to_float(df, cols)` | 百分比字符串转浮点数 |
-| `transpose_dataframe(df, index_col)` | DataFrame 转置 |
-| `compute_overfitting_shift(data, prefix)` | 过拟合偏移量计算 |
-| `proc_psi_raw_report(psi_raw_table, ...)` | PSI 原始报告处理 |
+### Report templates (`ExcelMaster.Template`)
 
-## 依赖
+Pre-built report builders that take an `ExcelMaster` and a worksheet: `get_pva_report`, `get_bivar_report`,
+`get_means_chart_report`, `get_grid_search_report`, `get_grid_boxplot_report`, `get_var_reduct_report`,
+`get_seg_perf_comparison_report`, plus the building blocks `add_perf_metrics`, `add_perf_lift`, `add_scr_info`.
+Each expects specific input tables; inspect a signature with `from ExcelMaster import Template; help(Template.get_pva_report)`.
 
-| 包 | 用途 |
-|----|------|
-| `xlsxwriter` | Excel 写入引擎（图表、格式、条件格式） |
-| `openpyxl` | 补充 Excel I/O |
-| `pandas` | DataFrame 操作、`pd.ExcelWriter` |
-| `numpy` | 数值计算 |
-| `Pillow` (PIL) | 图片尺寸检测与缩放 |
-| `matplotlib` | 箱线图生成 |
-| `seaborn` | 可视化样式 |
-| `tqdm` | 进度条（模板函数中） |
+### Utilities (`ExcelMaster.Utility`)
 
-## 设计模式
+`get_color_set(n)`, `color_hex2rgb(hex_code)`, `convert_perc_str_to_float(df, cols)`, `tanspose_dataframe(df, index_col)`
+(the spelling is historical), `compute_overfitting_shift(data, sample_prefix)`, `proc_psi_raw_report(psi_raw_table, psi_title, ...)`,
+`input_validation(x, sep=',')`, `list_files(location, pattern)`, and date helpers such as `getCurrentDateTime()`.
 
-1. **光标追踪** — `ExcelMaster` 维护 `curr_row`/`curr_col`，每次写入后按 `skipby` 参数（`'row'` 或 `'col'`）和 `gap_number` 间距自动推进
-2. **格式别名** — 50+ 预设格式通过简短字符串别名引用（`'BLUE_H2'`、`'NUM%.2'`），保持代码可读
-3. **隐藏数据表** — 图表源数据默认写入隐藏工作表 (`__CHRT_DATA_<N>`)，保持主表整洁
-4. **模板组合** — `Template.py` 中的高阶函数接收 `ExcelMaster` 实例，编排底层方法生成完整的专项报告
+## Dependencies
+
+Installed automatically with SMF: `xlsxwriter` (writer), `openpyxl`, `pandas`, `numpy`, `Pillow` (image size and resizing),
+`matplotlib` and `seaborn` (box plots in templates), `tqdm`.

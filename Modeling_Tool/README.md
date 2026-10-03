@@ -1,229 +1,256 @@
 # Modeling_Tool
 
-风控建模工具包 —— SuperModelingFactory 的核心建模引擎。
-
-## 概述
-
-`Modeling_Tool` 提供信用评分卡开发和机器学习建模的全流程能力，涵盖数据分箱、WOE 编码、特征工程、模型训练、性能评估和样本管理。
+The modeling engine of [SuperModelingFactory](../README.md): binning and WOE encoding, feature screening, model training,
+evaluation, explainability, sample management, deployment consistency checks, and one-click pipelines for credit-risk
+scorecard development.
 
 - **Version**: 0.8.2
 - **Author**: Jingkai Sun
 
-## 架构
+Full documentation: <https://kyle-j-sun.github.io/SuperModelingFactory_doc/>
+
+## Quick orientation
+
+```python
+import Modeling_Tool as smf
+print(smf.__version__)          # 0.8.2
+print(len(smf.__all__))         # curated top-level API
+```
+
+Everything listed in `smf.__all__` can be imported directly: `from Modeling_Tool import WOE_Master, LRMaster, ...`.
+Subpackages expose a larger surface: `from Modeling_Tool.Eval import calc_roc`.
+
+Typical workflow:
+
+| Stage | Main classes / functions | Subpackage |
+|---|---|---|
+| 1. Sample design | `SampleSplitter`, `StratifiedSampler`, `SampleBalancer`, `RejectInferenceFactory` | `Sample` |
+| 2. Binning and WOE | `WOE_Master`, `MonotoneWOEBinner`, `as_woe_engine` | `WOE` |
+| 3. Feature screening | `PSICalculator`, `VarExtractionInsights`, `CorrelationFilter`, `feature_screen` | `Feature` |
+| 4. Modeling | `LRMaster`, `GradientBoostingModel`, `BackwardVariableEliminator` | `Model` |
+| 5. Evaluation | `PerformanceEvaluator`, `GainsTableCalculator`, `evaluate_performance` | `Eval` |
+| 6. Explainability | `ModelExplainer`, `build_coalition_structure` | `Explainability` |
+| 7. Deployment checks | `UATConsistencyChecker`, `ProcCompareEngine`, `save_model` / `load_model` | `UAT`, `Core` |
+| All of the above in one call | `CreditModelPipeline` and six other pipelines | `Pipeline` |
+
+## Installation
+
+```bash
+pip install supermodelingfactory                         # core
+pip install 'supermodelingfactory[explain,stats,optuna]' # optional extras
+```
+
+Extras: `odps` (MaxCompute), `explain` (SHAP, LIME), `stats` (statsmodels), `imblearn` (SMOTE), `optuna`, `mic` (Python < 3.11).
+See the [top-level README](../README.md#installation) for details. `PerformanceEvaluator.evaluate()` displays tables through
+IPython by default, so pass `display=False` outside notebooks (or install `ipython`).
+
+## Minimal example
+
+```python
+import numpy as np
+import pandas as pd
+
+from Modeling_Tool import SampleSplitter, WOE_Master, GradientBoostingModel, PerformanceEvaluator
+
+rng = np.random.default_rng(42)
+n = 5000
+data = pd.DataFrame({
+    "age": rng.normal(35, 8, n).clip(18, 70),
+    "income": rng.lognormal(10, 0.4, n),
+    "score_b": rng.normal(600, 60, n),
+    "n_overdue": rng.poisson(0.3, n),
+})
+logit = -2.2 - 0.02 * (data["score_b"] - 600) + 0.5 * data["n_overdue"]
+data["bad_flag"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
+features = ["age", "income", "score_b", "n_overdue"]
+
+# 1. Split
+train_df, test_df = SampleSplitter(test_size=0.3, random_state=42, stratify=True).split_df(
+    data, target="bad_flag")
+
+# 2. WOE encoding: adds `<feature>_woe` columns
+woe = WOE_Master(train_data=train_df, varlist=features, dep="bad_flag")
+woe.fit(nbins=10, equal_freq=True)
+train_woe, test_woe = woe.transform(train_df), woe.transform(test_df)
+woe_features = [f + "_woe" for f in features]
+
+# 3. Train (LightGBM requires early_stopping_rounds; a validation set is passed to fit)
+model = GradientBoostingModel("lgb", {
+    "n_estimators": 200, "learning_rate": 0.05, "max_depth": 4,
+    "early_stopping_rounds": 20, "eval_metric": "auc", "verbose": -1,
+})
+model.fit(train_woe[woe_features], train_woe["bad_flag"], test_woe[woe_features], test_woe["bad_flag"])
+
+# 4. Evaluate
+evaluator = PerformanceEvaluator(tgt_name="bad_flag", model=model, feature_cols=woe_features)
+evaluator.add_dataset("train", train_woe).add_dataset("test", test_woe)
+result = evaluator.evaluate(display=False)
+print(result[["index", "KS", "AUC", "Top10%_TargetRate"]])
+```
+
+## Package layout
 
 ```
 Modeling_Tool/
-├── __init__.py              # 顶层统一 API
-├── Core/                    # 基础设施层
-│   ├── Binning_Tool.py      #   等频/等距/卡方/决策树分箱
-│   ├── ODPS_Tool.py         #   阿里云 MaxCompute 客户端
-│   ├── Slope_Tool.py        #   线性回归斜率计算
-│   ├── utils.py             #   通用工具（WOE/IV 计算、模型存取、评分等）
-│   ├── XOR_Encryptor.py     #   XOR 文本加解密
-│   └── kDataFrame.py        #   Pandas DataFrame 扩展
-├── WOE/                     # WOE 编码层
-│   ├── WOE_Master.py        #   WOE 主控类（拟合/变换/可视化）
-│   ├── WOE_Tool.py          #   WOE 转换器、单调性检验
-│   ├── WOE_Plot_Tool.py     #   WOE 绘图（单变量/分组对比）
-│   ├── WOE_Monotone_Binner.py # 贪心单调 WOE 分箱器
-│   ├── WOE_Report_Builder.py  # Excel WOE 报告生成
-│   └── plot_woe_tool.py     #   PSI 表计算、分组指标提取
-├── Feature/                 # 特征分析层
-│   ├── Distribution_Tool.py #   分布偏移分析、描述性统计
-│   ├── Feature_Insights.py  #   IV 变量洞察、相关性过滤
-│   └── PSI_Tool.py          #   PSI 群体稳定性指数
-├── Model/                   # 模型训练层
-│   ├── LRM_Tool.py          #   逻辑回归（训练/变量重要性/AIC-BIC/逐步选择）
-│   ├── GBM_Tool.py          #   LightGBM / XGBoost 统一接口
-│   └── Backward_Tool.py     #   后向变量消除
-├── Eval/                    # 模型评估层
-│   ├── Model_Eval_Tool.py   #   Gains 表、性能汇总、交叉风险
-│   ├── Evaluation_Tool.py   #   评估流水线（分组/子集/多标签）
-│   └── evaluate_model.py    #   ROC/KS/PR/KDE/PCT/Gains 绘图
-└── Sample/                  # 样本管理层
-    ├── Sample_Split.py      #   样本切分、分层采样、均衡
-    ├── Reject_Infer.py      #   拒绝推断（Hard-Cut/模糊/分箱/简单增强）
-    └── Distribution_Adaptation.py # 分布适配（密度比/协变量偏移）
+├── __init__.py                  # Curated top-level API (`__all__`)
+├── Core/                        # Infrastructure (no dependency on other subpackages)
+│   ├── Binning_Tool.py          #   Equal-frequency / equal-width / chi-square / decision-tree binning
+│   ├── ODPS_Tool.py             #   Alibaba Cloud MaxCompute client (ODPSRunner)
+│   ├── Parallel_ODPS_Manager.py #   Concurrent ODPS pull / push
+│   ├── Parallel_Engine.py       #   General-purpose process/thread engine (ParallelApplyEngine)
+│   ├── Proc_Compare.py          #   Dataset consistency comparison (ProcCompareEngine)
+│   ├── Slope_Tool.py            #   Slope computation
+│   ├── sample_weight_utils.py   #   weight_col / sample_weight resolution and weighted aggregation
+│   ├── Model_Registry_Tool.py   #   Model artifact + metadata persistence
+│   ├── XOR_Encryptor.py         #   Lightweight XOR text encryption
+│   └── utils.py                 #   WOE/IV math, model I/O, scoring, misc helpers
+├── WOE/                         # WOE encoding
+│   ├── WOE_Master.py            #   WOE_Master (fit / transform / mapping tables / plots)
+│   ├── WOE_Monotone_Binner.py   #   MonotoneWOEBinner (monotone bins, categorical, special values)
+│   ├── WOE_Tool.py              #   Transformers, mapping, monotonicity checks
+│   ├── WOE_Plot_Tool.py         #   WOE plots (overall and by group)
+│   ├── WOE_Adapter.py           #   as_woe_engine: one interface over both engines
+│   └── WOE_Report_Builder.py    #   Excel WOE plot reports
+├── Feature/                     # Feature analysis
+│   ├── PSI_Tool.py              #   PSICalculator and PSI helpers
+│   ├── Feature_Insights.py      #   VarExtractionInsights (IV/KS), CorrelationFilter
+│   ├── Feature_Screen.py        #   feature_screen: unified PSI -> IV -> correlation screening
+│   ├── Weighted_Screen.py       #   weighted_feature_screen
+│   ├── Distribution_Tool.py     #   Distribution shift analysis, proc_means
+│   └── ODPS_Distribution_Tool.py#   proc_means_odps: descriptive statistics pushed down to MaxCompute
+├── Model/                       # Model training
+│   ├── LRM_Tool.py              #   LRMaster
+│   ├── GBM_Tool.py              #   GradientBoostingModel and LightGBM/XGBoost/CatBoost wrappers
+│   ├── GBM_Search_Tool.py       #   Hyper-parameter search backend for GradientBoostingModel.param_search
+│   └── Backward_Tool.py         #   BackwardVariableEliminator
+├── Eval/                        # Evaluation
+│   ├── Model_Eval_Tool.py       #   Gains tables, PerformanceEvaluator, cross-risk
+│   ├── Evaluation_Tool.py       #   EvaluationPipeline (group / subset / multi-label)
+│   ├── evaluate_model.py        #   ROC / KS / PR / KDE / percentile / gain plots
+│   └── weighted_eval_utils.py   #   Weighted metric implementations
+├── Sample/                      # Sample management (splitting, sampling, reject inference, adaptation)
+├── Explainability/              # ModelExplainer, coalition structure for Owen values
+├── Pipeline/                    # One-click pipelines, config schema and registry
+└── UAT/                         # UATConsistencyChecker
 ```
 
-## 快速开始
+## API reference (by subpackage)
 
-### 安装依赖
+Every name below is importable from the subpackage shown. Names marked † are **not** re-exported at the top level, so
+import them from the subpackage (for example `from Modeling_Tool.WOE import mapping_woe`); everything else can also be
+imported straight from `Modeling_Tool`.
 
-```bash
-pip install pandas numpy scipy scikit-learn lightgbm xgboost joblib
-pip install matplotlib seaborn  # 可视化
-pip install pyodps              # MaxCompute 连接（可选）
-pip install imbalanced-learn    # SMOTE 采样（可选）
-```
+### Core: `Modeling_Tool.Core`
 
-### 基础用法
+| Name | Description |
+|---|---|
+| `Binning(data, column, ...)` | Unified binning class: equal-frequency, equal-width, chi-square, decision-tree |
+| `super_binning(data, score, dep, ...)` | Binning dispatcher returning the binned frame (optionally the edges) |
+| `ODPSRunner()` | MaxCompute SQL execution, table download/upload (`run_sql`, `download_table`, `upload_df`, `insert_df`) |
+| `ParallelODPSManager(config)` / `ParallelODPSConfig` | Concurrent chunked `pull` / `push` against ODPS |
+| `ParallelApplyEngine(config)` / `parallel_apply(...)` | Run a function over row / column / custom chunks with a thread or process backend |
+| `ProcCompareEngine(config)` / `proc_compare(left, right, ...)` | SAS-`proc compare`-style comparison of two DataFrames or CSVs |
+| `SlopeCalculator(data, column)` | Slope via sklearn / scipy / numpy / manual formula |
+| `WOEIVCalculator(data, bad_pct_col, good_pct_col)` | `calc_woe`, `calc_iv`, `calc_both` |
+| `calc_woe(...)` †, `calc_iv(...)` † | Functional WOE / IV calculations |
+| `save_model(model, filename, ...)` / `load_model(model_path, return_metadata=False)` | Persist / restore a model with optional metadata |
+| `load_model_metadata(model_path)` | Read only the metadata of a saved artifact |
+| `scoring(data, model, varlist, scr_name, ...)` | Score a DataFrame with a trained model |
+| `get_feature_names(model, model_type=None)` | Feature names of a fitted LightGBM / XGBoost / sklearn model |
+| `pull_attributes_in_batch(table_name, varlist, ...)` | Pull very wide attribute tables from ODPS in column batches |
+| `DataFrameProcessor`, `FilePathManager`, `DateTimeUtils`, `TextEncryptor` | General utilities |
 
-```python
-from Modeling_Tool import (
-    # 分箱
-    Binning, super_binning,
-    # WOE
-    WOE_Master,
-    # 模型
-    GradientBoostingModel, LRMaster,
-    # 评估
-    PerformanceEvaluator, GainsTableCalculator,
-    # 样本
-    SampleSplitter
-)
+### WOE: `Modeling_Tool.WOE`
 
-# --- 1. 样本切分 ---
-splitter = SampleSplitter(test_size=0.3, random_state=42, stratify=True)
-train_df, test_df = splitter.split_df(data, target='bad_flag')
+| Name | Description |
+|---|---|
+| `WOE_Master(train_data, varlist, dep, ...)` | Fit / transform WOE for numeric features; mapping-table save / load; plots |
+| `MonotoneWOEBinner(feature_cols, target_col, ...)` | Greedy monotone binning with categorical features (`cate_feats`), special values, and bin governance; `fit`, `apply_woe`, `get_final_bins`, `plot_woe_graph` |
+| `as_woe_engine(engine)` | Wrap either engine behind one adapter used by the screening tools |
+| `woe_transform(...)`, `woe_transformation(...)` | One-call WOE for a single variable / a list of variables |
+| `mapping_woe(data, varlist, woe_mapping_table, ...)` † | Apply a saved WOE mapping table to new data |
+| `is_monotonic(data, column, ...)` | Monotonicity check of a WOE table column |
+| `get_overall_woe_table(woe_master, data)` / `get_group_woe_table(...)` † | Overall / by-group WOE statistics tables |
+| `save_mapping_table(woe_dict, save_dir)` / `load_mapping_table(mapping_table_csv)` | WOE mapping-table I/O |
+| `plot_woe(woe_df, ...)` | Plot a WOE table |
 
-# --- 2. WOE 编码 ---
-woe = WOE_Master(train_data=train_df, varlist=features, dep='bad_flag')
-woe.fit(nbins=10, equal_freq=True)
-train_woe = woe.transform(train_df)
-test_woe  = woe.transform(test_df)
+### Feature: `Modeling_Tool.Feature`
 
-# --- 3. 模型训练 ---
-model = GradientBoostingModel('lgb', {
-    'n_estimators': 200,
-    'learning_rate': 0.05,
-    'max_depth': 4,
-    'early_stopping_rounds': 20,
-    'eval_metric': 'auc'
-})
-woe_features = [f + '_woe' for f in features]
-model.fit(train_woe[woe_features], train_woe['bad_flag'],
-          test_woe[woe_features], test_woe['bad_flag'])
+| Name | Description |
+|---|---|
+| `PSICalculator(buckets, ...)` | `calculate(expected_df, current_data, varlist)`; can reuse a fitted WOE engine through `binning_engine` |
+| `calculate_psi_within_dataset(data, grp_name, varlist, ...)` | PSI across groups of a single dataset |
+| `VarExtractionInsights(data, dep, plot_path, ...)` | IV / KS / lift report via `get_var_analysis_report` |
+| `CorrelationFilter(data, dep, corr_cutpoint, ...)` | Iterative removal of highly correlated variables (`remove_highly_correlated`) |
+| `feature_screen(splits, feature_cols, target_col, ...)` | Unified missing-rate, PSI, IV, correlation screening over `ins` / `oos` / `oot` splits |
+| `FeatureScreenConfig`, `FeatureScreenResult` | Configuration and result of `feature_screen` |
+| `weighted_feature_screen(data, feature_cols, target_col, split_col, ...)` | Screening with sample weights |
+| `DistributionShiftAnalyzer(data, grp_name, benchmark_value)` | Distribution shift against a benchmark group |
+| `proc_means_by_grp(data, varlist, groupby, ...)` † | Grouped descriptive statistics |
+| `proc_means_odps(input_table_name, ...)` | The same statistics computed inside MaxCompute |
 
-# --- 4. 模型评估 ---
-evaluator = PerformanceEvaluator(
-    tgt_name='bad_flag',
-    model=model.model_instance.model,
-    feature_cols=woe_features
-)
-evaluator.add_dataset('train', train_woe)
-evaluator.add_dataset('test', test_woe)
-result = evaluator.evaluate()
-print(result[['index', 'KS', 'AUC', 'Top10%_TargetRate']])
-```
+### Model: `Modeling_Tool.Model`
 
-## 子包 API 参考
+| Name | Description |
+|---|---|
+| `LRMaster(params=None, ...)` | Logistic regression: `fit(data, varlist, tgt_name)`, `predict_proba`, `get_statsmodel_summary`, `stepwise_selection`, `grid_search_params`, `calibrate_model` |
+| `GradientBoostingModel(model_type, params)` | One interface for `'lgb'`, `'xgb'`, `'cat'`: `fit`, `predict`, `get_feature_importance`, `calibrate`, `param_search`, warm-start via `get_base_margin` / `predict_with_base_margin` |
+| `LightGBMModel(params)`, `XGBoostModel(params)`, `CatBoostModel(params)` | Framework-specific wrappers |
+| `lgbm_quick_train(...)`, `xgbm_quick_train(...)`, `catboost_quick_train(...)` | One-call training from DataFrames |
+| `BackwardVariableEliminator(train_data, varlist, dep, ...)` | Importance-based backward variable elimination: `run`, `get_summary`, `get_final_vars` |
+| `FeatureSelectionAnalyzer` | VIF, chi-square selection, correlation filter |
 
-### Core — 基础设施
+### Eval: `Modeling_Tool.Eval`
 
-| 类/函数 | 说明 |
-|---------|------|
-| `Binning` | 统一分箱类，支持等频/等距/卡方/决策树分箱 |
-| `super_binning(data, score, dep, nbins, ...)` | 集成分箱调度器 |
-| `ODPSRunner` | 阿里云 MaxCompute SQL 执行与数据上传/下载 |
-| `SlopeCalculator` | 线性回归斜率计算（sklearn/scipy/numpy/手动） |
-| `DataFrameProcessor` | DataFrame 列操作、正则过滤、类型转换 |
-| `FilePathManager` | 文件系统工具（路径管理、文件列表） |
-| `DateTimeUtils` | 日期时间工具（Vintage、季度、缓冲日期） |
-| `WOEIVCalculator` | WOE/IV 计算器 |
-| `TextEncryptor` | XOR 文本加解密（支持整个 DataFrame） |
-| `get_feature_names(model)` | 提取模型特征名（兼容 LGB/XGB/sklearn） |
-| `calc_woe(data, bad_pct, good_pct)` | WOE 值计算 |
-| `calc_iv(data, bad_pct, good_pct)` | IV 值计算 |
-| `save_model(model, filename)` / `load_model(path)` | 模型持久化 |
-| `scoring(data, model, varlist, scr_name)` | 模型评分 |
+| Name | Description |
+|---|---|
+| `PerformanceEvaluator(tgt_name, model=..., feature_cols=...)` | Multi-dataset KS / AUC / lift: `add_dataset(name, data)` then `evaluate(...)` |
+| `GainsTableCalculator(data, dep, ...)` | Gains table (`calculate`), weighted or unweighted |
+| `get_gains_table(...)`, `get_perf_summary(...)` | Functional gains / performance summaries |
+| `cross_risk(data, score_list, dep, nbins, ...)` | Cross risk matrix of two scores or a score and a variable |
+| `Model_Evaluation_Tool(data, dep, comp_scrlist, ...)` | Orchestrator for multi-score comparison |
+| `EvaluationPipeline(m_eval)` | Chain `group_by(...)`, `subset_by(...)`, `apply(func)` |
+| `evaluate_performance(datasets, ...)` / `comparison_performance(datasets, ...)` | ROC, KS, KDE, percentile and gain plots for one / several models |
+| `calc_roc(...)`, `calc_pr(...)`, `calc_lift_apt(y_true, y_score, start, stop, step)` | Low-level curve and lift computations |
 
-### WOE — 证据权重编码
+### Sample: `Modeling_Tool.Sample`
 
-| 类/函数 | 说明 |
-|---------|------|
-| `WOE_Master` | WOE 全流程管理（拟合/变换/调整/画图） |
-| `WOETransformer` | WOE 转换器（单变量/多变量批量） |
-| `WOEMappingTransformer` | 基于预计算映射表的 WOE 转换 |
-| `WOEPlotter` | WOE 图表绘制（单变量/分组） |
-| `WOEAnalyzer` | WOE 汇总分析（对齐、双变量图） |
-| `MonotoneWOEBinner` | 贪心单调 WOE 分箱器 |
-| `woe_transform(train_df, var, dep, nbins, ...)` | 单变量 WOE 转换 |
-| `woe_transformation(train_df, varlist, dep, ...)` | 批量 WOE 转换 |
-| `mapping_woe(data, varlist, woe_table)` | 映射 WOE 值到新数据 |
-| `is_monotonic(data, column)` | 单调性检查 |
-| `get_overall_woe_table(woe_master, data)` | 整体 WOE 统计表 |
-| `get_group_woe_table(woe_master, data, group)` | 分组 WOE 统计表 |
+| Name | Description |
+|---|---|
+| `SampleSplitter(test_size, random_state, stratify)` | `split_df(df, target)` returns `(train_df, test_df)` |
+| `StratifiedSampler(...)` / `SampleBalancer(method, ...)` | Stratified sampling; under/over-sampling and SMOTE |
+| `select_sample_seed(master_df, oot_split_col, model, tgt_name, ...)` | Search the random seed that maximizes OOT AUC |
+| `RejectInferenceFactory.create(method, ...)` | Build an inferrer by name; or use `ParcelingInferrer`, `HardCutoffInferrer`, `FuzzyAugmentInferrer`, `SimpleAugmentInferrer` directly |
+| `DistributionAdaptation(method)` | Density-ratio / covariate-shift weights between two samples |
 
-### Feature — 特征分析
+### Explainability: `Modeling_Tool.Explainability`
 
-| 类/函数 | 说明 |
-|---------|------|
-| `DistributionShiftAnalyzer` | 分布偏移检测（对比基准组） |
-| `DistributionPlotter` | 分布可视化（KDE/直方图/地毯图） |
-| `VarExtractionInsights` | 变量洞察（IV 计算 + WOE 分箱 + 画图） |
-| `CorrelationFilter` | 迭代式高相关变量过滤 |
-| `PSICalculator` | 群体稳定性指数计算 |
-| `calculate_psi(expected, actual, target_col)` | 两组数据间的 PSI |
-| `calculate_within_psi(data, grp_name, target_col)` | 数据集内部 PSI |
-| `proc_means(data, varlist, groupby)` | 分组描述性统计 |
-| `var_corr_filter(data, varlist, corr_cutpoint)` | 高相关变量对筛选 |
+| Name | Description |
+|---|---|
+| `ModelExplainer(model, ...)` | SHAP (`explain`, `feature_importance`, `explain_instance`), Owen value (`explain_owen`, `owen_group_importance`), PDP / ICE / ALE, LIME |
+| `build_coalition_structure(X, prior_groups=None, ...)` | Feature groups for Owen values (business priors plus correlation clustering) |
 
-### Model — 模型训练
+### Pipeline: `Modeling_Tool.Pipeline`
 
-| 类/函数 | 说明 |
-|---------|------|
-| `GradientBoostingModel(model_type, params)` | LightGBM/XGBoost 统一接口 |
-| `LRMaster(params)` | 逻辑回归主控类（训练/评估/校准/变量选择） |
-| `BackwardVariableEliminator` | 后向变量消除（支持 LGB/XGB） |
-| `LightGBMModel(params)` | LightGBM 封装 |
-| `XGBoostModel(params)` | XGBoost 封装 |
-| `FeatureSelectionAnalyzer` | LR 逐步变量选择分析器 |
-| `lr_stepwise_var_selection(...)` | 逐步回归变量选择（前向/后向） |
-| `lgb_model(x, y, valx, valy, params)` | 快速训练 LightGBM |
-| `xgb_model(x, y, valx, valy, params)` | 快速训练 XGBoost |
-| `lr_varimp(model)` | LR 系数重要性 |
-| `lgb_varimp(model)` | LightGBM 特征重要性 |
-| `xgb_varimp(model)` | XGBoost 特征重要性 |
+Seven pipelines, each with `<Name>Config` and `<Name>Result`: `CreditModelPipeline`, `FeatureValidationPipeline`,
+`RejectInferencePipeline`, `ScoreComparisonPipeline`, `ScoreConsistencyUATPipeline`, `SampleAnalysisPipeline`,
+`MockSamplePipeline`. Helpers for GUIs and config management: `extract_pipeline_schema`, `config_to_yaml`,
+`config_from_yaml`, `validate_pipeline_config`, `generate_pipeline_code`.
 
-### Eval — 模型评估
+### UAT: `Modeling_Tool.UAT`
 
-| 类/函数 | 说明 |
-|---------|------|
-| `GainsTableCalculator` | Gains 表计算器（支持分组/自定义指标） |
-| `PerformanceEvaluator` | 多数据集性能评估器 |
-| `Model_Evaluation_Tool` | 综合评估编排器 |
-| `EvaluationPipeline` | 链式评估流水线（.group_by().subset_by().apply()） |
-| `get_gains_table(data, dep, nbins, ...)` | 收益表计算 |
-| `get_perf_summary(train, validation, oot, ...)` | 多数据集性能汇总 |
-| `cross_risk(data, score_list, dep, nbins)` | 交叉风险矩阵 |
-| `evaluate_performance(datasets, ...)` | 单模型 ROC + KDE + PCT + Gains |
-| `comparison_performance(datasets, ...)` | 多模型对比图 |
-| `calc_roc(y_true, y_score)` | ROC 曲线计算 |
-| `calc_lift_apt(y_true, y_score, ...)` | Lift 表计算 |
+| Name | Description |
+|---|---|
+| `UATConfig` †, `UATConsistencyChecker(config, sqlrunner)` † | Compare online and offline scores and features for the same `flow_id`s; `run()` returns a summary |
 
-### Sample — 样本管理
+## Dependencies
 
-| 类/函数 | 说明 |
-|---------|------|
-| `SampleSplitter` | 样本切分（支持分层/随机种子控制） |
-| `StratifiedSampler` | 分层采样（保持目标分布） |
-| `SampleBalancer` | 样本均衡（欠采样/过采样/SMOTE） |
-| `DistributionAdaptation` | 分布适配（密度比/KL 散度/协变量偏移） |
-| `RejectInferrer` | 拒绝推断基类 |
-| `SimpleAugmentInferrer` | 简单增强推断 |
-| `HardCutoffInferrer` | 硬截断推断 |
-| `FuzzyAugmentInferrer` | 模糊增强推断 |
-| `ParcelingInferrer` | 分箱法推断 |
-| `RejectInferenceFactory` | 拒绝推断工厂类 |
-| `select_sample_seed(master_df, ...)` | 最优样本种子搜索 |
+Runtime requirements are declared in `pyproject.toml` (installed automatically): `pandas`, `numpy`, `scipy`,
+`scikit-learn`, `joblib`, `lightgbm`, `xgboost`, `catboost`, `matplotlib`, `seaborn`, `xlsxwriter`, `openpyxl`, `Pillow`,
+`tqdm`, `python-dateutil`. Optional extras: `pyodps`, `shap` / `lime`, `statsmodels`, `imbalanced-learn`, `optuna`, `minepy`.
 
-## 依赖
+## Architecture principles
 
-| 包 | 用途 |
-|----|------|
-| `pandas`, `numpy`, `scipy` | 数据处理与统计 |
-| `scikit-learn` | LR 模型、校准、采样 |
-| `lightgbm` | LightGBM 梯度提升 |
-| `xgboost` | XGBoost 梯度提升 |
-| `matplotlib`, `seaborn` | 可视化 |
-| `pyodps` | 阿里云 MaxCompute（可选） |
-| `joblib` | 模型持久化 |
-| `tqdm` | 进度条 |
-| `openpyxl` | Excel I/O（WOE 报告） |
-
-## 架构原则
-
-1. **Core 为叶节点** — 所有子包单向依赖 Core，Core 不依赖任何子包
-2. **延迟导入避免循环** — 跨包子模块导入使用函数体内 import，避免模块级循环依赖
-3. **__init__.py 分层导出** — 子包 `__init__.py` 导出全部公开 API，顶层 `__init__.py` 精选导出最常用 API
+1. **Core is the leaf.** Every subpackage depends on `Core`; `Core` depends on none of them.
+2. **Lazy imports across subpackages**, so there are no module-level import cycles.
+3. **Layered exports.** Each subpackage exports its full public API; the top-level `__init__.py` curates the most-used names.

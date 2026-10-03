@@ -6,211 +6,311 @@
 [![Build wheels](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml/badge.svg)](https://github.com/Kyle-J-Sun/SuperModelingFactory/actions/workflows/build.yml)
 [![Docs](https://img.shields.io/badge/docs-mkdocs-blue.svg)](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)
 
-风控建模工厂 —— 一套面向信用评分卡开发与模型管理的完整 Python 工具链。
+**SuperModelingFactory (SMF)** is an end-to-end Python toolkit for credit-risk scorecard development and model governance:
+sample design, WOE binning, feature screening, model training, evaluation, explainability, online/offline consistency
+checks, and formatted Excel reporting, all behind one consistent API.
 
-📖 **[在线文档](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)** · 安装、快速上手、API 参考、用户指南一应俱全。
+📖 **[Documentation](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)**: installation, quickstart, user guides, API reference, changelog.
 
-## 安装
+---
+
+## New here? Start with this
+
+SMF turns the usual scorecard workflow into a handful of composable building blocks. You can call each block yourself
+(full control), or hand a DataFrame to a **one-click pipeline** (fast, reproducible).
+
+```
+raw sample ─► split ─► WOE binning ─► feature screening ─► model ─► evaluation ─► explainability ─► Excel report
+              │          │              (PSI / IV / corr)    (LR / LGB / XGB / CatBoost)              │
+              └──────────┴──────────────── one-click pipelines wrap all of these ──────────────────────┘
+```
+
+| You want to... | Use |
+|---|---|
+| Split samples, balance classes, infer rejected applicants | `SampleSplitter`, `StratifiedSampler`, `SampleBalancer`, `RejectInferenceFactory` |
+| Bin variables and compute WOE / IV | `WOE_Master` (numeric features), `MonotoneWOEBinner` (monotone bins, categorical features, special values) |
+| Screen features by stability, information value, and correlation | `PSICalculator`, `VarExtractionInsights`, `CorrelationFilter`, `feature_screen` |
+| Train a model | `LRMaster` (logistic regression), `GradientBoostingModel` (LightGBM / XGBoost / CatBoost) |
+| Evaluate (KS, AUC, Gains, Lift, plots) | `PerformanceEvaluator`, `GainsTableCalculator`, `evaluate_performance` |
+| Explain a model (SHAP, Owen value, PDP, ICE, ALE, LIME) | `ModelExplainer` |
+| Produce an Excel report | `ExcelMaster`, `Report` |
+| Run the whole workflow in one call | `CreditModelPipeline` and six other pipelines |
+
+SMF installs **three top-level Python packages**:
+
+| Import name | Role |
+|---|---|
+| `Modeling_Tool` | The modeling engine. Almost everything you need is importable as `from Modeling_Tool import ...` |
+| `ExcelMaster` | Programmatic Excel workbook writer (cursor-based, charts, conditional formatting) |
+| `Report` | Report templates that assemble modeling artifacts into Excel workbooks |
+
+---
+
+## Installation
 
 ```bash
 pip install supermodelingfactory
 ```
 
-macOS 用户额外需要安装 OpenMP 运行时（lightgbm 依赖）：
+- Python **3.10, 3.11, 3.12, 3.13**. Pre-built wheels are published for macOS arm64, Linux x86_64, and Windows x86_64.
+  SMF ships plain Python source, so no compiler is needed on other platforms.
+- macOS only: `brew install libomp` (OpenMP runtime required by LightGBM).
+
+Optional extras:
+
+| Extra | Command | Enables |
+|---|---|---|
+| `odps` | `pip install 'supermodelingfactory[odps]'` | Alibaba Cloud MaxCompute (`ODPSRunner`, `proc_means_odps`, `ParallelODPSManager`) |
+| `explain` | `pip install 'supermodelingfactory[explain]'` | `ModelExplainer`: SHAP, Owen value, LIME |
+| `stats` | `pip install 'supermodelingfactory[stats]'` | `statsmodels`-based VIF gates and logistic-regression diagnostics |
+| `imblearn` | `pip install 'supermodelingfactory[imblearn]'` | SMOTE and imbalanced-learn samplers in `StratifiedSampler` / `SampleBalancer` |
+| `optuna` | `pip install 'supermodelingfactory[optuna]'` | Optuna search in `GradientBoostingModel.param_search` and the pipelines |
+| `mic` | `pip install 'supermodelingfactory[mic]'` | MIC correlation in `build_coalition_structure` (Python < 3.11 only) |
+
+> **Notebook display:** `PerformanceEvaluator.evaluate()` prints its result table through `IPython.display` by default.
+> In a plain script, either pass `display=False` (as below) or `pip install ipython`.
+
+Verify the installation:
 
 ```bash
-brew install libomp
+python -c "import Modeling_Tool; print(Modeling_Tool.__version__)"
 ```
 
-支持的环境：Python 3.10 / 3.11 / 3.12 / 3.13，平台 macOS arm64 / Linux x86_64 / Windows x86_64。
-
-详见 [INSTALL.md](INSTALL.md)。
-
-## 许可证
-
-本项目采用 **Business Source License 1.1**，Change Date 为 **2030-06-24**。之前：
-
-- ✅ 允许：个人学习、学术研究、内部评估、原型、教学
-- ❌ 不允许：任何生产 / 商业 / 营收性使用
-
-2030-06-24 后自动转为 Apache 2.0。商业授权请联系作者。
-
-项目现在以源码形式打包和分发；wheel 与 sdist 均包含 Python 源码，不再通过 Cython 隐藏核心模块实现。
-
-## 项目概述
-
-SuperModelingFactory 整合了信贷风控建模全流程所需的三大能力：
-
-| 子项目 | 功能定位 | 核心能力 |
-|--------|---------|---------| 
-| **[Modeling_Tool](Modeling_Tool/)** | 建模引擎 | 数据分箱、WOE 编码、特征分析、模型训练与评估、样本管理 |
-| **[ExcelMaster](ExcelMaster/)** | 报告引擎 | 程序化 Excel 工作簿生成，支持图表、条件格式、光标流式写入 |
-| **[Report](Report/)** | 报告模板 | 模型性能报告、WOE 图批量导出、多模型对比报告 |
-
-## 项目结构
-
-```
-SuperModelingFactory/
-├── Modeling_Tool/          # 核心建模工具包
-│   ├── Core/               #   基础设施：分箱、ODPS、工具函数、加密
-│   ├── WOE/                #   WOE 编码：分箱、变换、映射、可视化
-│   ├── Feature/            #   特征分析：分布偏移、PSI、相关性过滤
-│   ├── Model/              #   模型训练：LR、LightGBM、XGBoost、变量选择
-│   ├── Eval/               #   模型评估：Gains 表、ROC/KS、性能汇总
-│   ├── Sample/             #   样本管理：切分、分层、拒绝推断、分布适配
-│   ├── Explainability/     #   模型解释：SHAP、LIME、PDP、ICE、ALE、Owen
-│   ├── Pipeline/           #   一键流水线：特征验收、信用建模、拒绝推断等
-│   └── UAT/                #   线上线下分数一致性校验
-├── ExcelMaster/            # Excel 报告引擎
-│   ├── ExcelFormatTool.py  #   格式定义（50+ 预设单元格格式）
-│   ├── ExcelMaster.py      #   核心引擎（光标流式写入、图表、条件格式）
-│   ├── Template.py         #   分析报告模板（PVA、Bivar、GridSearch 等）
-│   └── Utility.py          #   工具函数（颜色、路径、PSI 报表处理等）
-└── Report/                 # 模型评估报告模板
-    └── Report_Tool.py      #   性能报告、WOE 绘图、多模型对比
-```
-
-## 安装
-
-### 依赖
+Working from a source checkout instead:
 
 ```bash
-# 核心依赖
-pip install pandas numpy scipy scikit-learn
-
-# 建模引擎
-pip install lightgbm xgboost joblib
-
-# Excel 报告
-pip install xlsxwriter openpyxl Pillow matplotlib seaborn
-
-# 可选
-pip install pyodps          # 阿里云 MaxCompute 连接
-pip install imbalanced-learn # SMOTE 采样
-pip install tqdm             # 进度条
-```
-
-### 使用
-
-```bash
-git clone <repo-url>
+git clone https://github.com/Kyle-J-Sun/SuperModelingFactory.git
 cd SuperModelingFactory
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+pip install -e .
 ```
 
-## 快速开始
+See [INSTALL.md](INSTALL.md) for troubleshooting.
 
-### 典型风控建模流程
+---
+
+## Quickstart (about 5 minutes)
+
+The script below is self-contained: it generates synthetic data, then runs split → WOE → screening → model → evaluation →
+Excel report. Copy it into a file and run it.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from Modeling_Tool import (
-    # 分箱
-    Binning, super_binning,
-    # WOE 编码
-    WOE_Master,
-    # 特征分析
-    VarExtractionInsights, CorrelationFilter, PSICalculator,
-    # 模型训练
-    GradientBoostingModel, LRMaster,
-    # 模型评估
-    GainsTableCalculator, PerformanceEvaluator,
-    # 样本管理
-    SampleSplitter, RejectInferrer
+    SampleSplitter, WOE_Master, PSICalculator, VarExtractionInsights, CorrelationFilter,
+    GradientBoostingModel, PerformanceEvaluator, GainsTableCalculator,
 )
-
-# 1. 样本切分
-splitter = SampleSplitter(test_size=0.3, random_state=42, stratify=True)
-train_df, test_df = splitter.split_df(data, target='is_bad')
-
-# 2. WOE 分箱与编码
-woe_master = WOE_Master(train_data=train_df, varlist=feature_cols, dep='is_bad')
-woe_master.fit(nbins=10, equal_freq=True)
-train_woe = woe_master.transform(train_df)
-test_woe = woe_master.transform(test_df)
-
-# 3. 特征筛选
-psi_calc = PSICalculator(buckets=10)
-psi_result = psi_calc.calculate(expected_df=train_df, current_data=test_df, varlist=feature_cols)
-
-corr_filter = CorrelationFilter(data=train_woe, dep='is_bad')
-keep_vars = corr_filter.remove_highly_correlated(feature_cols)
-
-# 4. 模型训练
-model = GradientBoostingModel('lgb', params={'n_estimators': 100, 'learning_rate': 0.1})
-model.fit(train_woe[keep_vars], train_woe['is_bad'], test_woe[keep_vars], test_woe['is_bad'])
-
-# 5. 模型评估
-evaluator = PerformanceEvaluator(tgt_name='is_bad', model=model.model, feature_cols=keep_vars)
-evaluator.add_dataset('train', train_woe).add_dataset('test', test_woe)
-perf_result = evaluator.evaluate()
-```
-
-### 使用 ExcelMaster 生成报告
-
-```python
 from ExcelMaster.ExcelMaster import ExcelMaster
 
-em = ExcelMaster('model_report.xlsx')
-ws = em.add_worksheet('Performance')
+# 1. Synthetic data ---------------------------------------------------------------
+rng = np.random.default_rng(42)
+n = 6000
+data = pd.DataFrame({
+    "age": rng.normal(35, 8, n).clip(18, 70),
+    "income": rng.lognormal(10, 0.4, n),
+    "score_b": rng.normal(600, 60, n),
+    "utilization": rng.uniform(0, 1, n),
+    "n_overdue": rng.poisson(0.3, n),
+})
+logit = -2.2 - 0.02 * (data["score_b"] - 600) + 0.5 * data["n_overdue"] - 0.8 * data["utilization"]
+data["bad_flag"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
+features = ["age", "income", "score_b", "utilization", "n_overdue"]
 
-# 流式写入 DataFrame
-em.write_dataframe(ws, perf_result, title='模型性能汇总', titleformat='BLUE_H2')
-em.insert_image(ws, 'roc_curve.png', figScale=(600, 400))
+# 2. Split (stratified by the target) ------------------------------------------------
+train_df, test_df = SampleSplitter(test_size=0.3, random_state=42, stratify=True).split_df(
+    data, target="bad_flag")
 
+# 3. WOE binning and encoding (adds one `<feature>_woe` column per feature) ---------
+woe = WOE_Master(train_data=train_df, varlist=features, dep="bad_flag")
+woe.fit(nbins=10, equal_freq=True)
+train_woe = woe.transform(train_df)
+test_woe = woe.transform(test_df)
+
+# 4. Feature screening: stability (PSI) -> information value (IV) -> correlation -----
+psi = PSICalculator(buckets=10, binning_engine=woe).calculate(
+    expected_df=train_df, current_data=test_df, varlist=features)
+stable = psi.loc[psi["psi"] < 0.1, "var"].tolist()
+
+iv_report = VarExtractionInsights(
+    data=train_df, dep="bad_flag", plot_path="./iv_plots/", woe_binner=woe,
+).get_var_analysis_report(train_df, stable)
+keep_by_iv = iv_report.loc[iv_report["iv"] >= 0.02, "var"].tolist()
+
+keep_vars = CorrelationFilter(
+    data=train_df, dep="bad_flag", corr_cutpoint=0.7, woe_binner=woe,
+).remove_highly_correlated(keep_by_iv)
+woe_cols = [f"{v}_woe" for v in keep_vars]
+print("selected features:", keep_vars)
+
+# 5. Train a gradient-boosting model (LightGBM here; "xgb" and "cat" also work) ------
+gbm = GradientBoostingModel("lgb", params={
+    "n_estimators": 200, "learning_rate": 0.05, "max_depth": 3,
+    "early_stopping_rounds": 20, "eval_metric": "auc", "verbose": -1,
+})
+gbm.fit(train_woe[woe_cols], train_woe["bad_flag"], test_woe[woe_cols], test_woe["bad_flag"])
+
+# 6. Evaluate: KS / AUC / Top-decile lift per dataset -------------------------------------
+perf = (
+    PerformanceEvaluator(tgt_name="bad_flag", model=gbm, feature_cols=woe_cols)
+    .add_dataset("train", train_woe)
+    .add_dataset("test", test_woe)
+    .evaluate(display=False)
+)
+print(perf[["index", "KS", "AUC"]])
+
+# 7. Gains table on the test set -----------------------------------------------------------
+scored = test_woe.copy()
+scored["score"] = gbm.predict(test_woe[woe_cols])      # probability of bad
+gains = GainsTableCalculator(data=scored, dep="bad_flag", score="score", nbins=10).calculate()
+
+# 8. Excel report ---------------------------------------------------------------------------
+em = ExcelMaster("model_report.xlsx", verbose=False)
+ws = em.add_worksheet("Performance")
+em.write_dataframe(ws, perf, title="Model performance", titleformat="BLUE_H2")
+em.write_dataframe(ws, gains.reset_index(), title="Gains table (test)", titleformat="BLUE_H2")
 em.close_workbook()
 ```
 
-## 架构设计
+**What to expect:** a `model_report.xlsx` workbook, IV plots in `./iv_plots/`, and a `perf` table whose KS / AUC are
+roughly 0.4 / 0.77 on this synthetic data.
 
-### 依赖方向
+### Things worth knowing before you start
+
+- `WOE_Master` handles **numeric** features. For categorical (string) features, or when you need monotone bins and
+  special-value governance, use `MonotoneWOEBinner(feature_cols=..., target_col=..., cate_feats=[...])`, then
+  `.fit(df)` and `.apply_woe(df)`.
+- `GradientBoostingModel.fit(x_train, y_train, x_val, y_val)` takes a validation set for early stopping. LightGBM
+  (`"lgb"`) requires `early_stopping_rounds` in `params` (a missing key raises `KeyError`); XGBoost and CatBoost treat it as
+  optional, and XGBoost ignores `eval_metric`.
+- `ExcelMaster(filepath, verbose)`: `verbose` has no default. In `insert_image`, `figScale` is an x/y **scale factor**
+  (for example `(0.6, 0.6)`), not a pixel size.
+- Sample weights are first-class: pass `weight_col` (or `sample_weight` for array-based APIs) consistently in training
+  and evaluation.
+
+---
+
+## One-click pipelines
+
+Pass a DataFrame and a config object; get back a structured result object. This runs end to end on the `data` frame from the
+quickstart, with the slow optional stages switched off:
+
+```python
+from Modeling_Tool import CreditModelPipeline, CreditModelPipelineConfig
+
+df = data.rename(columns={"bad_flag": "badflag"})
+df["oot_flag"] = (np.arange(len(df)) >= int(len(df) * 0.8)).astype(int)   # last 20% = out-of-time
+
+cfg = CreditModelPipelineConfig(
+    output_dir="output",
+    target_col="badflag",
+    feature_cols=features,
+    oot_col="oot_flag",
+    train_models=["lr", "lgb"],
+    backward_enabled=False,
+    optuna_models=[],
+    explain_models=[],
+    owen_enabled=False,
+    write_excel=False,
+    plot_outputs=False,
+)
+result = CreditModelPipeline(cfg).run(df)
+
+print(result.selected_features)
+print(result.perf_results["lgb"][["index", "KS", "AUC"]])
+```
+
+| Pipeline | Config / result classes | Purpose |
+|---|---|---|
+| `CreditModelPipeline` | `CreditModelPipelineConfig` / `CreditModelPipelineResult` | Split, screening, WOE, training, tuning, evaluation, explanation, Excel report |
+| `FeatureValidationPipeline` | `FeatureValidationPipelineConfig` / `FeatureValidationPipelineResult` | Acceptance checks for new feature tables: distribution, PSI, IV/KS, correlation |
+| `RejectInferencePipeline` | `RejectInferencePipelineConfig` / `RejectInferencePipelineResult` | Reject inference with pre-score training and benchmark comparison |
+| `ScoreComparisonPipeline` | `ScoreComparisonPipelineConfig` / `ScoreComparisonPipelineResult` | Champion/challenger score comparison by time and population |
+| `ScoreConsistencyUATPipeline` | `ScoreConsistencyUATPipelineConfig` / `ScoreConsistencyUATPipelineResult` | Online vs offline score and feature consistency |
+| `SampleAnalysisPipeline` | `SampleAnalysisPipelineConfig` / `SampleAnalysisPipelineResult` | Label maturity and OOT / INS / OOS split recommendation |
+| `MockSamplePipeline` | `MockSamplePipelineConfig` / `MockSamplePipelineResult` | Synthetic application samples for demos and tests |
+
+All of them live in `Modeling_Tool.Pipeline` and are also re-exported from `Modeling_Tool`. Every pipeline is invoked as
+`Pipeline(config).run(data)` (the UAT pipeline can also read SQL files).
+
+---
+
+## Package map
 
 ```
-                    ┌─────────┐
-                    │  Core   │  (基础设施，无跨包依赖)
-                    └────┬────┘
-           ┌─────────┬───┼───────┬─────────┐
-           ▼         ▼   ▼       ▼         ▼
-         WOE      Model  Eval  Feature   Sample
-           │         │              │        │
-           └─────────┴──────────────┴────────
-                (均单向依赖 Core，模块间延迟导入)
+SuperModelingFactory/
+├── Modeling_Tool/          # Modeling engine
+│   ├── Core/               #   Binning, ODPS client, parallel engine, ProcCompare, model I/O, utilities
+│   ├── WOE/                #   WOE_Master, MonotoneWOEBinner, WOE transforms, plots, engine adapter
+│   ├── Feature/            #   PSI, IV/KS insights, correlation filter, feature_screen, distribution analysis
+│   ├── Model/              #   LRMaster, GradientBoostingModel, backward elimination
+│   ├── Eval/               #   Gains tables, performance evaluation, cross-risk, ROC/KS/PR/lift plots
+│   ├── Sample/             #   Splitting, sampling, reject inference, distribution adaptation
+│   ├── Explainability/     #   ModelExplainer (SHAP, Owen, PDP, ICE, ALE, LIME), coalition structure
+│   ├── Pipeline/           #   One-click pipelines, config schema and registry helpers
+│   └── UAT/                #   UATConsistencyChecker and helpers
+├── ExcelMaster/            # Excel engine: ExcelMaster, 50+ preset cell formats, report templates
+├── Report/                 # Report_Tool: model performance, WOE plot, multi-model comparison reports
+├── scripts/                # Release tooling (version consistency check)
+└── pyproject.toml, setup.py, Makefile, INSTALL.md, CONTRIBUTING.md, RELEASING.md
 ```
 
-- **Core** 是所有子包的基础，不依赖任何其他子包
-- 其他子包之间通过**延迟导入**（函数体内 import）避免循环依赖
-- 顶层 `Modeling_Tool/__init__.py` 提供精选的统一 API
+Per-package details: [Modeling_Tool](Modeling_Tool/README.md) · [ExcelMaster](ExcelMaster/README.md) · [Report](Report/README.md).
 
-### 命名规范
+Design rules:
 
-- 所有公开 API 通过 `__init__.py` 导出，使用方只需 `from Modeling_Tool import ...`
-- 类名采用 PascalCase，函数名采用 snake_case
-- 以 `_` 开头的函数/方法为内部实现，不对外暴露
+- `Modeling_Tool.Core` has no dependency on the other subpackages; the others depend on it one way, and cross-subpackage
+  imports are lazy to avoid cycles.
+- Public API is exported through `__init__.py`: `from Modeling_Tool import ...` for the common names, or
+  `from Modeling_Tool.<Subpackage> import ...` for the complete set. Names starting with `_` are internal.
+- Classes use PascalCase and functions use snake_case.
 
-## 持续集成
+---
 
-本仓库的 GitHub Actions(`.github/workflows/tests.yml`)会在 push 到 `main` 与 PR 上自动跑 pytest,矩阵为:
+## The SMF ecosystem
 
-- **Python**:`3.11`、`3.12`
-- **依赖矩阵**:
-  - `legacy` — `numpy<2` + `scipy<1.13` + `lightgbm<4`
-  - `modern` — `numpy>=2` + `scipy>=1.13` + `lightgbm>=4`
-- **共同约束**:`pandas>=2.0,<2.3`(等 [issue #2](https://github.com/Kyle-J-Sun/SuperModelingFactory/issues/2) 修复后放宽)
+| Repository | Purpose |
+|---|---|
+| [SuperModelingFactory](https://github.com/Kyle-J-Sun/SuperModelingFactory) | This repository: the package source |
+| [SuperModelingFactory_doc](https://github.com/Kyle-J-Sun/SuperModelingFactory_doc) | MkDocs documentation site ([live](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)) |
+| [SuperModelingFactory_pytest](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest) | Full regression test suite (1233 tests at v0.8.2) |
+| [SuperModelingFactory_agent](https://github.com/Kyle-J-Sun/SuperModelingFactory_agent) | An AI-assistant skill that answers SMF questions and drafts Pipeline calls |
 
-测试用例托管在独立仓库 [`SuperModelingFactory_pytest`](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest)(私有),workflow 通过 `secrets.PYTEST_REPO_TOKEN` 跨仓 clone。
+---
 
-### 配置 PAT(只需做一次)
+## Development and testing
 
-1. 进入 [GitHub Settings · Tokens (classic)](https://github.com/settings/tokens) 生成新 token,scope 勾选 `repo`(只读访问私有仓库即可)
-2. 进入本仓库 **Settings → Secrets and variables → Actions → New repository secret**
-3. Name: `PYTEST_REPO_TOKEN`,Value: 粘贴 token
+```bash
+make install     # editable install
+make test        # smoke-import the core modules
+make verify      # compile sources and build the sdist + wheel (what CI runs)
+```
 
-如改用 Fine-grained PAT,需将其授权访问 `SuperModelingFactory_pytest` 仓库的 *Contents: Read* 权限。
+The full test suite lives in `SuperModelingFactory_pytest`:
 
-## 版本
+```bash
+export PYTHONPATH="$(pwd):${PYTHONPATH}"
+pytest /path/to/SuperModelingFactory_pytest -q
+```
+
+GitHub Actions (`.github/workflows/tests.yml`) runs that suite on every push to `main` and every pull request, on Python
+3.11 and 3.12 across three dependency sets (`legacy`: numpy<2, `modern`: numpy 2.x, `bleeding`: latest pandas). Pushing a
+`v*` tag builds wheels and publishes to PyPI (see [RELEASING.md](RELEASING.md)). Contribution workflow:
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## License
+
+SMF is released under the **Business Source License 1.1** (Change Date **2030-06-24**).
+
+- Allowed: personal study, academic research, internal evaluation, prototyping, teaching, non-commercial benchmarking.
+- Not allowed without a commercial license: production use, including deployment inside any credit-risk, lending, scoring,
+  underwriting, marketing, or other revenue-generating pipeline.
+- On 2030-06-24 the license converts automatically to Apache 2.0. For a commercial license, contact the author. See
+  [LICENSE](LICENSE) for the full text.
+
+## Version
 
 - **Version**: 0.8.2
 - **Author**: Jingkai Sun
-
-## 许可证
-
-本项目采用 **Business Source License 1.1**（Change Date **2030-06-24**）。详见文首 [许可证](#许可证) 一节与 [LICENSE](LICENSE) 全文。
