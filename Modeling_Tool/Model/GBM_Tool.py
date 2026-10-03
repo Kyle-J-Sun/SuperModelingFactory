@@ -61,6 +61,23 @@ from Modeling_Tool.Core.utils import load_model, save_model
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
+
+def _calibrated_classifier(estimator, method, cv):
+    """Build a ``CalibratedClassifierCV`` that works on every supported scikit-learn.
+
+    scikit-learn 1.6 deprecated ``cv='prefit'`` in favour of wrapping the fitted estimator in
+    ``FrozenEstimator`` and 1.8 removed ``'prefit'`` altogether. For a prefit calibration, use
+    ``FrozenEstimator`` when it exists and fall back to ``cv='prefit'`` on older releases.
+    """
+    if cv == 'prefit':
+        try:
+            from sklearn.frozen import FrozenEstimator
+        except ImportError:  # scikit-learn < 1.6
+            return CalibratedClassifierCV(estimator, method=method, cv='prefit')
+        return CalibratedClassifierCV(FrozenEstimator(estimator), method=method)
+    return CalibratedClassifierCV(estimator, method=method, cv=cv)
+
+
 # lightgbm, xgboost, and catboost are imported lazily inside each function/method to
 # avoid triggering the lightgbm → dask → numpy_compat → np.float chain at
 # module import time. Old dask versions (<2022) use np.float which was
@@ -784,7 +801,7 @@ class LightGBMModel:
         -------
         self
         """
-        self.model = CalibratedClassifierCV(self.model, method=method, cv=cv)
+        self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
         return self
 
@@ -990,7 +1007,7 @@ class XGBoostModel:
         -------
         self
         """
-        self.model = CalibratedClassifierCV(self.model, method=method, cv=cv)
+        self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
         return self
 
@@ -1181,7 +1198,7 @@ class CatBoostModel:
         -------
         self
         """
-        self.model = CalibratedClassifierCV(self.model, method=method, cv=cv)
+        self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
         return self
 
