@@ -1,89 +1,96 @@
-# SMF 发版流程
+# SMF Release Process
 
 ## TL;DR
 
 ```bash
-# 1. 三处版本号同步升,推 PR,merge 到 main
-python scripts/check_version_consistency.py    # 本地先自查
+# 1. Bump the version in all three places, open a PR, merge to main
+python scripts/check_version_consistency.py    # run the check locally first
 
-# 2. 从 main 打 tag,格式必须 v{X}.{Y}.{Z}
+# 2. Tag from main; the format must be v{X}.{Y}.{Z}
 git tag -a v0.4.3 -m "SMF 0.4.3 — <one-line summary>"
 git push origin v0.4.3
 ```
 
-Tag 推送后 GitHub Actions 自动:
-1. 构建 wheel + sdist
-2. Smoke-test 装 wheel 并 import 五个核心模块
-3. 附加 artifact 到 GitHub Release 并自动生成 release notes
-4. 通过 Trusted Publisher (OIDC) 发到 PyPI
+After the tag is pushed, GitHub Actions automatically:
+1. Builds the wheel and sdist
+2. Smoke-tests the wheel: installs it and imports the five core modules
+3. Attaches the artifacts to a GitHub Release and generates release notes
+4. Publishes to PyPI through a Trusted Publisher (OIDC)
 
-无需任何本地 twine、pypirc、或手动上传。
+No local `twine`, `.pypirc`, or manual upload is needed.
 
-## 三处版本号
+## The three version numbers
 
-发版前 **必须** 保证以下三个文件版本号一致:
+Before a release, the version must be **identical** in these three files:
 
-| 文件 | 字段 |
+| File | Field |
 |---|---|
 | `Modeling_Tool/__init__.py` | `__version__ = "X.Y.Z"` |
-| `setup.py` | `os.environ.get("SMF_VERSION", "X.Y.Z")` 里的默认值 |
+| `setup.py` | The default in `os.environ.get("SMF_VERSION", "X.Y.Z")` |
 | `pyproject.toml` | `[project] version = "X.Y.Z"` |
 
-**为什么三处都要盯**:`python -m build` 走 PEP 517,PEP 621 元数据(`pyproject.toml`)优先于 `setup.py`。三者中任何一处漂移都会导致构建产物版本号与 `__version__` / tag 对不上,而 PyPI 是根据构建产物版本号建目录的。
+**Why all three matter:** `python -m build` follows PEP 517, and the PEP 621 metadata in `pyproject.toml` takes precedence over
+`setup.py`. If any one of the three drifts, the built artifacts carry a version that disagrees with `__version__` and the tag,
+and PyPI creates its directory from the artifact's version.
 
-`scripts/check_version_consistency.py` 会在每次 PR / push 到 main 时通过 `version-consistency.yml` workflow 自动跑,漂移会直接 CI 挂掉,不会漏到发版环节。
+`scripts/check_version_consistency.py` runs automatically on every PR and every push to `main` through the
+`version-consistency.yml` workflow. Drift fails CI immediately, so it cannot reach the release step.
 
-## 版本号选取规则
+## Choosing the version number
 
-- **Patch** (`0.x.Y`):纯硬化 / bug fix,零 API 移除,健康输入零数值差异。
-- **Minor** (`0.X.0`):至少一处行为变更(默认值翻转、必填字段变化、返回值语义调整)。任何 breaking default **必须先在上一 patch 通过 opt-in 参数落地**,再在下一 minor 翻默认。参考:
-  - 0.3.19 → 0.4.0:`ScoreComparisonPipelineConfig.cross_vars` 默认从 `["rating"]` 翻到 `[]`
-  - 0.4.2 → 未来 0.5.0:`PSI_Tool.missing_policy` 默认将从 `"drop"` 翻到 `"include"`
-- **Major** (`X.0.0`):重大架构调整。目前无计划。
+- **Patch** (`0.x.Y`): pure hardening and bug fixes, no API removals, zero numerical differences on healthy inputs.
+- **Minor** (`0.X.0`): at least one behavior change (a flipped default, a changed required field, changed return-value
+  semantics). Any breaking default **must first land behind an opt-in parameter in the previous patch release**, and the default
+  is flipped only in the next minor. Examples:
+  - 0.3.19 → 0.4.0: the default of `ScoreComparisonPipelineConfig.cross_vars` flipped from `["rating"]` to `[]`
+  - 0.4.2 → a future 0.5.0: the default of `PSI_Tool.missing_policy` will flip from `"drop"` to `"include"`
+- **Major** (`X.0.0`): a major architectural change. None is planned.
 
-## 三仓协同规则
+## Coordinating the repositories
 
-代码变更是主仓、doc、pytest 三仓协同事务:
+A code change is a coordinated change across the main, doc, and pytest repositories (and the agent repository when needed):
 
-1. 修 pytest 仓,commit + push + open PR
-2. 修 doc 仓,commit + push + open PR
-3. 修 _agent 仓(如需更新 known_gotchas 或 pipeline_catalog),commit + push + open PR
-4. **最后**修主仓,commit + push + open PR
+1. Update the pytest repository: commit, push, open a PR
+2. Update the doc repository: commit, push, open a PR
+3. Update the `_agent` repository if `known_gotchas.md` or `pipeline_catalog.md` needs it: commit, push, open a PR
+4. Update the main repository **last**: commit, push, open a PR
 
-主仓 PR **合并顺序** 也遵循同样的 `pytest → doc → _agent → main`。主仓合并触发 tag,tag 触发 PyPI 发版。
+The PRs are also **merged** in the order `pytest → doc → _agent → main`. Merging the main repository triggers the tag, and the tag
+triggers the PyPI release.
 
-详情见 Space 顶层 `SMF Coordinated Push Workflow` instruction。
+For details, see the top-level `SMF Coordinated Push Workflow` instruction of the Space.
 
-## 事前 checklist
+## Pre-release checklist
 
-发 tag 之前手动过一遍:
+Go through this by hand before tagging:
 
-- [ ] 三仓的 PR 都已 merge 到各自 default 分支
-- [ ] `python scripts/check_version_consistency.py` 本地跑通
-- [ ] `main` 最新 commit 上的 tests / verify / build workflow 都是绿的
-- [ ] 全量 pytest 本地跑通:0 skip 0 fail
-- [ ] doc 仓 `docs/changelog/vX.Y.Z.md` 已就位
-- [ ] `_agent` 仓 `known_gotchas.md` 已 append 本轮批次(若有修复)
+- [ ] The PRs of all repositories are merged into their default branches
+- [ ] `python scripts/check_version_consistency.py` passes locally
+- [ ] The tests, verify, and build workflows are green on the latest commit of `main`
+- [ ] The full pytest suite passes locally: 0 skipped, 0 failed
+- [ ] The doc repository has `docs/changelog/vX.Y.Z.md`
+- [ ] The `_agent` repository's `known_gotchas.md` has this release's batch appended (if there were fixes)
 
-## 事后 checklist
+## Post-release checklist
 
-Tag 推送后大约 3 分钟内 GitHub Actions 应完成:
+About three minutes after the tag is pushed, GitHub Actions should have finished:
 
-- [ ] `Build distributions` workflow run 显示 3 个 job 全绿
-- [ ] `https://github.com/Kyle-J-Sun/SuperModelingFactory/releases/tag/vX.Y.Z` 存在,附带 wheel + sdist
-- [ ] `curl -s https://pypi.org/pypi/supermodelingfactory/X.Y.Z/json` 返回 200
-- [ ] `pip install SuperModelingFactory==X.Y.Z` 从干净虚拟环境能装
+- [ ] The `Build distributions` workflow run shows all three jobs green
+- [ ] `https://github.com/Kyle-J-Sun/SuperModelingFactory/releases/tag/vX.Y.Z` exists, with the wheel and sdist attached
+- [ ] `curl -s https://pypi.org/pypi/supermodelingfactory/X.Y.Z/json` returns 200
+- [ ] `pip install SuperModelingFactory==X.Y.Z` works in a clean virtual environment
 
-## 手动 fallback
+## Manual fallback
 
-如果 Trusted Publisher OIDC 因某种原因失效(比如 PyPI 上的 trusted publisher 配置被清了),你可以本地手动发一次:
+If the Trusted Publisher (OIDC) stops working for some reason (for example, the trusted-publisher configuration on PyPI was
+cleared), you can publish once from your machine:
 
 ```bash
 cd SuperModelingFactory
 git checkout main && git pull
 rm -rf dist/ build/ *.egg-info
 python -m build
-twine upload dist/*   # 需要本地 ~/.pypirc 或 TWINE_PASSWORD
+twine upload dist/*   # needs a local ~/.pypirc or TWINE_PASSWORD
 ```
 
-之后重新配 Trusted Publisher(在 pypi.org project settings 里),下次 tag 会自动恢复。
+Afterwards, reconfigure the Trusted Publisher in the project settings on pypi.org; the next tag will then publish automatically again.

@@ -163,7 +163,8 @@ git push origin main
 git push origin v0.3.6
 ```
 
-Recommended commit order across repos: **pytest → main → doc → tag**.
+Recommended commit and merge order across repos: **pytest → doc → agent → main → tag** (see
+[RELEASING.md](RELEASING.md)).
 
 The tag push triggers `.github/workflows/build.yml` which builds wheels, an
 sdist, creates a GitHub Release, and publishes to PyPI via OIDC trusted
