@@ -24,6 +24,16 @@ from sklearn.model_selection import train_test_split
 from Modeling_Tool.Eval.Model_Eval_Tool import PerformanceEvaluator
 from Modeling_Tool.Core.utils import get_feature_names
 
+def _build_imblearn_sampler(sampler_cls, random_state=None, **kwargs):
+    """Instantiate an imbalanced-learn sampler, passing ``random_state`` only when
+    the installed release still accepts it (recent releases dropped it from the
+    deterministic cleaners such as NearMiss, TomekLinks and EditedNearestNeighbours)."""
+    import inspect
+    if 'random_state' in inspect.signature(sampler_cls.__init__).parameters:
+        kwargs['random_state'] = random_state
+    return sampler_cls(**kwargs)
+
+
 def select_sample_seed(master_df, oot_split_col, model, tgt_name, seed_range = (3000, 3050), ins_prop = 0.7):
     """ Select Best Seed for Sample Splitting. """
     
@@ -532,7 +542,7 @@ class SampleBalancer:
         except ImportError:
             raise ImportError("imbalanced-learn required. Install with: pip install imbalanced-learn")
         
-        nm = NearMiss(version=1, random_state=self.random_state)
+        nm = _build_imblearn_sampler(NearMiss, self.random_state, version=1)
         return nm.fit_resample(X, y)
     
     def _tomek_links(self, X, y):
@@ -544,7 +554,7 @@ class SampleBalancer:
         except ImportError:
             raise ImportError("imbalanced-learn required. Install with: pip install imbalanced-learn")
         
-        tl = TomekLinks(random_state=self.random_state)
+        tl = _build_imblearn_sampler(TomekLinks, self.random_state)
         return tl.fit_resample(X, y)
     
     def _edited_nn(self, X, y):
@@ -556,5 +566,5 @@ class SampleBalancer:
         except ImportError:
             raise ImportError("imbalanced-learn required. Install with: pip install imbalanced-learn")
         
-        enn = EditedNearestNeighbours(random_state=self.random_state)
+        enn = _build_imblearn_sampler(EditedNearestNeighbours, self.random_state)
         return enn.fit_resample(X, y)
