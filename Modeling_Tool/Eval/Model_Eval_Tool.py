@@ -1048,7 +1048,7 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     i = 1
     while i < len(valid_grp_list):
         
-        grp = grp_list[i]
+        grp = valid_grp_list[i]
         data_grp = data[data[grp_name].isin([grp])]
 
         perf_res = _get_gains_table_single(data = data_grp, 
@@ -1251,7 +1251,7 @@ def get_perf_summary(train, validation, oot, tgt_name,
     i = 1
     while i < len(valid_grp_list):
         
-        grp = grp_list[i]
+        grp = valid_grp_list[i]
         oot_grp = oot[oot[oot_grp_name].isin([grp])]
         
 #         print(grp)
@@ -1840,7 +1840,7 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
     i = 1
     while i < len(valid_grp_list):
         
-        grp = grp_list[i]
+        grp = valid_grp_list[i]
         data_grp = data[data[grp_name].isin([grp])]
 
         perf_res = _get_cust_gains_table_single(data = data_grp, 
