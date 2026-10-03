@@ -1090,7 +1090,10 @@ def get_dtypes_file(data, outputFile = None, ck_format=False):
     res = res.reset_index()
     res.columns = ["colname", "dtype"]
     if ck_format:
-        res['dtype'] = res['dtype'].astype(str).str.strip().map(ck_dtype)
+        raise NotImplementedError(
+            "ck_format=True needs a ClickHouse dtype mapping, which SMF does not ship. "
+            "Use the default ck_format=False."
+        )
     res['dtype'] = res['dtype'].astype(str).str.strip()
     if outputFile is not None:
         res.to_csv(outputFile, index = False, header=False)
@@ -1150,6 +1153,8 @@ def h2o_apply_regex(data, colname, func):
     >>> h2o_apply_regex(hf, 'name', lambda x: x.upper())
     """
     """ Apply lambda function to h2o frame. """
+    import h2o  # optional dependency, only needed by this helper
+
     if isinstance(colname, str):
         fnl_res = h2o.H2OFrame(data[colname].as_data_frame()[colname].apply(func).tolist())
         fnl_res = fnl_res.rename({'C1':colname})
@@ -1861,7 +1866,7 @@ def scoring(data, model, varlist, scr_name, keeplist = None, all_missing_spec_va
         
         
         all_missing_data[scr_name] = model.predict_proba(fnl_data[nohit_condition].loc[:, varlist])[:, 1]
-        logger.info("Score for All-Missing Cases: ", all_missing_data[scr_name].unique())
+        logger.info("Score for All-Missing Cases: %s", all_missing_data[scr_name].unique())
         
         if all_missing_spec_value:
             all_missing_data[scr_name] = all_missing_spec_value
@@ -1921,17 +1926,19 @@ def upload_score(data, model, varlist, scr_name, table_name, keeplist = None, re
     data = scoring(data = data, model = model, varlist = varlist, scr_name = scr_name, keeplist = keeplist, all_missing_spec_value = all_missing_spec_value)
 
     
+    from .ODPS_Tool import ODPSRunner
+
     sqlrunner = ODPSRunner()
 
     fnl_scr_upload = data.copy()
-    fnl_scr_upload = uf.npnan2none(fnl_scr_upload)
-    fnl_scr_upload = uf.drop_tmp_cols(fnl_scr_upload)
-    
+    fnl_scr_upload = npnan2none(fnl_scr_upload)
+    fnl_scr_upload = drop_tmp_cols(fnl_scr_upload)
+
     if keeplist is None:
         keeplist = fnl_scr_upload.columns.tolist()
     else:
         keeplist = keeplist + [scr_name]
-    
+
     sqlrunner.upload_df(fnl_scr_upload[keeplist], table_name)
     
     if retPandas:
