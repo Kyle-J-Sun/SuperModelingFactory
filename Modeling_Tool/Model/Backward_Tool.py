@@ -815,6 +815,12 @@ class BackwardEliminationAnalyzer:
         for r in self.results:
             perf = r.get("perf", {})
             if dataset in perf and perf[dataset] is not None:
-                val = perf[dataset].get(metric, None) if isinstance(perf[dataset], dict) else None
+                summary = perf[dataset]
+                val = None
+                if isinstance(summary, dict):
+                    val = summary.get(metric, None)
+                elif isinstance(summary, pd.DataFrame) and metric in summary.columns and len(summary):
+                    # BackwardVariableEliminator stores each split's get_perf_summary() frame
+                    val = summary[metric].iloc[0]
                 rows.append({"round": r["round"], metric: val})
         return pd.DataFrame(rows)
