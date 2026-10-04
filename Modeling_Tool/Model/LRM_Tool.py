@@ -810,12 +810,12 @@ class LRMaster:
             expected_len=len(evalset),
         )
 
-        # 原始概率
+        # Raw probabilities
         prob_raw = self.predict_proba(evalset)[:, 1]
-        # 校准后概率（Platt Scaling）
+        # Calibrated probabilities (Platt scaling)
         prob_cal = self.predict_proba(evalset, calibrated_model=True)[:, 1]
 
-        # 1. Brier Score（越小越好）
+        # 1. Brier score (lower is better)
         logger.info(
             "Raw Brier: %.6f",
             brier_score_loss(y_val, prob_raw, sample_weight=eval_weight),
@@ -825,7 +825,7 @@ class LRMaster:
             brier_score_loss(y_val, prob_cal, sample_weight=eval_weight),
         )
 
-        # 2. 可靠性曲线
+        # 2. Reliability curve
         curve_kwargs = {} if eval_weight is None else {"sample_weight": eval_weight}
         try:
             fraction_of_positives_raw, mean_predicted_value_raw = calibration_curve(
@@ -1261,7 +1261,7 @@ class LRMaster:
         use_gap = (not callable(objective)) and objective == 'oot_gap_penalized' and len(gap_ref_sets) > 0
 
         if verbose:
-            print("grid_search_params: {0} 组合 (params={1}), 训练集 {2:,} 行, eval={3}".format(
+            print("grid_search_params: {0} combinations (params={1}), training set {2:,} rows, eval={3}".format(
                 len(combos), param_names, len(data), set_names))
 
         def _score(auc_dict):

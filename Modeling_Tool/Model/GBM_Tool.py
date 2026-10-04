@@ -1,56 +1,56 @@
 """
-梯度提升模型训练工具包
-=============================
+Gradient Boosting Model Training Toolkit
+========================================
 
-本模块提供LightGBM、XGBoost和CatBoost模型的快速训练和评估功能，
-包括模型训练、特征重要性提取等常用操作。
+This module provides quick training and evaluation utilities for LightGBM, XGBoost,
+and CatBoost models, including model training and feature-importance extraction.
 
 Functions
 ---------
 set_num_leaves
-    根据最大深度计算叶子节点数，避免过拟合。
+    Compute the number of leaves from the maximum depth, to avoid overfitting.
 lgb_model
-    快速训练LightGBM模型。
+    Quickly train a LightGBM model.
 lgb_varimp
-    获取LightGBM特征重要性。
+    Get LightGBM feature importance.
 lgbm_quick_train
-    快速训练LightGBM模型（使用DataFrame接口）。
+    Quickly train a LightGBM model (DataFrame interface).
 xgb_model
-    训练XGBoost模型。
+    Train an XGBoost model.
 xgb_varimp
-    获取XGBoost特征重要性。
+    Get XGBoost feature importance.
 xgbm_quick_train
-    快速训练XGBoost模型（使用DataFrame接口）。
+    Quickly train an XGBoost model (DataFrame interface).
 catboost_model
-    训练CatBoost模型。
+    Train a CatBoost model.
 catboost_varimp
-    获取CatBoost特征重要性。
+    Get CatBoost feature importance.
 catboost_quick_train
-    快速训练CatBoost模型（使用DataFrame接口）。
+    Quickly train a CatBoost model (DataFrame interface).
 
 Classes
 -------
 LightGBMModel
-    LightGBM模型封装类，提供统一的训练和评估接口。
+    LightGBM model wrapper class providing a unified training and evaluation interface.
 XGBoostModel
-    XGBoost模型封装类，提供统一的训练和评估接口。
+    XGBoost model wrapper class providing a unified training and evaluation interface.
 CatBoostModel
-    CatBoost模型封装类，提供统一的训练和评估接口。
+    CatBoost model wrapper class providing a unified training and evaluation interface.
 GradientBoostingModel
-    统一封装类，支持LightGBM、XGBoost和CatBoost切换。
+    Unified wrapper class that supports switching between LightGBM, XGBoost, and CatBoost.
 
 Examples
 --------
-# 函数式调用
+# Functional interface
 >>> model = lgb_model(x_train, y_train, x_val, y_val, params)
 >>> varimp = lgb_varimp(model)
 
-# 类封装调用
+# Class-based interface
 >>> lgb_model = LightGBMModel(params)
 >>> lgb_model.fit(x_train, y_train, x_val, y_val)
 >>> varimp = lgb_model.get_feature_importance()
 
-# 统一接口调用
+# Unified interface
 >>> model = GradientBoostingModel('lgb', params)
 >>> model.fit(x_train, y_train, x_val, y_val)
 """
@@ -206,26 +206,26 @@ def _normalize_catboost_params(params_dict):
     return params, early_stopping_rounds, eval_metric, cat_features
 
 # ============================================================================
-# 工具函数（保持独立）
+# Utility functions (kept standalone)
 # ============================================================================
 
 def set_num_leaves(max_depth=5, wgt=1):
-    """根据最大深度设置叶子节点数，避免过拟合。
+    """Set the number of leaves from the maximum depth, to avoid overfitting.
 
-    根据给定的最大深度和权重系数，计算合适的叶子节点数量。
-    计算公式：2^max_depth - 2^max_depth * wgt
+    Compute a suitable number of leaves from the given maximum depth and weight coefficient.
+    Formula: 2^max_depth - 2^max_depth * wgt
 
     Parameters
     ----------
     max_depth : int, default 5
-        树的最大深度
+        Maximum depth of the tree.
     wgt : float, default 1
-        权重系数，取値范围[0, 1]
+        Weight coefficient, in the range [0, 1].
 
     Returns
     -------
     int
-        建议的叶子节点数
+        Suggested number of leaves.
 
     Examples
     --------
@@ -238,31 +238,31 @@ def set_num_leaves(max_depth=5, wgt=1):
 
 
 def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sample_weight=None):
-    """快速训练LightGBM模型。
+    """Quickly train a LightGBM model.
 
-    使用训练集和验证集训练LightGBM模型，支持早停机制。
+    Train a LightGBM model on the training and validation sets, with early stopping support.
 
     Parameters
     ----------
     x : array-like or pd.DataFrame
-        训练集特征
+        Training-set features.
     y : array-like
-        训练集标签
+        Training-set labels.
     valx : array-like or pd.DataFrame
-        验证集特征
+        Validation-set features.
     valy : array-like
-        验证集标签
+        Validation-set labels.
     params_dict : dict
-        LightGBM参数字典
+        LightGBM parameter dictionary.
     wgt : array-like, optional
-        样本权重
+        Sample weights.
     init_score : array-like, optional
-        初始化分数
+        Initial scores.
 
     Returns
     -------
     lgb.LGBMClassifier
-        训练好的LightGBM模型
+        The trained LightGBM model.
 
     Examples
     --------
@@ -297,19 +297,19 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sam
 
 
 def lgb_varimp(model):
-    """获取LightGBM模型特征重要性。
+    """Get the feature importance of a LightGBM model.
 
-    返回按特征重要性排序的DataFrame。
+    Return a DataFrame sorted by feature importance.
 
     Parameters
     ----------
     model : lgb.LGBMClassifier
-        训练好的LightGBM模型
+        The trained LightGBM model.
 
     Returns
     -------
     pd.DataFrame
-        包含 feature 和 importance 列的DataFrame，按重要性降序排列
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
 
     Examples
     --------
@@ -324,31 +324,31 @@ def lgb_varimp(model):
 
 
 def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, val_wgt_col = None, cat_x_train=None):
-    """快速训练LightGBM模型（使用DataFrame接口）。
+    """Quickly train a LightGBM model (DataFrame interface).
 
-    接受DataFrame格式的训练集和验证集，自动提取特征和标签。
+    Accept DataFrames for the training and validation sets and extract the features and labels automatically.
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集
+        Training dataset.
     validation_data : pd.DataFrame
-        验证数据集
+        Validation dataset.
     x : list of str
-        特征列名列表
+        List of feature column names.
     y : str
-        目标变量列名
+        Name of the target column.
     params : dict
-        LightGBM参数字典
+        LightGBM parameter dictionary.
     wgt_col : str, optional
-        样本权重列名
+        Name of the sample-weight column.
     cat_x_train : list of str, optional
-        类别型特征列名列表
+        List of categorical feature column names.
 
     Returns
     -------
     lgb.LGBMClassifier
-        训练好的LightGBM模型
+        The trained LightGBM model.
 
     Examples
     --------
@@ -377,33 +377,33 @@ def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, 
 
 
 def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_eval_set=None, base_margin=None):
-    """训练XGBoost模型。
+    """Train an XGBoost model.
 
-    使用训练集和验证集训练XGBoost模型，支持早停机制。
+    Train an XGBoost model on the training and validation sets, with early stopping support.
 
     Parameters
     ----------
     x : array-like or pd.DataFrame
-        训练集特征
+        Training-set features.
     y : array-like
-        训练集标签
+        Training-set labels.
     valx : array-like or pd.DataFrame
-        验证集特征
+        Validation-set features.
     valy : array-like
-        验证集标签
+        Validation-set labels.
     params_dict : dict
-        XGBoost参数字典
+        XGBoost parameter dictionary.
     sample_weight : array-like, optional
-        训练集样本权重
+        Sample weights for the training set.
     sample_weight_eval_set : list, optional
-        验证集样本权重列表
+        List of sample weights for the validation set.
     base_margin : array-like, optional
-        基础边际度
+        Base margin (initial prediction offset).
 
     Returns
     -------
     xgb.XGBClassifier
-        训练好的XGBoost模型
+        The trained XGBoost model.
 
     Examples
     --------
@@ -432,19 +432,19 @@ def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_e
 
 
 def xgb_varimp(model):
-    """获取XGBoost模型特征重要性。
+    """Get the feature importance of an XGBoost model.
 
-    返回按特征重要性排序的DataFrame。
+    Return a DataFrame sorted by feature importance.
 
     Parameters
     ----------
     model : xgb.XGBClassifier
-        训练好的XGBoost模型
+        The trained XGBoost model.
 
     Returns
     -------
     pd.DataFrame
-        包含 feature 和 importance 列的DataFrame，按重要性降序排列
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
 
     Examples
     --------
@@ -461,31 +461,31 @@ def xgb_varimp(model):
 
 def xgbm_quick_train(train_data, validation_data, x, y, wgt_col=None, params=None,
                      sample_weight_eval_set=None, val_wgt_col=None):
-    """快速训练XGBoost模型（使用DataFrame接口）。
+    """Quickly train an XGBoost model (DataFrame interface).
 
-    接受DataFrame格式的训练集和验证集，自动提取特征和标签。
+    Accept DataFrames for the training and validation sets and extract the features and labels automatically.
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集
+        Training dataset.
     validation_data : pd.DataFrame
-        验证数据集
+        Validation dataset.
     x : list of str
-        特征列名列表
+        List of feature column names.
     y : str
-        目标变量列名
+        Name of the target column.
     wgt_col : str
-        样本权重列名
+        Name of the sample-weight column.
     params : dict
-        XGBoost参数字典
+        XGBoost parameter dictionary.
     sample_weight_eval_set : list, optional
-        验证集样本权重列表
+        List of sample weights for the validation set.
 
     Returns
     -------
     xgb.XGBClassifier
-        训练好的XGBoost模型
+        The trained XGBoost model.
 
     Examples
     --------
@@ -516,29 +516,29 @@ def xgbm_quick_train(train_data, validation_data, x, y, wgt_col=None, params=Non
 
 
 def catboost_model(x, y, valx, valy, params_dict, sample_weight=None):
-    """训练CatBoost模型。
+    """Train a CatBoost model.
 
-    使用训练集和验证集训练CatBoost模型，支持早停机制。
+    Train a CatBoost model on the training and validation sets, with early stopping support.
 
     Parameters
     ----------
     x : array-like or pd.DataFrame
-        训练集特征
+        Training-set features.
     y : array-like
-        训练集标签
+        Training-set labels.
     valx : array-like or pd.DataFrame
-        验证集特征
+        Validation-set features.
     valy : array-like
-        验证集标签
+        Validation-set labels.
     params_dict : dict
-        CatBoost参数字典（支持 n_estimators / max_depth / random_state 别名）
+        CatBoost parameter dictionary (the aliases n_estimators / max_depth / random_state are supported).
     sample_weight : array-like, optional
-        训练集样本权重
+        Sample weights for the training set.
 
     Returns
     -------
     CatBoostClassifier
-        训练好的CatBoost模型
+        The trained CatBoost model.
 
     Examples
     --------
@@ -573,19 +573,19 @@ def catboost_model(x, y, valx, valy, params_dict, sample_weight=None):
 
 
 def catboost_varimp(model):
-    """获取CatBoost模型特征重要性。
+    """Get the feature importance of a CatBoost model.
 
-    返回按特征重要性排序的DataFrame。
+    Return a DataFrame sorted by feature importance.
 
     Parameters
     ----------
     model : CatBoostClassifier
-        训练好的CatBoost模型
+        The trained CatBoost model.
 
     Returns
     -------
     pd.DataFrame
-        包含 feature 和 importance 列的DataFrame，按重要性降序排列
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
 
     Examples
     --------
@@ -603,31 +603,31 @@ def catboost_varimp(model):
 
 def catboost_quick_train(train_data, validation_data, x, y, params, wgt_col=None,
                          val_wgt_col=None, cat_features=None):
-    """快速训练CatBoost模型（使用DataFrame接口）。
+    """Quickly train a CatBoost model (DataFrame interface).
 
-    接受DataFrame格式的训练集和验证集，自动提取特征和标签。
+    Accept DataFrames for the training and validation sets and extract the features and labels automatically.
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集
+        Training dataset.
     validation_data : pd.DataFrame
-        验证数据集
+        Validation dataset.
     x : list of str
-        特征列名列表
+        List of feature column names.
     y : str
-        目标变量列名
+        Name of the target column.
     params : dict
-        CatBoost参数字典
+        CatBoost parameter dictionary.
     wgt_col : str, optional
-        样本权重列名
+        Name of the sample-weight column.
     cat_features : list, optional
-        类别型特征列名或索引列表
+        List of categorical feature column names or indices.
 
     Returns
     -------
     CatBoostClassifier
-        训练好的CatBoost模型
+        The trained CatBoost model.
 
     Examples
     --------
@@ -658,17 +658,17 @@ def catboost_quick_train(train_data, validation_data, x, y, params, wgt_col=None
 
 class LightGBMModel:
     """
-    LightGBM模型封装类。
+    LightGBM model wrapper class.
 
-    提供统一的LightGBM模型训练、预测、保存和加载接口。
-    支持模型校准、特征重要性获取等功能。
+    Provide a unified interface for training, predicting, saving, and loading LightGBM models.
+    Support model calibration, feature-importance retrieval, and more.
 
     Parameters
     ----------
     params : dict
-        LightGBM模型参数字典
+        LightGBM model parameter dictionary.
     model : lgb.LGBMClassifier, optional
-        预加载的模型实例
+        Preloaded model instance.
 
     Examples
     --------
@@ -679,14 +679,14 @@ class LightGBMModel:
 
     def __init__(self, params, model=None):
         """
-        初始化LightGBM模型封装类。
+        Initialize the LightGBM model wrapper class.
 
         Parameters
         ----------
         params : dict
-            LightGBM模型参数字典
+            LightGBM model parameter dictionary.
         model : lgb.LGBMClassifier, optional
-            预加载的模型实例
+            Preloaded model instance.
         """
         lgb = _get_lgb()
         self.params = params
@@ -694,24 +694,24 @@ class LightGBMModel:
         self.feature_names_ = None
 
     def fit(self, x, y, valx, valy, wgt=None, init_score=None, sample_weight=None, eval_sample_weight=None):
-        """训练LightGBM模型。
+        """Train the LightGBM model.
 
-        使用训练集和验证集训练模型，支持早停机制。
+        Train the model on the training and validation sets, with early stopping support.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            训练集特征
+            Training-set features.
         y : array-like
-            训练集标签
+            Training-set labels.
         valx : array-like or pd.DataFrame
-            验证集特征
+            Validation-set features.
         valy : array-like
-            验证集标签
+            Validation-set labels.
         wgt : array-like, optional
-            样本权重
+            Sample weights.
         init_score : array-like, optional
-            初始化分数
+            Initial scores.
 
         Returns
         -------
@@ -729,52 +729,52 @@ class LightGBMModel:
         return self
 
     def predict(self, x):
-        """预测样本的概率。
+        """Predict the positive-class probability of each sample.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            预测特征
+            Features to predict on.
 
         Returns
         -------
         np.ndarray
-            预测概率
+            Predicted probabilities.
         """
         return self.model.predict_proba(x)[:, 1]
 
     def get_feature_importance(self, importance_type='gain'):
-        """获取特征重要性。
+        """Get the feature importance.
 
         Parameters
         ----------
         importance_type : str, default 'gain'
-            特征重要性类型，可选 'gain' 或 'split'
+            Feature importance type, 'gain' or 'split'.
 
         Returns
         -------
         pd.DataFrame
-            包含 feature 和 importance 列的DataFrame
+            DataFrame with ``feature`` and ``importance`` columns.
         """
         return lgb_varimp(self.model)
 
     def save(self, path):
-        """保存模型。
+        """Save the model.
 
         Parameters
         ----------
         path : str
-            模型保存路径
+            Path to save the model to.
         """
         save_model(self.model, path)
 
     def load(self, path):
-        """加载模型。
+        """Load the model.
 
         Parameters
         ----------
         path : str
-            模型文件路径
+            Path to the model file.
 
         Returns
         -------
@@ -784,18 +784,18 @@ class LightGBMModel:
         return self
 
     def calibrate(self, x, y, method='sigmoid', cv='prefit'):
-        """模型概率校准。
+        """Calibrate the model probabilities.
 
         Parameters
         ----------
         x : array-like
-            校准特征
+            Calibration features.
         y : array-like
-            校准标签
+            Calibration labels.
         method : str, default 'sigmoid'
-            校准方法，'sigmoid' 或 'isotonic'
+            Calibration method, 'sigmoid' or 'isotonic'.
         cv : str or int, default 'prefit'
-            交叉验证方式
+            Cross-validation strategy.
 
         Returns
         -------
@@ -806,16 +806,16 @@ class LightGBMModel:
         return self
 
     def calibration_curve(self, x, y, n_bins=10):
-        """获取校准曲线数据。
+        """Get the calibration curve data.
 
         Parameters
         ----------
         x : array-like
-            特征
+            Features.
         y : array-like
-            标签
+            Labels.
         n_bins : int, default 10
-            分箱数
+            Number of bins.
 
         Returns
         -------
@@ -826,37 +826,37 @@ class LightGBMModel:
         return calibration_curve(y, y_prob, n_bins=n_bins)
 
     def brier_score(self, x, y):
-        """计算Brier分数。
+        """Compute the Brier score.
 
         Parameters
         ----------
         x : array-like
-            特征
+            Features.
         y : array-like
-            标签
+            Labels.
 
         Returns
         -------
         float
-            Brier分数
+            Brier score.
         """
         y_prob = self.predict(x)
         return brier_score_loss(y, y_prob)
 
     def roc_auc(self, x, y):
-        """计算ROC AUC。
+        """Compute the ROC AUC.
 
         Parameters
         ----------
         x : array-like
-            特征
+            Features.
         y : array-like
-            标签
+            Labels.
 
         Returns
         -------
         float
-            ROC AUC分数
+            ROC AUC score.
         """
         y_prob = self.predict(x)
         return roc_auc_score(y, y_prob)
@@ -864,17 +864,17 @@ class LightGBMModel:
 
 class XGBoostModel:
     """
-    XGBoost模型封装类。
+    XGBoost model wrapper class.
 
-    提供统一的XGBoost模型训练、预测、保存和加载接口。
-    支持模型校准、特征重要性获取等功能。
+    Provide a unified interface for training, predicting, saving, and loading XGBoost models.
+    Support model calibration, feature-importance retrieval, and more.
 
     Parameters
     ----------
     params : dict
-        XGBoost模型参数字典
+        XGBoost model parameter dictionary.
     model : xgb.XGBClassifier, optional
-        预加载的模型实例
+        Preloaded model instance.
 
     Examples
     --------
@@ -885,14 +885,14 @@ class XGBoostModel:
 
     def __init__(self, params, model=None):
         """
-        初始化XGBoost模型封装类。
+        Initialize the XGBoost model wrapper class.
 
         Parameters
         ----------
         params : dict
-            XGBoost模型参数字典
+            XGBoost model parameter dictionary.
         model : xgb.XGBClassifier, optional
-            预加载的模型实例
+            Preloaded model instance.
         """
         xgb = _get_xgb()
         self.params = params
@@ -900,24 +900,24 @@ class XGBoostModel:
         self.feature_names_ = None
 
     def fit(self, x, y, valx, valy, sample_weight=None, sample_weight_eval_set=None, base_margin=None):
-        """训练XGBoost模型。
+        """Train the XGBoost model.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            训练集特征
+            Training-set features.
         y : array-like
-            训练集标签
+            Training-set labels.
         valx : array-like or pd.DataFrame
-            验证集特征
+            Validation-set features.
         valy : array-like
-            验证集标签
+            Validation-set labels.
         sample_weight : array-like, optional
-            样本权重
+            Sample weights.
         sample_weight_eval_set : list, optional
-            验证集样本权重列表
+            List of sample weights for the validation set.
         base_margin : array-like, optional
-            基础边际（init_score / log-odds 偏移），用于增量训练（warm-start）。
+            Base margin (init_score / log-odds offset), used for incremental training (warm start).
 
         Returns
         -------
@@ -935,52 +935,52 @@ class XGBoostModel:
         return self
 
     def predict(self, x):
-        """预测样本的概率。
+        """Predict the positive-class probability of each sample.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            预测特征
+            Features to predict on.
 
         Returns
         -------
         np.ndarray
-            预测概率
+            Predicted probabilities.
         """
         return self.model.predict_proba(x)[:, 1]
 
     def get_feature_importance(self, importance_type='gain'):
-        """获取特征重要性。
+        """Get the feature importance.
 
         Parameters
         ----------
         importance_type : str, default 'gain'
-            特征重要性类型
+            Feature importance type.
 
         Returns
         -------
         pd.DataFrame
-            包含 feature 和 importance 列的DataFrame
+            DataFrame with ``feature`` and ``importance`` columns.
         """
         return xgb_varimp(self.model)
 
     def save(self, path):
-        """保存模型。
+        """Save the model.
 
         Parameters
         ----------
         path : str
-            模型保存路径
+            Path to save the model to.
         """
         save_model(self.model, path)
 
     def load(self, path):
-        """加载模型。
+        """Load the model.
 
         Parameters
         ----------
         path : str
-            模型文件路径
+            Path to the model file.
 
         Returns
         -------
@@ -990,18 +990,18 @@ class XGBoostModel:
         return self
 
     def calibrate(self, x, y, method='sigmoid', cv='prefit'):
-        """模型概率校准。
+        """Calibrate the model probabilities.
 
         Parameters
         ----------
         x : array-like
-            校准特征
+            Calibration features.
         y : array-like
-            校准标签
+            Calibration labels.
         method : str, default 'sigmoid'
-            校准方法
+            Calibration method.
         cv : str or int, default 'prefit'
-            交叉验证方式
+            Cross-validation strategy.
 
         Returns
         -------
@@ -1012,14 +1012,14 @@ class XGBoostModel:
         return self
 
     def calibration_curve(self, x, y, n_bins=10):
-        """获取校准曲线数据。
+        """Get the calibration curve data.
 
         Parameters
         ----------
         x : array-like
-            特征
+            Features.
         y : array-like
-            标签
+            Labels.
 
         Returns
         -------
@@ -1029,7 +1029,7 @@ class XGBoostModel:
         return calibration_curve(y, y_prob, n_bins=n_bins)
 
     def brier_score(self, x, y):
-        """计算Brier分数。
+        """Compute the Brier score.
 
         Parameters
         ----------
@@ -1044,7 +1044,7 @@ class XGBoostModel:
         return brier_score_loss(y, y_prob)
 
     def roc_auc(self, x, y):
-        """计算ROC AUC。
+        """Compute the ROC AUC.
 
         Parameters
         ----------
@@ -1061,17 +1061,17 @@ class XGBoostModel:
 
 class CatBoostModel:
     """
-    CatBoost模型封装类。
+    CatBoost model wrapper class.
 
-    提供统一的CatBoost模型训练、预测、保存和加载接口。
-    支持模型校准、特征重要性获取等功能。
+    Provide a unified interface for training, predicting, saving, and loading CatBoost models.
+    Support model calibration, feature-importance retrieval, and more.
 
     Parameters
     ----------
     params : dict
-        CatBoost模型参数字典
+        CatBoost model parameter dictionary.
     model : CatBoostClassifier, optional
-        预加载的模型实例
+        Preloaded model instance.
 
     Examples
     --------
@@ -1082,14 +1082,14 @@ class CatBoostModel:
 
     def __init__(self, params, model=None):
         """
-        初始化CatBoost模型封装类。
+        Initialize the CatBoost model wrapper class.
 
         Parameters
         ----------
         params : dict
-            CatBoost模型参数字典
+            CatBoost model parameter dictionary.
         model : CatBoostClassifier, optional
-            预加载的模型实例
+            Preloaded model instance.
         """
         _get_catboost()
         self.params = params
@@ -1097,20 +1097,20 @@ class CatBoostModel:
         self.feature_names_ = None
 
     def fit(self, x, y, valx, valy, sample_weight=None):
-        """训练CatBoost模型。
+        """Train the CatBoost model.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            训练集特征
+            Training-set features.
         y : array-like
-            训练集标签
+            Training-set labels.
         valx : array-like or pd.DataFrame
-            验证集特征
+            Validation-set features.
         valy : array-like
-            验证集标签
+            Validation-set labels.
         sample_weight : array-like, optional
-            样本权重
+            Sample weights.
 
         Returns
         -------
@@ -1126,52 +1126,52 @@ class CatBoostModel:
         return self
 
     def predict(self, x):
-        """预测样本的概率。
+        """Predict the positive-class probability of each sample.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            预测特征
+            Features to predict on.
 
         Returns
         -------
         np.ndarray
-            预测概率
+            Predicted probabilities.
         """
         return self.model.predict_proba(x)[:, 1]
 
     def get_feature_importance(self, importance_type='gain'):
-        """获取特征重要性。
+        """Get the feature importance.
 
         Parameters
         ----------
         importance_type : str, default 'gain'
-            特征重要性类型（CatBoost 使用 PredictionValuesChange）
+            Feature importance type (CatBoost uses PredictionValuesChange).
 
         Returns
         -------
         pd.DataFrame
-            包含 feature 和 importance 列的DataFrame
+            DataFrame with ``feature`` and ``importance`` columns.
         """
         return catboost_varimp(self.model)
 
     def save(self, path):
-        """保存模型。
+        """Save the model.
 
         Parameters
         ----------
         path : str
-            模型保存路径
+            Path to save the model to.
         """
         save_model(self.model, path)
 
     def load(self, path):
-        """加载模型。
+        """Load the model.
 
         Parameters
         ----------
         path : str
-            模型文件路径
+            Path to the model file.
 
         Returns
         -------
@@ -1181,18 +1181,18 @@ class CatBoostModel:
         return self
 
     def calibrate(self, x, y, method='sigmoid', cv='prefit'):
-        """模型概率校准。
+        """Calibrate the model probabilities.
 
         Parameters
         ----------
         x : array-like
-            校准特征
+            Calibration features.
         y : array-like
-            校准标签
+            Calibration labels.
         method : str, default 'sigmoid'
-            校准方法
+            Calibration method.
         cv : str or int, default 'prefit'
-            交叉验证方式
+            Cross-validation strategy.
 
         Returns
         -------
@@ -1203,16 +1203,16 @@ class CatBoostModel:
         return self
 
     def calibration_curve(self, x, y, n_bins=10):
-        """获取校准曲线数据。
+        """Get the calibration curve data.
 
         Parameters
         ----------
         x : array-like
-            特征
+            Features.
         y : array-like
-            标签
+            Labels.
         n_bins : int, default 10
-            分箱数
+            Number of bins.
 
         Returns
         -------
@@ -1222,7 +1222,7 @@ class CatBoostModel:
         return calibration_curve(y, y_prob, n_bins=n_bins)
 
     def brier_score(self, x, y):
-        """计算Brier分数。
+        """Compute the Brier score.
 
         Parameters
         ----------
@@ -1237,7 +1237,7 @@ class CatBoostModel:
         return brier_score_loss(y, y_prob)
 
     def roc_auc(self, x, y):
-        """计算ROC AUC。
+        """Compute the ROC AUC.
 
         Parameters
         ----------
@@ -1254,17 +1254,17 @@ class CatBoostModel:
 
 class GradientBoostingModel:
     """
-    统一梯度提升模型封装类。
+    Unified gradient boosting model wrapper class.
 
-    支持LightGBM、XGBoost和CatBoost三种框架的统一接口。
-    通过model_type参数切换框架，其他接口保持一致。
+    Provide one interface for the three frameworks LightGBM, XGBoost, and CatBoost.
+    The framework is selected with the ``model_type`` parameter; the rest of the interface stays the same.
 
     Parameters
     ----------
     model_type : str
-        模型类型，'lgb'、'xgb' 或 'cat'（'catboost' 别名）
+        Model type: 'lgb', 'xgb', or 'cat' ('catboost' is an alias).
     params : dict
-        模型参数字典
+        Model parameter dictionary.
 
     Examples
     --------
@@ -1272,33 +1272,33 @@ class GradientBoostingModel:
     >>> model.fit(x_train, y_train, x_val, y_val)
     >>> preds = model.predict(x_test)
 
-    # 增量学习（warm-start）
+    # Incremental learning (warm start)
     >>> base_margin = init_model.get_base_margin(x_train)
     >>> new_model = GradientBoostingModel('xgb', params)
     >>> new_model.fit(x_train, y_train, x_val, y_val, init_score=base_margin)
     >>> proba = new_model.predict_with_base_margin(
     ...     x_score, init_model.get_base_margin(x_score))
 
-    # 适配已训练好的裸估计器（如历史直接 pickle 的 XGBClassifier）
+    # Adapt an already fitted bare estimator (e.g. an XGBClassifier that was pickled directly)
     >>> init_model = GradientBoostingModel.from_fitted(load_model(path))
     >>> init_model.get_base_margin(x_train)
     """
 
     def __init__(self, model_type, params):
         """
-        初始化统一模型封装类。
+        Initialize the unified model wrapper class.
 
         Parameters
         ----------
         model_type : str
-            模型类型，'lgb'、'xgb' 或 'cat'（'catboost' 别名）
+            Model type: 'lgb', 'xgb', or 'cat' ('catboost' is an alias).
         params : dict
-            模型参数字典
+            Model parameter dictionary.
 
         Raises
         ------
         ValueError
-            当model_type不为支持类型时
+            If ``model_type`` is not a supported type.
         """
         if model_type == 'catboost':
             model_type = 'cat'
@@ -1317,22 +1317,22 @@ class GradientBoostingModel:
 
     @staticmethod
     def _detect_model_type(estimator):
-        """从已训练的估计器类名 / 模块推断 'lgb'、'xgb' 或 'cat'。
+        """Infer 'lgb', 'xgb', or 'cat' from the class name / module of a fitted estimator.
 
         Parameters
         ----------
         estimator : object
-            已 fit 的 XGBClassifier / LGBMClassifier / CatBoostClassifier 等。
+            A fitted XGBClassifier / LGBMClassifier / CatBoostClassifier, etc.
 
         Returns
         -------
         str
-            'lgb'、'xgb' 或 'cat'。
+            'lgb', 'xgb', or 'cat'.
 
         Raises
         ------
         ValueError
-            无法从类型推断时。
+            If the type cannot be inferred from the estimator.
         """
         cls = type(estimator)
         tag = f"{cls.__module__}.{cls.__name__}".lower()
@@ -1349,21 +1349,22 @@ class GradientBoostingModel:
 
     @classmethod
     def from_fitted(cls, model, model_type=None, params=None):
-        """用一个【已训练好】的估计器（或封装）构造 GradientBoostingModel。
+        """Build a ``GradientBoostingModel`` from an already fitted estimator (or wrapper).
 
-        用于适配历史上直接以 sklearn 估计器（``XGBClassifier`` /
-        ``LGBMClassifier`` / ``CatBoostClassifier``）形式保存的模型，使其无需重训即可使用
-        :meth:`get_base_margin` / :meth:`predict_with_base_margin` 等统一接口。
+        Adapt models that were saved historically as bare scikit-learn estimators
+        (``XGBClassifier`` / ``LGBMClassifier`` / ``CatBoostClassifier``) so that they can use the
+        unified interface, such as :meth:`get_base_margin` / :meth:`predict_with_base_margin`,
+        without retraining.
 
         Parameters
         ----------
         model : object
-            已 fit 的 ``XGBClassifier`` / ``LGBMClassifier`` / ``CatBoostClassifier``，或
-            ``LightGBMModel`` / ``XGBoostModel`` / ``CatBoostModel`` / ``GradientBoostingModel`` 封装。
+            A fitted ``XGBClassifier`` / ``LGBMClassifier`` / ``CatBoostClassifier``, or a
+            ``LightGBMModel`` / ``XGBoostModel`` / ``CatBoostModel`` / ``GradientBoostingModel`` wrapper.
         model_type : {'lgb', 'xgb', 'cat'}, optional
-            不传则按估计器类型自动推断。
+            If omitted, inferred automatically from the estimator type.
         params : dict, optional
-            参数字典；不传则尽量从估计器的 ``get_params()`` 读取。
+            Parameter dictionary. If omitted, it is read from the estimator's ``get_params()`` where possible.
 
         Returns
         -------
@@ -1372,7 +1373,7 @@ class GradientBoostingModel:
         Raises
         ------
         ValueError
-            传入未 fit / 空模型时。
+            If an unfitted or empty model is passed.
         """
         if isinstance(model, cls):
             try:
@@ -1383,7 +1384,7 @@ class GradientBoostingModel:
                     "Loaded GradientBoostingModel is missing _model (Cython pickle bug "
                     "in a previous package version). Please retrain and re-save the model."
                 )
-        # 解包 LightGBMModel / XGBoostModel / CatBoostModel（它们把裸估计器放在 .model）
+        # Unwrap LightGBMModel / XGBoostModel / CatBoostModel (they keep the bare estimator in .model)
         estimator = getattr(model, 'model', model)
         if estimator is None:
             raise ValueError("from_fitted received an unfitted / empty model")
@@ -1401,12 +1402,13 @@ class GradientBoostingModel:
         return obj
 
     def __getattr__(self, name):
-        """把未知属性委托给底层已训练估计器。
+        """Delegate unknown attributes to the underlying fitted estimator.
 
-        使封装实例成为原始 LGBM/XGB/CatBoost 估计器的超集（如 ``get_params`` /
-        ``feature_names_in_`` / ``predict_proba`` 等可直接透传）。仅在常规
-        属性查找失败时调用；对 dunder 名与 ``_model`` 缺失（如反序列化
-        中途）安全抛出 AttributeError，以免干扰 pickle / copy。
+        Make the wrapper instance a superset of the original LGBM/XGB/CatBoost estimator
+        (``get_params`` / ``feature_names_in_`` / ``predict_proba``, etc. are passed straight
+        through). Called only when the regular attribute lookup fails; for dunder names and a
+        missing ``_model`` (e.g. in the middle of deserialization) it raises AttributeError
+        safely, so that pickle / copy are not disturbed.
         """
         if name.startswith('__') and name.endswith('__'):
             raise AttributeError(name)
@@ -1452,34 +1454,36 @@ class GradientBoostingModel:
 
     @staticmethod
     def _sigmoid(z):
-        """数値稳定的 Sigmoid（log-odds → 概率）。"""
+        """Numerically stable sigmoid (log-odds to probability)."""
         z = np.clip(np.asarray(z, dtype=float), -709, 709)
         return 1.0 / (1.0 + np.exp(-z))
 
     def fit(self, x, y, valx, valy, init_score=None, sample_weight=None, eval_sample_weight=None, sample_weight_eval_set=None, **kwargs):
-        """训练模型（支持增量学习 warm-start）。
+        """Train the model (supports incremental learning with a warm start).
 
-        当传入 ``init_score`` 时，以其作为 log-odds 偏移在新数据上继续训练：
-        LightGBM 走 ``init_score``，XGBoost 走 ``base_margin``（两者语义一致，
-        本方法统一对外暴露为 ``init_score``）。CatBoost 不支持 ``init_score``。
+        When ``init_score`` is passed, it is used as a log-odds offset and training continues on
+        the new data: LightGBM uses ``init_score`` and XGBoost uses ``base_margin`` (the two are
+        semantically equivalent; this method exposes both uniformly as ``init_score``).
+        CatBoost does not support ``init_score``.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            训练集特征
+            Training-set features.
         y : array-like
-            训练集标签
+            Training-set labels.
         valx : array-like or pd.DataFrame
-            验证集特征
+            Validation-set features.
         valy : array-like
-            验证集标签
+            Validation-set labels.
         init_score : array-like, optional
-            初始 log-odds 偏移（增量学习起点）。一般由基准模型的
-            :meth:`get_base_margin` 产生。``None`` 时即普通从头训练。
+            Initial log-odds offset (the starting point of incremental learning). Usually produced
+            by the base model's :meth:`get_base_margin`. With ``None`` this is ordinary training
+            from scratch.
         **kwargs
-            其余参数透传给底层模型（如 lgb 的 ``wgt``、xgb 的
-            ``sample_weight`` / ``sample_weight_eval_set``、cat 的
-            ``sample_weight``）。
+            Remaining arguments are passed through to the underlying model (for example ``wgt``
+            for lgb, ``sample_weight`` / ``sample_weight_eval_set`` for xgb, and
+            ``sample_weight`` for cat).
 
         Returns
         -------
@@ -1488,13 +1492,14 @@ class GradientBoostingModel:
         Raises
         ------
         NotImplementedError
-            CatBoost 不支持 ``init_score`` 增量学习。
+            CatBoost does not support incremental learning with ``init_score``.
 
         Notes
         -----
-        与既有生产流程一致，偏移仅作用于训练集；验证集未注入偏移，因此早停
-        的 eval 指标是在"未加偏移"的空间上评估的。如需严格一致，可后续透传
-        lgb 的 ``eval_init_score`` / xgb 的 ``base_margin_eval_set``。
+        As in the existing production workflow, the offset is applied to the training set only.
+        The validation set receives no offset, so the early-stopping eval metric is evaluated
+        in the space "without the offset". For strict consistency, pass lgb's ``eval_init_score``
+        / xgb's ``base_margin_eval_set`` through later.
         """
         if self.model_type == 'cat':
             if init_score is not None:
@@ -1523,31 +1528,31 @@ class GradientBoostingModel:
         return self
 
     def get_base_margin(self, x):
-        """返回本模型对 ``x`` 的原始 log-odds（base margin / init score）。
+        """Return this model's raw log-odds for ``x`` (base margin / init score).
 
-        统一兼容三种框架取"未经 sigmoid 的原始分数"：
+        Obtain the "raw score before the sigmoid" uniformly across the three frameworks:
 
         - XGBoost: ``predict(x, output_margin=True)``
         - LightGBM: ``predict(x, raw_score=True)``
         - CatBoost: ``predict(x, prediction_type='RawFormulaVal')``
 
-        该结果可作为下一个增量模型 :meth:`fit` 的 ``init_score``，或喂给
-        :meth:`predict_with_base_margin` 做融合预测。
+        The result can be used as the ``init_score`` of the next incremental model's :meth:`fit`,
+        or fed to :meth:`predict_with_base_margin` for fused prediction.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            待计算的特征
+            Features to compute the margin for.
 
         Returns
         -------
         np.ndarray
-            一维 log-odds 数组，形状 ``(n_samples,)``
+            One-dimensional log-odds array of shape ``(n_samples,)``.
 
         Raises
         ------
         RuntimeError
-            当模型尚未训练（``fit`` 之前）时
+            If the model has not been trained yet (before ``fit``).
         """
         est = self._model.model
         if est is None:
@@ -1561,33 +1566,34 @@ class GradientBoostingModel:
         return np.asarray(margin).ravel()
 
     def predict_with_base_margin(self, x, base_margin, return_prob=True):
-        """融合预测：``sigmoid(base_margin + 本模型 raw score)``。
+        """Fused prediction: ``sigmoid(base_margin + this model's raw score)``.
 
-        把一个基准模型的 log-odds（``base_margin``，通常来自
-        ``init_model.get_base_margin(x)``）与本（增量）模型自身的 raw score
-        在 log-odds 空间相加，再做 sigmoid。这种手动融合是唯一对 lgb 与 xgb
-        行为一致的方式——LightGBM 在预测期并不支持注入 init_score。
+        Add the log-odds of a base model (``base_margin``, usually from
+        ``init_model.get_base_margin(x)``) to this (incremental) model's own raw score in
+        log-odds space, then apply the sigmoid. This manual fusion is the only approach that
+        behaves identically for lgb and xgb, because LightGBM does not support injecting an
+        init_score at prediction time.
 
         Parameters
         ----------
         x : array-like or pd.DataFrame
-            待预测的特征
+            Features to predict on.
         base_margin : array-like
-            基准模型的 log-odds 偏移，形状须与 ``x`` 的样本数一致
+            Log-odds offset of the base model; its length must match the number of samples in ``x``.
         return_prob : bool, default True
-            ``True`` 返回概率（sigmoid 后）；``False`` 返回融合后的原始
-            log-odds
+            If ``True``, return probabilities (after the sigmoid); if ``False``, return the fused
+            raw log-odds.
 
         Returns
         -------
         np.ndarray
-            一维数组，``return_prob=True`` 时取值于 ``[0, 1]``
+            One-dimensional array; with ``return_prob=True`` the values lie in ``[0, 1]``.
         """
         combined = np.asarray(base_margin).ravel() + self.get_base_margin(x)
         return self._sigmoid(combined) if return_prob else combined
 
     def predict(self, x):
-        """预测样本的概率。
+        """Predict the positive-class probability of each sample.
 
         Parameters
         ----------
@@ -1600,7 +1606,7 @@ class GradientBoostingModel:
         return self._model.predict(x)
 
     def get_feature_importance(self, importance_type='gain'):
-        """获取特征重要性。
+        """Get the feature importance.
 
         Returns
         -------
@@ -1609,23 +1615,23 @@ class GradientBoostingModel:
         return self._model.get_feature_importance(importance_type=importance_type)
 
     def save(self, path):
-        """保存模型。"""
+        """Save the model."""
         self._model.save(path)
 
     def load(self, path):
-        """加载模型。"""
+        """Load the model."""
         self._model.load(path)
         return self
 
     def calibrate(self, x, y, method='sigmoid', cv='prefit'):
-        """模型概率校准。"""
+        """Calibrate the model probabilities."""
         self._model.calibrate(x, y, method=method, cv=cv)
         return self
 
     def brier_score(self, x, y):
-        """计算Brier分数。"""
+        """Compute the Brier score."""
         return self._model.brier_score(x, y)
 
     def roc_auc(self, x, y):
-        """计算ROC AUC。"""
+        """Compute the ROC AUC."""
         return self._model.roc_auc(x, y)

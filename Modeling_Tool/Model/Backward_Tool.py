@@ -1,23 +1,24 @@
 """
-向后变量消除工具包（统一版）
-=============================
+Backward Variable Elimination Toolkit (Unified Version)
+=======================================================
 
-本模块提供基于LightGBM和XGBoost的向后变量消除（Backward Variable Elimination）功能，
-通过累计特征重要性阈值进行变量筛选，并支持训练后的性能分析。
+This module provides backward variable elimination based on LightGBM and XGBoost.
+Variables are screened with a cumulative feature-importance threshold, and
+post-training performance analysis is supported.
 
 Functions
 ---------
 backward_lgbm
-    使用LightGBM模型进行向后变量消除
+    Run backward variable elimination with a LightGBM model
 backward_xgbm
-    使用XGBoost模型进行向后变量消除
+    Run backward variable elimination with an XGBoost model
 
 Classes
 -------
 BackwardVariableEliminator
-    向后变量消除器，支持LightGBM和XGBoost
+    Backward variable eliminator supporting LightGBM and XGBoost
 BackwardEliminationAnalyzer
-    向后消除结果分析器
+    Analyzer for backward elimination results
 """
 
 import os
@@ -121,69 +122,69 @@ def backward_lgbm(
     wgt_col: Optional[str] = None,
 ) -> Tuple:
     """
-    使用LightGBM模型进行向后变量消除。
+    Run backward variable elimination with a LightGBM model.
 
-    通过训练LightGBM模型并根据特征重要性累计阈值筛选变量，
-    实现向后变量消除（Backward Variable Elimination）。
+    Train a LightGBM model and screen the variables by a cumulative
+    feature-importance threshold (backward variable elimination).
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集，必须包含dep列和varlist中的所有特征列
+        Training dataset. Must contain the ``dep`` column and all feature columns in ``varlist``.
     varlist : list of str
-        参与建模的特征变量列表
+        List of feature variables used for modeling.
     dep : str
-        目标变量列名（0/1二元变量）
+        Name of the target column (binary 0/1 variable).
     varreduct_params : dict, optional
-        LightGBM超参数字典，未指定的必需参数将使用预设值
+        LightGBM hyperparameter dictionary. Required parameters that are not specified use preset values.
     stopping_metric : str, default "auc"
-        早停评估指标，可选 "auc", "binary_logloss" 等
+        Evaluation metric for early stopping, e.g. "auc" or "binary_logloss".
     seed : int, default 42
-        随机种子，保证可复现性
+        Random seed for reproducibility.
     num_boost_round : int, default 200
-        最大迭代轮数
+        Maximum number of boosting rounds.
     early_stopping_rounds : int, default 20
-        早停轮数，验证集指标连续N轮无提升则停止
+        Number of early-stopping rounds; training stops when the validation metric has not improved for this many consecutive rounds.
     importance_type : str, default "gain"
-        特征重要性类型，可选 "gain", "split"
+        Feature importance type, "gain" or "split".
     cum_importance_threshold : float, default 0.99
-        累计特征重要性阈值，筛选覆盖该比例重要性的最少特征
+        Cumulative feature-importance threshold; select the fewest features that cover this proportion of the total importance.
     min_vars : int, default 10
-        保留的最小变量数量
+        Minimum number of variables to keep.
     validation_data : pd.DataFrame, optional
-        验证数据集，用于早停
+        Validation dataset, used for early stopping.
     test_data_dict : dict, optional
-        测试数据集字典，格式为 {名称: DataFrame}
+        Dictionary of test datasets, in the form ``{name: DataFrame}``.
     ret_perf : bool, default True
-        是否返回模型性能指标
+        Whether to return model performance metrics.
     nbins : int, default 10
-        增益表分箱数
+        Number of bins in the Gains table.
     precision : int, default 5
-        数值精度
+        Numeric precision.
     min_bin_prop : float, default 0.05
-        最小分箱比例
+        Minimum bin proportion.
     include_missing : bool, default True
-        是否包含缺失值分箱
+        Whether to include a missing-value bin.
     equal_freq : bool, default True
-        是否使用等频分箱
+        Whether to use equal-frequency binning.
     ascending : bool, default True
-        增益表是否升序排列
+        Whether to sort the Gains table in ascending order.
     fillna : float, optional
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, optional
-        特殊值列表
+        List of special values.
 
     Returns
     -------
     tuple
-        (selected_vars, model, perf_dict) 或 (selected_vars, model)
+        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False.
 
     Raises
     ------
     TypeError
-        当输入数据不是pandas.DataFrame格式时
+        If the input data is not a ``pandas.DataFrame``.
     ImportError
-        当lightgbm未安装时
+        If lightgbm is not installed.
 
     Examples
     --------
@@ -197,7 +198,7 @@ def backward_lgbm(
     try:
         import lightgbm as lgb
     except ImportError:
-        raise ImportError("请安装lightgbm: pip install lightgbm")
+        raise ImportError("Please install lightgbm: pip install lightgbm")
 
     if varreduct_params is None:
         varreduct_params = {}
@@ -214,15 +215,15 @@ def backward_lgbm(
         datain_all["hd"] = validation_data
     datain_all.update(test_data_dict)
 
-    # 检查数据格式一致性
+    # Check data format consistency
     try:
         for k, v in datain_all.items():
             assert isinstance(v, pd.DataFrame)
     except AssertionError:
-        logging.warning("请提供pandas.DataFrame格式数据")
-        raise TypeError("请提供pandas.DataFrame格式数据")
+        logging.warning("Please provide data in pandas.DataFrame format")
+        raise TypeError("Please provide data in pandas.DataFrame format")
 
-    # 预设参数（保证模型可复现性）
+    # Preset parameters (to keep the model reproducible)
     hyperparams_preset = {
         "metric": stopping_metric,
         "seed": seed,
@@ -231,14 +232,14 @@ def backward_lgbm(
         "num_threads": 8
     }
 
-    # 补充缺失的必需参数
+    # Fill in any missing required parameters
     lacked_params = [k for k in list(hyperparams_preset.keys()) if k not in list(varreduct_params.keys())]
     for param in lacked_params:
         varreduct_params[param] = hyperparams_preset[param]
 
     weight_col = weight_col or wgt_col
 
-    # 构建 LightGBM 数据集
+    # Build the LightGBM datasets
     train_weight = resolve_sample_weight(data=train_data, weight_col=weight_col, expected_len=len(train_data))
     lgb_train = lgb.Dataset(train_data[varlist], label=train_data[dep], weight=train_weight)
 
@@ -260,7 +261,7 @@ def backward_lgbm(
         lgb.log_evaluation(period=-1)
     ]
 
-    # 训练模型
+    # Train the model
     model = lgb.train(
         params=varreduct_params,
         train_set=lgb_train,
@@ -270,7 +271,7 @@ def backward_lgbm(
         callbacks=callbacks
     )
 
-    # 获取特征重要性并筛选变量
+    # Get the feature importance and screen the variables
     importance_df = pd.DataFrame({
         "feature": model.feature_name(),
         "importance": model.feature_importance(importance_type=importance_type)
@@ -278,10 +279,10 @@ def backward_lgbm(
 
     importance_df["cum_importance"] = importance_df["importance"].cumsum() / importance_df["importance"].sum()
 
-    # 筛选达到阈值的变量
+    # Select the variables within the cumulative-importance threshold
     selected_idx = importance_df[importance_df["cum_importance"] <= cum_importance_threshold].index.tolist()
 
-    # 确保至少保留 min_vars 个变量
+    # Make sure at least min_vars variables are kept
     if len(selected_idx) < min_vars:
         selected_idx = list(range(min(min_vars, len(importance_df))))
 
@@ -290,7 +291,7 @@ def backward_lgbm(
     if not ret_perf:
         return selected_vars, model
 
-    # 计算性能
+    # Compute performance
     score_col = "_lgbm_score"
     perf_dict = {}
 
@@ -343,71 +344,71 @@ def backward_xgbm(
     wgt_col: Optional[str] = None,
 ) -> Tuple:
     """
-    使用XGBoost模型进行向后变量消除。
+    Run backward variable elimination with an XGBoost model.
 
-    通过训练XGBoost模型并根据特征重要性累计阈值筛选变量，
-    实现向后变量消除（Backward Variable Elimination）。
+    Train an XGBoost model and screen the variables by a cumulative
+    feature-importance threshold (backward variable elimination).
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集，必须包含dep列和varlist中的所有特征列
+        Training dataset. Must contain the ``dep`` column and all feature columns in ``varlist``.
     varlist : list of str
-        参与建模的特征变量列表
+        List of feature variables used for modeling.
     dep : str
-        目标变量列名（0/1二元变量）
+        Name of the target column (binary 0/1 variable).
     varreduct_params : dict, optional
-        XGBoost超参数字典，未指定的必需参数将使用预设值
+        XGBoost hyperparameter dictionary. Required parameters that are not specified use preset values.
     stopping_metric : str, default "auc"
-        早停评估指标
+        Evaluation metric for early stopping.
     seed : int, default 42
-        随机种子
+        Random seed.
     num_boost_round : int, default 200
-        最大迭代轮数
+        Maximum number of boosting rounds.
     early_stopping_rounds : int, default 20
-        早停轮数
+        Number of early-stopping rounds.
     importance_type : str, default "gain"
-        特征重要性类型
+        Feature importance type.
     cum_importance_threshold : float, default 0.99
-        累计特征重要性阈值
+        Cumulative feature-importance threshold.
     min_vars : int, default 10
-        保留的最小变量数量
+        Minimum number of variables to keep.
     validation_data : pd.DataFrame, optional
-        验证数据集
+        Validation dataset.
     test_data_dict : dict, optional
-        测试数据集字典
+        Dictionary of test datasets.
     ret_perf : bool, default True
-        是否返回性能指标
+        Whether to return performance metrics.
     nbins : int, default 10
-        增益表分箱数
+        Number of bins in the Gains table.
     precision : int, default 5
-        数值精度
+        Numeric precision.
     min_bin_prop : float, default 0.05
-        最小分箱比例
+        Minimum bin proportion.
     include_missing : bool, default True
-        是否包含缺失值分箱
+        Whether to include a missing-value bin.
     equal_freq : bool, default True
-        是否使用等频分箱
+        Whether to use equal-frequency binning.
     ascending : bool, default True
-        增益表是否升序排列
+        Whether to sort the Gains table in ascending order.
     fillna : float, optional
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, optional
-        特殊值列表
+        List of special values.
     monotone_constraints : dict, optional
-        单调约束字典，格式为 {特征名: 1/-1}
+        Dictionary of monotone constraints, in the form ``{feature_name: 1 or -1}``.
 
     Returns
     -------
     tuple
-        (selected_vars, model, perf_dict) 或 (selected_vars, model)
+        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False.
 
     Raises
     ------
     TypeError
-        当输入数据不是pandas.DataFrame格式时
+        If the input data is not a ``pandas.DataFrame``.
     ImportError
-        当xgboost未安装时
+        If xgboost is not installed.
 
     Examples
     --------
@@ -421,7 +422,7 @@ def backward_xgbm(
     try:
         import xgboost as xgb
     except ImportError:
-        raise ImportError("请安装xgboost: pip install xgboost")
+        raise ImportError("Please install xgboost: pip install xgboost")
 
     if varreduct_params is None:
         varreduct_params = {}
@@ -435,7 +436,7 @@ def backward_xgbm(
     if monotone_constraints is None:
         monotone_constraints = {}
 
-    # 构建单调约束向量
+    # Build the monotone constraint mapping for all variables
     mc_dict = {var: monotone_constraints.get(var, 0) for var in varlist}
 
     datain_all = OrderedDict()
@@ -444,15 +445,15 @@ def backward_xgbm(
         datain_all["hd"] = validation_data
     datain_all.update(test_data_dict)
 
-    # 检查数据格式一致性
+    # Check data format consistency
     try:
         for k, v in datain_all.items():
             assert isinstance(v, pd.DataFrame)
     except AssertionError:
-        logging.warning("请提供pandas.DataFrame格式数据")
-        raise TypeError("请提供pandas.DataFrame格式数据")
+        logging.warning("Please provide data in pandas.DataFrame format")
+        raise TypeError("Please provide data in pandas.DataFrame format")
 
-    # 预设参数（保证模型可复现性）
+    # Preset parameters (to keep the model reproducible)
     hyperparams_preset = {
         'eval_metric': stopping_metric,
         'tree_method': 'exact',
@@ -461,14 +462,14 @@ def backward_xgbm(
         'monotone_constraints': mc_dict
     }
 
-    # 补充缺失的必需参数
+    # Fill in any missing required parameters
     lacked_params = [k for k in list(hyperparams_preset.keys()) if k not in list(varreduct_params.keys())]
     for param in lacked_params:
         varreduct_params[param] = hyperparams_preset[param]
 
     weight_col = weight_col or wgt_col
 
-    # 构建 XGBoost 数据集
+    # Build the XGBoost datasets
     train_weight = resolve_sample_weight(data=train_data, weight_col=weight_col, expected_len=len(train_data))
     xgb_train = xgb.DMatrix(train_data[varlist], label=train_data[dep], weight=train_weight)
 
@@ -482,7 +483,7 @@ def backward_xgbm(
         xgb_valid = xgb.DMatrix(validation_data[varlist], label=validation_data[dep], weight=valid_weight)
         evals.append((xgb_valid, "hd"))
 
-    # 训练模型
+    # Train the model
     evals_result = {}
     model = xgb.train(
         params=varreduct_params,
@@ -494,13 +495,13 @@ def backward_xgbm(
         verbose_eval=False
     )
 
-    # 获取特征重要性并筛选变量
+    # Get the feature importance and screen the variables
     importance_raw = model.get_score(importance_type=importance_type)
     importance_df = pd.DataFrame(
         list(importance_raw.items()), columns=["feature", "importance"]
     ).sort_values("importance", ascending=False).reset_index(drop=True)
 
-    # 补充重要性为0的特征
+    # Add features with zero importance
     missing_feats = [f for f in varlist if f not in importance_df["feature"].values]
     if missing_feats:
         zero_df = pd.DataFrame({"feature": missing_feats, "importance": 0.0})
@@ -518,7 +519,7 @@ def backward_xgbm(
     if not ret_perf:
         return selected_vars, model
 
-    # 计算性能
+    # Compute performance
     score_col = "_xgbm_score"
     perf_dict = {}
 
@@ -545,25 +546,25 @@ def backward_xgbm(
 
 class BackwardVariableEliminator:
     """
-    向后变量消除器。
+    Backward variable eliminator for LightGBM and XGBoost.
 
-    封装LightGBM/XGBoost向后变量消除流程，
-    支持多轮消除和结果汇总。
+    Wrap the LightGBM/XGBoost backward variable elimination workflow,
+    with support for multiple elimination rounds and result summaries.
 
     Parameters
     ----------
     train_data : pd.DataFrame
-        训练数据集
+        Training dataset.
     varlist : list of str
-        初始特征变量列表
+        Initial list of feature variables.
     dep : str
-        目标变量列名
+        Name of the target column.
     model_type : str, default "lgbm"
-        模型类型，可选 "lgbm" 或 "xgbm"
+        Model type, either "lgbm" or "xgbm".
     validation_data : pd.DataFrame, optional
-        验证数据集
+        Validation dataset.
     test_data_dict : dict, optional
-        测试数据集字典
+        Dictionary of test datasets.
 
     Examples
     --------
@@ -615,37 +616,37 @@ class BackwardVariableEliminator:
         **kwargs,
     ) -> List[Dict]:
         """
-        运行多轮向后变量消除。
+        Run multiple rounds of backward variable elimination.
 
         Parameters
         ----------
         n_rounds : int, default 5
-            消除轮数
+            Number of elimination rounds.
         varreduct_params : dict, optional
-            模型超参数
+            Model hyperparameters.
         stopping_metric : str, default "auc"
-            早停指标
+            Early-stopping metric.
         seed : int, default 42
-            随机种子
+            Random seed.
         num_boost_round : int, default 200
-            最大迭代轮数
+            Maximum number of boosting rounds.
         early_stopping_rounds : int, default 20
-            早停轮数
+            Number of early-stopping rounds.
         importance_type : str, default "gain"
-            特征重要性类型
+            Feature importance type.
         cum_importance_threshold : float, default 0.99
-            累计重要性阈值
+            Cumulative importance threshold.
         min_vars : int, default 10
-            最小保留变量数
+            Minimum number of variables to keep.
         ret_perf : bool, default True
-            是否返回性能指标
+            Whether to return performance metrics.
         nbins : int, default 10
-            分箱数
+            Number of bins.
 
         Returns
         -------
         list of dict
-            每轮消除结果列表
+            Results of each elimination round.
         """
         current_vars = self.varlist.copy()
         self._results = []
@@ -700,13 +701,13 @@ class BackwardVariableEliminator:
         return self._results
 
     def get_final_vars(self) -> List[str]:
-        """获取最终筛选后的变量列表。"""
+        """Return the final list of variables after elimination."""
         if not self._results:
             return self.varlist
         return self._results[-1]["selected_vars"]
 
     def get_summary(self) -> pd.DataFrame:
-        """获取每轮消除汇总表。"""
+        """Return the summary table of each elimination round."""
         rows = []
         for r in self._results:
             rows.append({
@@ -720,14 +721,14 @@ class BackwardVariableEliminator:
 
 class BackwardEliminationAnalyzer:
     """
-    向后消除结果分析器。
+    Analyzer for backward elimination results.
 
-    对 BackwardVariableEliminator 的运行结果进行分析和可视化。
+    Analyze and visualize the results of a ``BackwardVariableEliminator`` run.
 
     Parameters
     ----------
     results : list of dict
-        BackwardVariableEliminator.run() 的返回值
+        Return value of ``BackwardVariableEliminator.run()``.
 
     Examples
     --------
@@ -741,12 +742,12 @@ class BackwardEliminationAnalyzer:
 
     def get_stable_vars(self, top_n: Optional[int] = None) -> List[str]:
         """
-        获取在所有轮次中均被保留的稳定变量。
+        Return the stable variables that are kept in every round.
 
         Parameters
         ----------
         top_n : int, optional
-            返回前N个稳定变量，None表示返回全部
+            Number of stable variables to return (the first N); None returns all of them.
 
         Returns
         -------
@@ -770,23 +771,23 @@ class BackwardEliminationAnalyzer:
         save_path: Optional[str] = None,
     ) -> None:
         """
-        绘制变量数量随消除轮次变化的折线图。
+        Plot a line chart of the number of variables against the elimination round.
 
         Parameters
         ----------
         figsize : tuple, default (8, 4)
-            图形尺寸
+            Figure size.
         save_path : str, optional
-            图片保存路径，None表示直接显示
+            File path for saving the figure; if None, the figure is displayed directly.
         """
         rounds = [r["round"] for r in self.results]
         n_vars = [r["n_vars_out"] for r in self.results]
 
         fig, ax = plt.subplots(figsize=figsize)
         ax.plot(rounds, n_vars, marker="o", linewidth=2, color="#4C72B0")
-        ax.set_xlabel("消除轮次")
-        ax.set_ylabel("保留变量数")
-        ax.set_title("向后变量消除：变量数量变化")
+        ax.set_xlabel("Elimination Round")
+        ax.set_ylabel("Number of Variables Kept")
+        ax.set_title("Backward Variable Elimination: Change in Variable Count")
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         plt.tight_layout()
 
@@ -798,14 +799,14 @@ class BackwardEliminationAnalyzer:
 
     def get_perf_trend(self, dataset: str = "mdl", metric: str = "IV") -> pd.DataFrame:
         """
-        获取指定数据集上性能指标随轮次变化趋势。
+        Return the trend of a performance metric over the rounds for a given dataset.
 
         Parameters
         ----------
         dataset : str, default "mdl"
-            数据集名称，如 "mdl", "hd", "oot"
+            Dataset name, e.g. "mdl", "hd", "oot".
         metric : str, default "IV"
-            性能指标列名
+            Name of the performance metric column.
 
         Returns
         -------
