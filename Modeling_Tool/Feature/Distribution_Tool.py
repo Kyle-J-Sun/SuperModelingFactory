@@ -18,12 +18,22 @@ class proc_means:
     data : pd.DataFrame
         Input raw DataFrame.
     varlist : list
-        List of numeric variable names to summarize.
+        List of numeric variable names to summarize. Non-numeric variables are accepted too: they get ``N``,
+        ``UNIQUE``, ``TOP`` and ``FREQ`` instead of the numeric statistics.
     groupby : list
-        List of grouping variable names.
+        List of grouping variable names (a single name as a string is accepted; an empty list or None means no
+        grouping).
     spec_missing_value : any, optional
         Special value to be treated as missing. Default is None.
-        
+    feature_block_size : int or None, optional
+        Number of variables described per block, which limits the memory use on wide tables. Default is 128. None
+        describes all variables in one block. A value that is not a positive integer raises ``ValueError``.
+
+    Notes
+    -----
+    The special value is replaced by NaN in the whole DataFrame (a copy), including the grouping columns: rows whose
+    group value equals ``spec_missing_value`` fall out of the groups. The input DataFrame itself is not modified.
+
     Examples
     --------
     >>> pm = proc_means(df, ['age', 'score'], ['gender'])
@@ -47,9 +57,18 @@ class proc_means:
         varlist : list
             List of numeric variable names to summarize.
         groupby : list
-            List of grouping variable names.
+            List of grouping variable names (a single name as a string is accepted; an empty list or None means no
+            grouping).
         spec_missing_value : any, optional
             Special value to be treated as missing.
+        feature_block_size : int or None, optional
+            Number of variables described per block, which limits the memory use on wide tables. Default is 128. None
+            describes all variables in one block.
+
+        Raises
+        ------
+        ValueError
+            If ``feature_block_size`` is not None and is not a positive integer.
         """
         self.data = data
         self.varlist = varlist
@@ -210,17 +229,25 @@ def proc_means_by_grp(
     varlist : list
         List of numeric variable names to summarize.
     groupby : list, optional
-        List of grouping variable names. Default is an empty list (no grouping).
+        List of grouping variable names (a single name as a string is accepted). Default is None, which means no
+        grouping (the same as an empty list).
     spec_missing_value : any, optional
-        Special value to be treated as missing. Default is None.
+        Special value to be treated as missing. Default is None. It is replaced by NaN in the whole DataFrame,
+        including the grouping columns, so rows whose group value equals it fall out of the groups.
     q : list, optional
         List of quantiles. Default is [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99].
-        
+    feature_block_size : int or None, optional
+        Number of variables described per block, which limits the memory use on wide tables. Default is 128. None
+        describes all variables in one block. A value that is not a positive integer raises ``ValueError``.
+
     Returns
     -------
     pd.DataFrame
-        Grouped statistics report containing the descriptive statistics of each variable.
-        
+        Grouped statistics report containing the descriptive statistics of each variable: one row per group value
+        and variable, with the grouping columns, ``attribute`` (the variable name), ``N_ALL``, ``N``, ``MEAN``, ``STD``,
+        ``MIN``, one ``Q<percent>`` column per quantile (``Q5``, ``Q15``, ...), ``MAX`` and ``MISSING_RATE``
+        (non-numeric variables get ``UNIQUE``, ``TOP`` and ``FREQ`` instead of the numeric statistics).
+
     Examples
     --------
     >>> result = proc_means_by_grp(df, ['age', 'score'], ['gender'])
@@ -258,6 +285,27 @@ def proc_means_for_screening(
     ``proc_means_by_grp`` returns object stats (unique/top/freq) when numeric and
     categorical columns are melted together.  This helper splits by dtype so MIN,
     MEAN, and MAX are always present (NaN for non-numeric features).
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Input raw DataFrame.
+    varlist : list
+        List of variable names to summarize. A name that is not a column of ``data`` is dropped silently. An empty
+        list returns an empty table.
+    spec_missing_value : any, optional
+        Special value to be treated as missing. Default is None.
+    q : list, optional
+        List of quantiles passed to ``proc_means_by_grp``. Default is None, which uses its default quantiles.
+    feature_block_size : int or None, optional
+        Number of variables described per block. Default is 128. None describes all variables in one block.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per variable with the columns ``attribute``, ``N_ALL``, ``N``, ``MISSING_RATE``, ``MIN``, ``MEAN``
+        and ``MAX`` (NaN in ``MIN``, ``MEAN`` and ``MAX`` for non-numeric variables). The table has no rows when
+        no variable is found.
     """
     if not varlist:
         return pd.DataFrame(columns=_SCREENING_MEANS_COLS)

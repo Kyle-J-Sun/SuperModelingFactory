@@ -156,6 +156,55 @@ def _screening_summary_from_engine(
 
 
 class PSICalculator:
+    """Population Stability Index (PSI) calculator that can bin with a fitted WOE engine.
+
+    Without ``binning_engine`` every call is delegated to ``Modeling_Tool.Feature.PSI_Tool.PSICalculator``: each
+    variable is binned on the expected sample (equal-frequency or equal-width bins) and the current sample is
+    cut with the same edges. With a ``binning_engine`` the PSI is computed on the bins of that engine instead
+    (its WOE value is the bin label), so monitoring uses the same mapping as the model.
+
+    Parameters
+    ----------
+    buckets : int, default 10
+        Number of bins of the default binning. It has no effect when ``binning_engine`` is given.
+    equal_freq : bool, default True
+        Use equal-frequency bins (False gives equal-width bins). It has no effect when ``binning_engine`` is given.
+    min_bin_prop : float, default 0.05
+        Minimum proportion for each bin; it caps the number of bins at ``max(5, 1 / min_bin_prop)``. It has no
+        effect when ``binning_engine`` is given.
+    content : float, default 1e-06
+        Floor of a bin share, so that the logarithm stays finite (see ``psi_missing_bucket_policy``).
+    precision : int, default 5
+        Decimals of the bin edges of the default binning. With ``binning_engine`` it is the number of decimals
+        the PSI values are rounded to.
+    binning_engine : WOE_Master, MonotoneWOEBinner, WOEEngineAdapter or None, default None
+        Fitted WOE engine whose bins define the PSI. ``None`` keeps the default binning. An object of any other type
+        raises ``TypeError``.
+    missing_policy : {"include", "drop", "warn_and_drop"}, default "include"
+        How NaN rows are handled by the default binning: ``"include"`` gives them a bin of their own
+        (``"__MISSING__"``), so a change of the missing rate moves the PSI; ``"drop"`` ignores them;
+        ``"warn_and_drop"`` drops them and emits a ``RuntimeWarning`` with the NaN counts. It has no effect when
+        ``binning_engine`` is given (the engine decides how missing values are binned).
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, default "smooth_laplace"
+        How a bin that holds rows on one side only is treated. ``"smooth_laplace"`` adds one to every bin count
+        when such a bin exists; ``"floor_1e6"`` clips the bin shares at ``content``; ``"exclude"`` drops the
+        one-sided bins from the sum. Any other value raises ``ValueError``.
+    feature_block_size : int or None, default 64
+        Number of variables that the engine transforms per block (used only with ``binning_engine``). ``None``
+        processes all variables at once. A value that is not a positive integer raises ``ValueError``.
+
+    Attributes
+    ----------
+    buckets, equal_freq, min_bin_prop, content, precision, missing_policy, psi_missing_bucket_policy, feature_block_size
+        The constructor values.
+    binning_engine : WOE_Master, MonotoneWOEBinner, WOEEngineAdapter or None
+        The engine as passed to the constructor.
+
+    Examples
+    --------
+    >>> psi = PSICalculator(buckets=10, binning_engine=woe).calculate(train_df, oot_df, features)
+    """
+
     def __init__(
         self,
         buckets: int = 10,
@@ -296,6 +345,59 @@ class PSICalculator:
         missing_policy=None,
         psi_missing_bucket_policy=None,
     ):
+        """Calculate the PSI of each variable between ``expected_df`` and ``current_data``.
+
+        Parameters
+        ----------
+        expected_df : pandas.DataFrame
+            Expected (baseline) sample. The default binning builds the bins on it.
+        current_data : pandas.DataFrame
+            Current sample that is compared with ``expected_df``.
+        varlist : list of str
+            Variables to compute the PSI for. With a ``binning_engine`` every variable must be one the engine was
+            fitted on, otherwise ``KeyError`` is raised.
+        group_by : str, list of str or None, default None
+            Legacy grouping argument. With the default binning it has no effect unless ``group_name`` is also given
+            or ``return_details`` is True; use ``group_name`` to get PSI by group. With a ``binning_engine`` it acts
+            as ``group_name`` when ``group_name`` is None.
+        group_name : str, list of str or None, default None
+            Column(s) of ``current_data`` whose values define groups. Every group is compared with the whole
+            ``expected_df`` and the bins are built once, on ``expected_df``. A NaN group value becomes ``"__NULL__"``.
+            A list of columns is supported only with a ``binning_engine``.
+        return_details : bool, default False
+            Whether to return the bin-level details together with the PSI table (see Returns).
+        missing_policy : {"include", "drop", "warn_and_drop"} or None, default None
+            How NaN rows are handled by the default binning. ``None`` uses the value of the constructor. It has no
+            effect when a ``binning_engine`` is used.
+        psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"} or None, default None
+            How a bin that holds rows on one side only is treated. ``None`` uses the value of the constructor.
+
+        Returns
+        -------
+        pandas.DataFrame, dict or tuple
+            The PSI table has one row per variable (and per group value) with the columns ``var`` and ``psi`` plus
+            the group column(s). With ``return_details=True``:
+
+            - default binning: the dict ``{'psi': PSI table, 'details': DataFrame}``, where ``details`` has one row
+              per bin with the columns ``bin``, ``expected_count``, ``actual_count``, ``expected_percent``,
+              ``actual_percent``, ``psi_component``, ``bucket_status``, ``psi_missing_bucket_policy``, the group
+              column when ``group_name`` is given, and ``var``;
+            - ``binning_engine``: the tuple ``(PSI table, details)``, where ``details`` maps ``var`` (or
+              ``(var, group value)`` when grouped) to ``{'expected_bins': Series, 'current_bins': Series}``, the
+              share of rows per bin sorted in descending order.
+
+        Raises
+        ------
+        ValueError
+            If ``psi_missing_bucket_policy`` is not a valid value (or, with the default binning, ``missing_policy``).
+        KeyError
+            With a ``binning_engine``, if a variable of ``varlist`` was not fitted by the engine.
+
+        Notes
+        -----
+        With a ``binning_engine`` the PSI values are rounded to ``precision`` decimals. The default binning does not
+        round them.
+        """
         adapter = self._woe_engine_adapter
         effective_missing_policy = missing_policy if missing_policy is not None else self.missing_policy
         effective_bucket_policy = (
@@ -329,6 +431,75 @@ class PSICalculator:
 
 
 class VarExtractionInsights:
+    """Variable insight analyzer: IV, KS and lift per variable, and bivariate WOE charts.
+
+    Without an engine the calls are delegated to ``Modeling_Tool.Feature.Feature_Insights.VarExtractionInsights``, which
+    bins every variable by its own settings (decision-tree bins by default). With ``woe_binner`` (a fitted ``WOE_Master``
+    or ``MonotoneWOEBinner``) or with ``woe_engine="monotone"``, the bins and the IV come from that engine instead.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Input data. It is stored on the instance, and every method takes its own ``data`` argument.
+    dep : str
+        Name of the target column (0/1).
+    plot_path : str or None
+        Root folder of the charts written by ``plot_woe``. Pass ``None`` if you do not plot.
+        ``get_var_analysis_report`` writes no files.
+    nbins : int, default 10
+        Number of bins per variable.
+    equal_freq : bool, default True
+        Use equal-frequency bins (False gives equal-width bins).
+    min_bin_prop : float, default 0.05
+        Minimum proportion of rows per bin.
+    precision : int, default 5
+        Decimals of the bin edges.
+    chi2_method : bool, default False
+        Merge an initial fine binning with a chi-square test.
+    chi2_p : float, default 0.9
+        Confidence level of the chi-square merge.
+    init_equi_bins : int, default 5000
+        Number of fine bins before the chi-square merge.
+    tree_binning : bool, default True
+        Place the bin edges with a decision tree on the target (supervised bins).
+    include_missing : bool, default True
+        Missing values form their own bin.
+    seed : int, default 3407
+        Random seed of the tree binning.
+    missing_rate_ref : int or float, default -999999
+        Sentinel for missing values. It fills ``NaN`` in the default binning and is treated as missing in the
+        ``missing_rate``, ``min``, ``mean`` and ``max`` columns of the report.
+    spec_values : list or None, default None
+        Special values that get their own bins. ``None`` is stored as an empty list.
+    woe_engine : str, default "master"
+        ``"monotone"`` makes the object fit its own ``MonotoneWOEBinner`` on first use and keep it in
+        ``woe_binner``. Any other value behaves like ``"master"`` (no self-fitted engine).
+    woe_binner : WOE_Master, MonotoneWOEBinner or None, default None
+        A fitted engine. It is used whenever it is given, whatever ``woe_engine`` says: bins and IV then come from
+        it, and ``nbins``, ``equal_freq``, ``min_bin_prop``, ``precision``, ``chi2_method``, ``chi2_p``,
+        ``init_equi_bins``, ``tree_binning``, ``include_missing``, ``seed`` and ``spec_values`` are ignored by the
+        report. An object of another type raises ``TypeError`` when a method uses it.
+    woe_engine_params : dict or None, default None
+        Constructor arguments of the self-fitted ``MonotoneWOEBinner`` (``woe_engine="monotone"`` without
+        ``woe_binner``). The key ``fit_params`` is passed on to its ``fit``. ``chi2_method``, ``chi2_p``,
+        ``init_equi_bins`` and ``spec_values`` also feed that fit. ``None`` is stored as an empty dict.
+
+    Attributes
+    ----------
+    data, dep, plot_path, nbins, equal_freq, min_bin_prop, precision, chi2_method, chi2_p, init_equi_bins, tree_binning, include_missing, seed, missing_rate_ref, spec_values, woe_engine, woe_engine_params
+        The constructor values.
+    woe_binner : WOE_Master, MonotoneWOEBinner or None
+        The engine of the constructor, or the self-fitted ``MonotoneWOEBinner`` after the first call that needed it.
+    failed_variables : list of tuple
+        ``(variable, exception type name)`` pairs of the variables that the last ``get_var_analysis_report`` call
+        could not analyze.
+
+    Examples
+    --------
+    >>> insights = VarExtractionInsights(train_df, "bad_flag", None, woe_binner=woe)
+    >>> report = insights.get_var_analysis_report(train_df, features, iv_cut=0)
+    """
+
     def __init__(
         self,
         data,
@@ -380,9 +551,57 @@ class VarExtractionInsights:
 
     @staticmethod
     def remove_folder(file_path):
+        """Delete the specified folder.
+
+        Recursively delete the folder at the given path together with all of its
+        contents; do nothing (silently) if the folder does not exist.
+
+        Parameters
+        ----------
+        file_path : str
+            Path of the folder to delete.
+        """
         return _BaseVarExtractionInsights.remove_folder(file_path)
 
     def get_var_analysis_report(self, data, varlist, dep=None, iv_cut=0.01):
+        """Compute IV, KS and lift of each variable and return those that reach ``iv_cut``.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Data that holds the variables and the target column.
+        varlist : list of str
+            Variables to analyze.
+        dep : str or None, default None
+            Name of the target column. ``None`` uses the ``dep`` of the constructor. The argument is honored only
+            when a WOE engine supplies the bins (``woe_binner``, or ``woe_engine="monotone"``): the default binning
+            always uses the ``dep`` of the constructor.
+        iv_cut : float, default 0.01
+            IV threshold. Variables with ``iv < iv_cut`` are left out of the report; pass 0 to keep them all.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per reported variable with the columns ``var``, ``n_all`` (rows), ``n`` (non-missing rows),
+            ``ks_in_gains``, ``lift_in_gains`` (largest bin lift), ``iv`` (rounded to 4 decimals), ``n_bump``,
+            ``n_bins``, ``missing_rate``, ``min``, ``mean`` and ``max``. ``n_bump`` counts the rank-order breaks
+            between the bins of the default binning, and equals the bin count when a WOE engine is used. The
+            default binning sorts the rows by ``iv``, descending; with a WOE engine they follow ``varlist``. The
+            frame is empty (with these columns) when no variable could be analyzed.
+
+        Warns
+        -----
+        UserWarning
+            If some variables could not be analyzed (they are listed in ``failed_variables``).
+
+        Notes
+        -----
+        A constant column is skipped silently. A variable that cannot be binned is left out and recorded in
+        ``failed_variables`` as ``(name, exception type)``. With a WOE engine, a variable that is missing from
+        ``data`` is skipped silently, and a variable that the engine was not fitted on is recorded as failed (a
+        self-fitted ``MonotoneWOEBinner`` is fitted once, on the ``varlist`` of the first call). The default binning
+        handles numeric variables only.
+        """
         if dep is None:
             dep = self.dep
         self.failed_variables = []
@@ -411,6 +630,42 @@ class VarExtractionInsights:
         return result
 
     def plot_woe(self, data, varlist, plot_group=None, plot_dirname="var_analysis_plot", plot_path=None):
+        """Plot the bivariate WOE charts of the variables and save them as PNG files.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Data that holds the variables and the target column (and ``plot_group`` when it is given).
+        varlist : list of str
+            Variables to plot. When the object holds a ``MonotoneWOEBinner`` (given as ``woe_binner`` or
+            self-fitted), every variable that the binner was fitted on is plotted and ``varlist`` is ignored.
+        plot_group : str or None, default None
+            Name of a grouping column. A chart per variable split by this column is written as well
+            (``<var>_<plot_group>.png``). With a ``MonotoneWOEBinner`` the charts of the groups
+            (``<var>_by_<plot_group>.png``) replace the ungrouped ones. The group values must be strings in the
+            default plot (numeric values raise ``TypeError``).
+        plot_dirname : str, default "var_analysis_plot"
+            Subdirectory of ``plot_path`` that receives the charts. The folders are created if they do not exist.
+        plot_path : str or None, default None
+            Root folder of the charts. ``None`` uses the ``plot_path`` of the constructor.
+
+        Returns
+        -------
+        None
+            Saves the images directly.
+
+        Raises
+        ------
+        TypeError
+            If no plot path is available (``plot_path`` and the constructor's ``plot_path`` are both None) while the
+            default binning is used. With a ``MonotoneWOEBinner`` the method returns without plotting instead.
+
+        Notes
+        -----
+        Only a ``MonotoneWOEBinner`` plots from its own bins. Without an engine, or with a ``WOE_Master`` as
+        ``woe_binner``, a new ``WOE_Master`` is fitted with the binning settings of the constructor (missing values
+        are first filled with ``missing_rate_ref``) and the charts are drawn from it.
+        """
         adapter = as_woe_engine(self.woe_binner) if self.woe_binner is not None else _make_monotone_adapter(self, data, varlist)
         if adapter is None:
             return self._base.plot_woe(data, varlist, plot_group, plot_dirname, plot_path)
@@ -427,6 +682,67 @@ class VarExtractionInsights:
 
 
 class CorrelationFilter:
+    """Correlation filter: drop the weaker variable of each highly correlated pair.
+
+    Pairs whose absolute correlation exceeds ``corr_cutpoint`` are found, and from each group of correlated variables
+    the one with the highest IV (or KS) is kept. Without an engine the calls are delegated to
+    ``Modeling_Tool.Feature.Feature_Insights.CorrelationFilter``; with ``woe_binner`` (a fitted ``WOE_Master`` or
+    ``MonotoneWOEBinner``) or ``woe_engine="monotone"``, the IV and KS come from that engine.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Input data (raw values). The correlation is computed on the raw values of the numeric variables.
+    dep : str
+        Name of the target column (0/1).
+    corr_cutpoint : float, default 0.8
+        Correlation threshold: a pair is correlated when ``abs(corr) > corr_cutpoint``.
+    method : str, default "pearson"
+        Correlation method, ``"pearson"``, ``"spearman"`` or ``"kendall"``, passed to ``DataFrame.corr``.
+    tree_binning : bool, default False
+        Use decision-tree bins in the default IV and KS computation. Ignored when an engine supplies the bins.
+    chi2_method : bool, default False
+        Merge an initial fine binning with a chi-square test in the default computation. With
+        ``woe_engine="monotone"`` it also feeds the self-fitted binner.
+    seed : int, default 42
+        Random seed of the tree binning. Ignored when an engine supplies the bins.
+    chi2_p : float, default 0.999
+        Confidence level of the chi-square merge.
+    init_equi_bins : int, default 1000
+        Number of fine bins before the chi-square merge.
+    missing_rate_ref : int or float, default -9999999
+        Sentinel for missing values in the default IV and KS computation. Ignored when an engine supplies the bins.
+    spec_values : list, default []
+        Special values that get their own bins. They are stored but not used by the default computation: they take
+        effect only with ``woe_binner`` or ``woe_engine="monotone"``.
+    base_metric : {"iv", "ks"}, default "iv"
+        Metric that decides which variable of a correlated group survives. Any other value raises ``KeyError`` when
+        a pair is filtered.
+    woe_engine : str, default "master"
+        ``"monotone"`` without ``woe_binner`` fits a ``MonotoneWOEBinner`` on ``data``. Any other value behaves like
+        ``"master"`` (the default IV and KS computation).
+    woe_binner : WOE_Master, MonotoneWOEBinner or None, default None
+        A fitted engine that supplies the IV and KS. It is used whenever it is given, and it also encodes the
+        non-numeric variables for the correlation. An object of another type raises ``TypeError`` when it is used.
+    woe_engine_params : dict or None, default None
+        Constructor arguments of the self-fitted ``MonotoneWOEBinner``; the key ``fit_params`` is passed on to its
+        ``fit``. ``None`` is stored as an empty dict.
+
+    Attributes
+    ----------
+    data, dep, corr_cutpoint, method, tree_binning, chi2_method, seed, chi2_p, init_equi_bins, missing_rate_ref, spec_values, base_metric, woe_engine, woe_binner, woe_engine_params
+        The constructor values.
+    correlated_dict : dict
+        For each anchor variable of a correlated group, ``{"corr": pairs DataFrame, "gains": metric table}``.
+    filtered_varlist : list
+        The variables removed by ``remove_highly_correlated``.
+
+    Examples
+    --------
+    >>> corr_filter = CorrelationFilter(train_df, "bad_flag", corr_cutpoint=0.7, woe_binner=woe)
+    >>> keep_vars = corr_filter.remove_highly_correlated(features)
+    """
+
     def __init__(
         self,
         data,
@@ -593,6 +909,23 @@ class CorrelationFilter:
 
     @staticmethod
     def calculate_vif(df):
+        """Compute the variance inflation factor (VIF) of each column.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            DataFrame that holds the independent variables (numeric columns without missing values).
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per column of ``df`` with the columns ``index`` (the variable name) and ``VIF``. A VIF above 10
+            usually signals serious collinearity.
+
+        Notes
+        -----
+        It needs the optional ``statsmodels`` package. There is no NaN handling and no weights.
+        """
         return _BaseCorrelationFilter.calculate_vif(df)
 
     def _sync_base_state(self):
@@ -606,6 +939,29 @@ class CorrelationFilter:
         )
 
     def filter_single_iteration(self, varlist):
+        """Run one pass of the correlation filter over ``varlist``.
+
+        From each group of highly correlated variables the one with the highest ``base_metric`` is kept and the
+        others are removed.
+
+        Parameters
+        ----------
+        varlist : list of str
+            Variables to screen. They must be columns of ``data``.
+
+        Returns
+        -------
+        list of str
+            The retained variables: the winner of each correlated group first (in the order of discovery), followed
+            by the variables that are not part of any highly correlated pair in their original order. ``varlist``
+            itself is returned when no pair exceeds ``corr_cutpoint``.
+
+        Notes
+        -----
+        The call updates ``correlated_dict`` and the internal decision trace. Non-numeric variables are encoded with
+        the WOE engine for the correlation when one is available; otherwise they are skipped with a warning and
+        kept.
+        """
         if self.woe_binner is None and self.woe_engine == "master":
             result = self._base.filter_single_iteration(varlist)
             self._sync_base_state()
@@ -657,6 +1013,28 @@ class CorrelationFilter:
         return selected_varlist + [x for x in varlist if x not in (selected_varlist + removed_varlist)]
 
     def remove_highly_correlated(self, varlist, max_iterations=10):
+        """Iteratively remove highly correlated variables.
+
+        Run the correlation filter repeatedly until no variable is removed or the maximum number of iterations is
+        reached.
+
+        Parameters
+        ----------
+        varlist : list of str
+            Variables to screen. They must be columns of ``data``.
+        max_iterations : int, default 10
+            Maximum number of filtering passes.
+
+        Returns
+        -------
+        list of str
+            The variables finally retained, with the winner of each correlated group first.
+
+        Notes
+        -----
+        ``filtered_varlist`` is set to the removed variables, and ``correlated_dict`` holds the correlated pairs and
+        the metric table behind each decision.
+        """
         if self.woe_binner is None and self.woe_engine == "master":
             result = self._base.remove_highly_correlated(varlist, max_iterations)
             self._sync_base_state()

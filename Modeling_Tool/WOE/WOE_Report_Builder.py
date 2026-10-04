@@ -8,6 +8,44 @@ import pandas as pd
 # internal ExcelMaster package is not available.
 
 def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=None, var_dict=None):
+    """Place the WOE charts of each variable on an ExcelMaster worksheet.
+
+    The sheet starts with a "Bivar Table" title. For every variable it gets an explanation row, the overall chart
+    ``<var>.png`` and the by-group chart ``<var>_<grp_name>.png`` side by side (the files written by
+    ``WOE_Master.plot_bivar_graph``), and optionally a table with the means of the variable. A column with the
+    variable name labels the rows of each block.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        An initialized ExcelMaster instance that owns ``ws``.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on (for example the result of ``em.add_worksheet``).
+    woe_plot_dir : str
+        Directory that holds the pre-generated images ``<var>.png`` and ``<var>_<grp_name>.png``.
+    grp_name : str
+        Name of the grouping column; it is used in the file names ``<var>_<grp_name>.png``.
+    varlist : list of str
+        Variables to place on the sheet. Only the variables whose by-group image ``<var>_<grp_name>.png`` exists are
+        used (the others are skipped silently), and their overall image ``<var>.png`` must exist too.
+    means_rpt : pandas.DataFrame or None, default None
+        Table of means with an ``attribute`` column that holds the variable name (for example the output of
+        ``proc_means_by_grp``). When given, the rows of each variable, rounded to 2 decimals and transposed, are written
+        next to its images. ``None`` writes no means.
+    var_dict : dict or None, default None
+        Mapping ``{variable: explanation text}`` written above the images of each variable. A variable without an entry
+        gets an empty explanation. ``None`` means an empty dict.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    The image files are resized in place: ``<var>.png`` and ``<var>_<grp_name>.png`` in ``woe_plot_dir`` are overwritten
+    with the resized pictures. The call also moves the cursor of ``em`` and sets ``em.gap_number`` to 0.
+    """
     import os
     import logging
 
@@ -96,21 +134,24 @@ def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=N
 class WoeReportBuilder:
     """
     A streamlined class for creating multiple WOE analysis report sheets in one Excel workbook.
-    
-    Example usage:
-        builder = WoeReportBuilder(
-            em=em,
-            data=data,
-            valid_varlist=valid_varlist,
-            woe_suffix='_woe',
-            proc_means_func=proc_means_by_grp,
-            missing_rate_ref=0.95,
-            default_var_dict=var_dict_1
-        )
-        builder.add_group('sample_ind_fnl', woe_plot_dir='../customized_woe_by_sample/')
-        builder.add_group('launch_month', woe_plot_dir='../customized_woe_by_month/')
-        builder.add_group('platform_2', woe_plot_dir='../customized_woe_by_platform/')
-        builder.close()
+
+    The constructor parameters are documented in ``__init__``.
+
+    Examples
+    --------
+    >>> builder = WoeReportBuilder(
+    ...     em=em,
+    ...     data=data,
+    ...     valid_varlist=valid_varlist,
+    ...     woe_suffix='_woe',
+    ...     proc_means_func=proc_means_by_grp,
+    ...     missing_rate_ref=0.95,
+    ...     default_var_dict=var_dict_1
+    ... )
+    >>> builder.add_group('sample_ind_fnl', woe_plot_dir='../customized_woe_by_sample/')
+    >>> builder.add_group('launch_month', woe_plot_dir='../customized_woe_by_month/')
+    >>> builder.add_group('platform_2', woe_plot_dir='../customized_woe_by_platform/')
+    >>> builder.close()
     """
 
     def __init__(self, em, data, valid_varlist: list, woe_suffix: str = '_woe',
@@ -122,19 +163,22 @@ class WoeReportBuilder:
         em : ExcelMaster
             An initialized ExcelMaster instance (with the target .xlsx file path).
         data : pd.DataFrame
-            The full dataset (must contain the raw variables and their woe columns).
+            The full dataset (must contain the raw variables and their woe columns). The raw variables of
+            ``valid_varlist`` are cast to float in place, so the DataFrame of the caller is modified.
         valid_varlist : list
             List of variable names to be plotted.
-        woe_suffix : str
+        woe_suffix : str, default '_woe'
             Suffix that identifies the woe‑transformed columns (e.g., '_woe').
-        proc_means_func : callable
+        proc_means_func : callable or None, default None
             Function with signature (data, full_var_list, group_cols, spec_missing_value) -> pd.DataFrame
-            It should return a long-format dataframe of binned means.
-        missing_rate_ref : float
-            Missing rate threshold for proc_means_func.
-        default_var_dict : dict, optional
+            It should return a long-format dataframe of binned means (with an ``attribute`` column holding the
+            variable name). ``None`` uses ``Modeling_Tool.Feature.Distribution_Tool.proc_means_by_grp``.
+        missing_rate_ref : float, default 0.95
+            Value that is passed to ``proc_means_func`` as ``spec_missing_value``, i.e. the special value that is
+            treated as missing when the means are computed (it is a value, not a threshold on a missing rate).
+        default_var_dict : dict or None, default None
             Default dictionary mapping variable name -> explanation text.
-            Can be overridden per group if needed.
+            Can be overridden per group if needed. ``None`` means an empty dict.
         """
         
         self.proc_means_func = proc_means_func
@@ -171,12 +215,24 @@ class WoeReportBuilder:
         woe_plot_dir : str
             Path to the directory containing the pre‑generated WOE images.
             The function expects files like {var}.png and {var}_{group_name}.png.
-        sheet_name : str, optional
+        sheet_name : str or None, default None
             Name of the Excel sheet. If not given, a name like "Bivar_{group_name}" is used.
         cell_scale : tuple (row_scale, col_scale), default (1, 2)
             Cell size scaling for the worksheet.
-        var_dict : dict, optional
+        var_dict : dict or None, default None
             Variable explanation dictionary. Falls back to self.default_var_dict.
+
+        Returns
+        -------
+        None
+            The worksheet is added to the workbook of ``em``.
+
+        Notes
+        -----
+        The means table is built with ``proc_means_func(data, full_var_list, [group_name],
+        spec_missing_value=missing_rate_ref)``, where ``full_var_list`` holds the raw variables and their woe columns. The
+        images ``{var}.png`` and ``{var}_{group_name}.png`` of ``woe_plot_dir`` are resized in place by
+        ``get_woe_plot_report_new``.
         """
         # Compute means report using the provided function
         means_rpt = self.proc_means_func(

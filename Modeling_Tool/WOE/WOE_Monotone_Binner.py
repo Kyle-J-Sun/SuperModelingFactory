@@ -233,69 +233,141 @@ class MonotoneWOEBinner:
 
     Parameters
     ----------
-    feature_cols   : names of the numeric feature columns to bin
-    target_col     : name of the binary target column (0 = good, 1 = bad)
-    n_init_bins    : number of initial equal-frequency bins, default 20
-    min_bin_size   : minimum share of the samples per bin, default 0.03 (3%)
-    min_n_bins     : lower limit on the final number of bins (special-value bins excluded), default 2
-    eps            : tiny constant that prevents log(0), default 1e-6
-    missing_woe    : WOE assigned to missing values (NaN), default 0.0 (neutral)
-                     Note: if nan is already in special_values, its WOE is computed
-                     independently; this parameter only applies to NaN not listed in special_values.
-    special_values : list of special values that each get their own bin, e.g. [-1, -100, float('nan')]
-                     These values are removed first during fit, and the remaining data is binned
-                     monotonically; they are then appended to the summary table as separate
-                     bins, each with its own WOE.
-                     nan / None / float('nan') mean "bin missing values separately".
-                     Note: applies to feature_cols (numeric features) only; cate_feats are not affected.
-    cate_feats     : names of already-discretized categorical (discrete) feature columns, default None.
-                     These features are **not cut into intervals at all**: each distinct value
-                     becomes its own bin, its WOE / IV is computed directly, and the bin label is
-                     the category value itself.
-                     Missing values (NaN), if present, go into a separate [Missing] bin (WOE computed independently).
-                     Mutually exclusive with feature_cols (a name in both is treated as a cate_feats entry); chi-square /
-                     decision-tree post-merging (refine_chi2 / refine_dtree) is skipped automatically for categorical features.
-                     Use refine_cate() to cluster categories by bad rate and merge those with similar bad rates.
-    bin_label_decimals : number of decimal places kept for the bin-interval boundary values, default None (uses the .8g
-                         format, at most 8 significant digits). When set to a positive integer N, boundaries
-                         are always shown with N decimals (:.Nf), e.g. with N=2, 1234.5678 → 1234.57.
-                         Note: lower precision makes the load_woe_bins(get_final_bins())
-                         round trip slightly inexact at the boundaries, which is usually negligible.
-    sv_min_bin_size    : threshold for the low-share special-value (SV) fallback (an SV bin's share of the **full**
-                         sample), default 0.0 = off.
-    sv_small_policy    : how an SV bin with a share < sv_min_bin_size is handled:
-                         'keep' (default; empirical WOE, no behavior change) /
-                         'neutral' (woe=iv=0) /
-                         'merge_missing' (bad/good counts are merged into the [Missing] bin and WOE is recomputed;
-                         the stored WOE of each merged row is overwritten with the WOE of [Missing];
-                         without a [Missing] bin it falls back to 'neutral' and warns).
-    sv_woe_smoothing   : whether SV-bin WOE is shrunk toward the global bad rate, 'none' (default) / 'laplace'.
-    sv_smoothing_alpha : smoothing strength alpha (pseudo-count), default 0.0 (numerically equivalent to the old WOE).
-                         Approach 1 takes precedence: a low-share bin handled by the fallback is **not** smoothed
-                         again; smoothing only applies to SV bins that meet the share threshold (or policy='keep').
-    unseen_special_policy : how to handle numeric special values that are declared but have no rows in the fit sample.
-                         'normal_bin' (default, legacy behavior): no bin is created and apply_woe bins them as
-                         ordinary numbers (e.g. -1 falls into the lowest bin); by-group charts and group IV
-                         use the same convention;
-                         'neutral': at fit time a placeholder special-value bin is appended (n=0, woe=missing_woe,
-                         iv=0, sv_policy_applied='unseen_at_fit'); scoring / screening / charts
-                         all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
-                         Under both policies fit and apply_woe record such values (fit warns under normal_bin);
-                         see _unseen_special_at_fit / _unseen_special_stats.
+    feature_cols : list of str
+        Names of the numeric feature columns to bin.
+    target_col : str
+        Name of the binary target column (0 = good, 1 = bad).
+    n_init_bins : int, default 20
+        Number of initial equal-frequency bins.
+    min_bin_size : float, default 0.03
+        Minimum share of the samples per bin (3% by default). It is used only when ``small_bin_policy`` is set
+        (together with ``min_bad_count`` and ``min_good_count``); with the default ``small_bin_policy=None`` the greedy
+        binning does not enforce it. ``refine_cate`` has its own ``min_bin_size`` argument.
+    min_n_bins : int, default 2
+        Lower limit on the final number of bins (special-value bins excluded).
+    eps : float, default 1e-06
+        Tiny constant that prevents log(0).
+    missing_woe : float, default 0.0
+        WOE assigned to missing values (NaN); 0.0 is neutral.
+        Note: if nan is already in special_values, its WOE is computed
+        independently; this parameter only applies to NaN not listed in special_values.
+    special_values : list or None, default None
+        List of special values that each get their own bin, e.g. [-1, -100, float('nan')].
+        These values are removed first during fit, and the remaining data is binned
+        monotonically; they are then appended to the summary table as separate
+        bins, each with its own WOE.
+        nan / None / float('nan') mean "bin missing values separately".
+        Note: applies to feature_cols (numeric features) only; cate_feats are not affected.
+    cate_feats : list of str or None, default None
+        Names of already-discretized categorical (discrete) feature columns.
+        These features are **not cut into intervals at all**: each distinct value
+        becomes its own bin, its WOE / IV is computed directly, and the bin label is
+        the category value itself.
+        Missing values (NaN), if present, go into a separate [Missing] bin (WOE computed independently).
+        Mutually exclusive with feature_cols (a name in both is treated as a cate_feats entry); chi-square /
+        decision-tree post-merging (refine_chi2 / refine_dtree) is skipped automatically for categorical features.
+        Use refine_cate() to cluster categories by bad rate and merge those with similar bad rates.
+    bin_label_decimals : int or None, default None
+        Number of decimal places kept for the bin-interval boundary values; None uses the .8g
+        format (at most 8 significant digits). When set to a positive integer N, boundaries
+        are always shown with N decimals (:.Nf), e.g. with N=2, 1234.5678 → 1234.57.
+        Note: lower precision makes the load_woe_bins(get_final_bins())
+        round trip slightly inexact at the boundaries, which is usually negligible.
+    min_bad_count : int or None, default None
+        Minimum number of bad samples that a bin must hold. A bin with fewer bads violates the limit and is handled
+        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None.
+    min_good_count : int or None, default None
+        Minimum number of good samples that a bin must hold. A bin with fewer goods violates the limit and is handled
+        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None.
+    small_bin_policy : {'merge', 'warn', 'raise'} or None, default None
+        How a bin that violates ``min_bad_count``, ``min_good_count`` or ``min_bin_size`` is handled at the end of
+        ``fit``, of ``refine_dtree`` and of ``refine_chi2`` (the last one only with ``n_jobs=1``). ``'merge'`` merges
+        the violating bin into its WOE-closest neighbor until no bin violates the limits or ``min_n_bins`` is
+        reached (a categorical feature is merged with the bad-rate clustering of ``refine_cate``). ``'warn'`` emits a
+        ``UserWarning`` and keeps the bins. ``'raise'`` raises ``BinningPolicyViolation`` (a ``ValueError``).
+        None (default) switches the check off, so the three limits are ignored.
+    monotone_direction : {'auto', 'increasing', 'decreasing'} or dict, default 'auto'
+        Expected direction of the WOE across the ordinary bins of the numeric features. ``'auto'`` lets each feature
+        take the direction that needs fewer merges; ``'increasing'`` / ``'decreasing'`` force that direction for every
+        numeric feature; a dict ``{feature: 'increasing' | 'decreasing' | 'auto'}`` sets it feature by feature
+        (a feature that is not listed stays ``'auto'``). Categorical features are not affected. Any other value
+        raises ``ValueError``.
+    reference_target : str or None, default None
+        Name of a 0/1 column of the DataFrame passed to ``fit`` that is used to infer the expected WOE direction of each
+        numeric feature: when the feature's mean among the rows with ``reference_target == 1`` is larger than among
+        those with ``reference_target == 0`` the WOE is expected to increase, otherwise to decrease (a feature with
+        equal or undefined means is left free). A direction forced by ``monotone_direction`` wins. ``fit`` raises
+        ``KeyError`` if the column is missing. None switches the inference off.
+    direction_conflict_policy : {'warn', 'raise', 'keep'} or None, default None
+        What to do when the final WOE direction of a numeric feature conflicts with its expected direction (forced
+        by ``monotone_direction`` or inferred from ``reference_target``), or when the feature collapses to a single
+        bin under the forced direction. ``'warn'`` emits a ``UserWarning``; ``'raise'`` raises
+        ``BinningPolicyViolation``; ``'keep'`` only records the conflict. None behaves like ``'warn'``. Nothing is
+        checked for a feature that has no expected direction.
+    missing_bin_strategy : {'empirical_special', 'fixed_woe', 'fail'} or None, default None
+        How missing values (NaN) are routed. ``'empirical_special'`` gives them their own [Missing] bin with an
+        empirical WOE and requires NaN in ``special_values`` (otherwise ``ValueError``). ``'fixed_woe'`` gives them
+        the constant ``missing_woe`` without a bin of their own and conflicts with NaN in ``special_values``
+        (``ValueError``). ``'fail'`` makes ``fit`` and ``apply_woe`` raise ``ValueError`` when a feature contains
+        missing values. None derives the strategy from ``special_values``: ``'empirical_special'`` if it contains NaN,
+        ``'fixed_woe'`` otherwise.
+    refine_min_n_bins_policy : {'warn', 'enforce', 'raise'} or None, default 'warn'
+        What ``refine_dtree`` does when the re-binned feature has fewer than ``min_n_bins`` ordinary bins.
+        ``'warn'`` keeps the new bins and emits a ``UserWarning``; ``'enforce'`` keeps the bins from before the
+        refinement for that feature; ``'raise'`` raises ``BinningPolicyViolation``. None disables the check.
+    sv_min_bin_size : float, default 0.0
+        Threshold for the low-share special-value (SV) fallback (an SV bin's share of the **full**
+        sample); 0.0 = off. It must be in [0.0, 1.0).
+    sv_small_policy : {'keep', 'neutral', 'merge_missing'}, default 'keep'
+        How an SV bin with a share < sv_min_bin_size is handled:
+        'keep' (default; empirical WOE, no behavior change) /
+        'neutral' (woe=iv=0) /
+        'merge_missing' (bad/good counts are merged into the [Missing] bin and WOE is recomputed;
+        the stored WOE of each merged row is overwritten with the WOE of [Missing];
+        without a [Missing] bin it falls back to 'neutral' and warns).
+    sv_woe_smoothing : {'none', 'laplace'}, default 'none'
+        Whether SV-bin WOE is shrunk toward the global bad rate, 'none' (default) / 'laplace'.
+    sv_smoothing_alpha : float, default 0.0
+        Smoothing strength alpha (pseudo-count); 0.0 is numerically equivalent to the old WOE. It must be >= 0.
+        Approach 1 takes precedence: a low-share bin handled by the fallback is **not** smoothed
+        again; smoothing only applies to SV bins that meet the share threshold (or policy='keep').
+    unseen_special_policy : {'normal_bin', 'neutral'}, default 'normal_bin'
+        How to handle numeric special values that are declared but have no rows in the fit sample.
+        'normal_bin' (default, legacy behavior): no bin is created and apply_woe bins them as
+        ordinary numbers (e.g. -1 falls into the lowest bin); by-group charts and group IV
+        use the same convention;
+        'neutral': at fit time a placeholder special-value bin is appended (n=0, woe=missing_woe,
+        iv=0, sv_policy_applied='unseen_at_fit'); scoring / screening / charts
+        all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
+        Under both policies fit and apply_woe record such values (fit warns under normal_bin);
+        see _unseen_special_at_fit / _unseen_special_stats.
 
-    fit() parameters (passed to fit(), not set in __init__)
-    -------------------------------------------------------
-    chi2_binning   : whether to run chi-square merging after the greedy monotone binning, default False.
-                     When True: starting from the greedy result, iteratively merge the adjacent bin pair
-                     with the smallest chi-square value, until the chi-square test p-value of every
-                     adjacent pair is < (1 - chi2_p);
-                     WOE monotonicity is strictly preserved while merging (a pair that would break it is skipped).
-    chi2_p         : confidence threshold of the chi-square test, default 0.99. When the p-value of adjacent
-                     bins is > (1-chi2_p), the two bins are considered not significantly different and can be merged.
-    chi2_init_size : global cap on the stratified sample used for the chi-square computation, default 1000.
-                     If the number of ordinary rows is > chi2_init_size, rows are stratified-sampled by
-                     the target ratio before the chi-square is computed, which avoids inflated
-                     chi-square values on large datasets.
+    Attributes
+    ----------
+    feature_cols : list of str
+        The feature columns. ``load_woe_bins`` appends the loaded features that are missing from it.
+    cate_feats : list of str
+        The categorical feature columns (an empty list when ``None`` was passed).
+    special_values : list
+        The declared special values (an empty list when ``None`` was passed).
+    target_col, n_init_bins, min_bin_size, min_n_bins, eps, missing_woe, bin_label_decimals, min_bad_count, min_good_count, small_bin_policy, monotone_direction, reference_target, direction_conflict_policy, missing_bin_strategy, refine_min_n_bins_policy, sv_min_bin_size, sv_small_policy, sv_woe_smoothing, sv_smoothing_alpha, unseen_special_policy
+        The constructor values.
+
+    Notes
+    -----
+    The ``fit()`` parameters are passed to ``fit()``, not set in ``__init__``:
+
+    - ``chi2_binning`` : whether to run chi-square merging after the greedy monotone binning, default False.
+      When True: starting from the greedy result, iteratively merge the adjacent bin pair
+      with the smallest chi-square value, until the chi-square test p-value of every
+      adjacent pair is < (1 - chi2_p);
+      WOE monotonicity is strictly preserved while merging (a pair that would break it is skipped).
+    - ``chi2_p`` : confidence threshold of the chi-square test, default 0.99. When the p-value of adjacent
+      bins is > (1-chi2_p), the two bins are considered not significantly different and can be merged.
+    - ``chi2_init_size`` : global cap on the stratified sample used for the chi-square computation, default 1000.
+      If the number of ordinary rows is > chi2_init_size, rows are stratified-sampled by
+      the target ratio before the chi-square is computed, which avoids inflated
+      chi-square values on large datasets.
     """
 
     def __init__(
@@ -2158,17 +2230,39 @@ class MonotoneWOEBinner:
 
         Parameters
         ----------
-        df               : training DataFrame (same as in fit())
-        features         : subset of features; default None means all fitted features
-        max_bins         : maximum number of leaf nodes of the decision tree (i.e. the upper limit on the number of bins), default 6
-        min_samples_leaf : minimum sample share (0~1) or absolute count (>= 1) per decision-tree leaf node,
-                           default 0.05 (5%); prevents overly fine bins
-        monotone         : whether to force a monotone WOE after the decision-tree binning, default True
-        n_jobs           : number of parallel processes, default 1; -1 uses all CPU cores
+        df : pandas.DataFrame
+            Training DataFrame (same as in fit()).
+        features : list of str or None, default None
+            Subset of features; None means all fitted features. Categorical features are skipped automatically.
+        max_bins : int, default 6
+            Maximum number of leaf nodes of the decision tree (i.e. the upper limit on the number of bins).
+        min_samples_leaf : float, default 0.05
+            Minimum sample share (0~1) or absolute count (>= 1) per decision-tree leaf node,
+            default 0.05 (5%); prevents overly fine bins.
+        monotone : bool, default True
+            Whether to force a monotone WOE after the decision-tree binning.
+        n_jobs : int, default 1
+            Number of parallel processes; -1 uses all CPU cores. 0 raises ``ValueError``.
+        max_depth : int or None, default None
+            Maximum depth of the decision tree (passed to ``DecisionTreeClassifier``). None leaves the depth
+            unlimited, so only ``max_bins`` and ``min_samples_leaf`` stop the tree.
 
         Returns
         -------
-        self (supports chaining)
+        MonotoneWOEBinner
+            self (supports chaining)
+
+        Raises
+        ------
+        RuntimeError
+            If the binner has not been fitted (call ``fit()`` or ``load_woe_bins()`` first).
+        ImportError
+            If scikit-learn is not installed.
+        ValueError
+            If ``n_jobs`` is 0, if a requested feature has not been fitted, or if the target column is not in ``df``.
+        BinningPolicyViolation
+            If ``refine_min_n_bins_policy``, ``small_bin_policy`` or ``direction_conflict_policy`` is ``'raise'``
+            and its condition is met.
 
         Examples
         --------
@@ -2972,9 +3066,28 @@ class MonotoneWOEBinner:
 
         The two formats can be mixed in the same bins_dict.
 
+        Parameters
+        ----------
+        bins_dict : dict
+            ``{feature_name: payload}``, where each payload is a Format A DataFrame (or a dict that wraps it under
+            ``bin_df`` / ``df``) or a Format B dict, as described above.
+
         Returns
         -------
-        self (supports chaining)
+        MonotoneWOEBinner
+            self (supports chaining)
+
+        Raises
+        ------
+        ValueError
+            If a payload has an unsupported type or format, if a Format A table lacks one of the columns
+            ``bin_label``, ``n``, ``bad``, ``woe`` and ``iv``, or if a numeric bin label cannot be parsed.
+
+        Notes
+        -----
+        The fit results already held by the binner are discarded: after the call only the features of ``bins_dict``
+        are fitted. The loaded features that are not in ``feature_cols`` are appended to it, and the binner is marked as
+        fitted, so ``apply_woe`` and the report methods can be used without ``fit``.
         """
         self._results = {}
         self._unseen_special_at_fit = {}

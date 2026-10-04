@@ -377,12 +377,27 @@ class WOE_Master(object):
     def load_mapping_table(self, mapping_table_csv):
         """Load WOE mapping table from CSV file or DataFrame.
 
-        Args:
-            mapping_table_csv: str or pandas.DataFrame, path to CSV or DataFrame object
-        Returns:
-            None, updates self.woe_dict and self.varlist attributes
-        Raises:
-            AttributeError: if input is neither string path nor DataFrame
+        Parameters
+        ----------
+        mapping_table_csv : str or pandas.DataFrame
+            Path to a CSV file, or a DataFrame object, that holds the mapping table. The table needs a ``VAR``
+            column that names the variable of each row (the format written by ``save_mapping_table``).
+
+        Returns
+        -------
+        None
+            Updates the ``woe_dict`` and ``varlist`` attributes.
+
+        Raises
+        ------
+        AttributeError
+            If the input is neither a string path nor a DataFrame (a ``pathlib.Path`` is rejected too).
+
+        Notes
+        -----
+        ``woe_dict`` is replaced, not merged: it gets one sub-table per distinct ``VAR`` value. ``varlist`` becomes the
+        list of those variables in order of first appearance. ``train_data`` is not used, so a scoring object can be
+        created with an empty ``train_data`` and an empty ``varlist``.
         """
         if isinstance(mapping_table_csv, str):
             woe_mapping_table = pd.read_csv(mapping_table_csv)
@@ -407,23 +422,71 @@ class WOE_Master(object):
             sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
         """Fit WOE binning for variables in varlist.
 
-        Args:
-            nbins: int, number of bins (default 10)
-            equal_freq: bool, use equal frequency binning (default True)
-            tree_binning_seed: int, random seed for tree-based binning
-            chi2_config: dict, chi-square binning configuration
-            precision: int, numerical precision (default 5)
-            min_bin_prop: float, minimum bin proportion (default 0.05)
-            include_missing: bool, include missing value bin (default True)
-            fillna: int/float, value to fill missing data
-            spec_values: list, special values to handle
-            sv_min_bin_size: float, low-frequency special-value bin threshold as a
-                share of all samples; 0.0 disables the fallback (legacy behaviour)
-            sv_small_policy: str, 'keep' (default) / 'neutral' / 'merge_missing'
-            sv_woe_smoothing: str, 'none' (default) / 'laplace'
-            sv_smoothing_alpha: float, Laplace smoothing strength alpha (pseudo-counts)
-        Returns:
-            None, updates self.woe_dict attribute
+        Parameters
+        ----------
+        nbins : int, default 10
+            Number of bins (maximum). The count is capped at ``max(5, 1 / min_bin_prop)`` and never exceeds 20, so a
+            larger value has no effect.
+        equal_freq : bool, default True
+            Use equal frequency binning (``False`` gives equal width bins). Decision-tree binning ignores it.
+        tree_binning_seed : int or None, default None
+            Random seed for tree-based binning. Any non-zero value switches to decision-tree bins; ``None`` and ``0``
+            keep the quantile bins.
+        chi2_config : tuple or None, default None
+            Chi-square binning configuration ``(init_bins, p_value)``, for example ``(100, 0.95)``: the number of
+            initial equal frequency bins and the confidence of the chi-square merge (a higher value gives fewer bins).
+            ``None`` disables chi-square binning. A dict raises ``KeyError``.
+        precision : int, default 5
+            Numerical precision: number of decimals of the bin edges (values are rounded to it before binning).
+        min_bin_prop : float, default 0.05
+            Minimum bin proportion. It lowers the cap on the number of bins (see ``nbins``) and sets the minimum bin
+            size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
+        include_missing : bool, default True
+            Include missing values in the binning. They are replaced with -999999 and share the lowest bin, unless
+            ``equal_freq`` is False or ``spec_values`` contains -999999, which gives them a bin of their own (``NaN``
+            in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
+            sends missing values to the lowest bin.
+        fillna : int, float or None, default None
+            Value to fill missing data. ``None`` uses ``missing_ref_value``. Only the chi-square step uses it: on the
+            default binning path missing values are filled with -999999 whatever its value.
+        spec_values : list, default []
+            Special values to handle. Each value becomes a bin edge, so it ends a bin of its own (together with any
+            values between the previous edge and the special value).
+        sv_min_bin_size : float, default 0.0
+            Low-frequency special-value bin threshold as a share of all samples; 0.0 disables the fallback (legacy
+            behaviour). It must be in [0.0, 1.0).
+        sv_small_policy : str, default "keep"
+            ``'keep'`` / ``'neutral'`` / ``'merge_missing'``. How a special-value or missing bin below
+            ``sv_min_bin_size`` is treated: ``'keep'`` leaves it, ``'neutral'`` sets its WOE and IV to 0, and
+            ``'merge_missing'`` merges its counts into the missing bin (falling back to ``'neutral'`` with a
+            ``UserWarning`` when there is no missing bin).
+        sv_woe_smoothing : str, default "none"
+            ``'none'`` / ``'laplace'``. ``'laplace'`` shrinks the bad rate of the special-value and missing bins that
+            are kept toward the overall bad rate before the WOE is computed (only when ``sv_smoothing_alpha`` > 0).
+        sv_smoothing_alpha : float, default 0.0
+            Laplace smoothing strength alpha (pseudo-counts). It must be >= 0; 0.0 leaves the WOE unchanged.
+
+        Returns
+        -------
+        None
+            Updates the ``woe_dict`` attribute.
+
+        Raises
+        ------
+        TypeError
+            If a variable of ``varlist`` is not numeric (for example a string column).
+        ValueError
+            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid, or if
+            ``chi2_config`` is used with the default ``include_missing=True`` and ``missing_ref_value`` (see Notes).
+
+        Notes
+        -----
+        - ``woe_dict[var]`` is replaced for every variable of ``varlist``, and the tables of other variables are kept.
+          Each table has the columns ``BIN_NUM``, ``BIN_RANGE``, ``MIN``, ``MAX``, ``N``, ``AVG_SCORE``, ``N_BAD``,
+          ``N_GOOD``, ``AVG_BAD``, ``AVG_GOOD``, ``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN``, ``LIFT``, ``WOE``, ``IV`` and
+          ``VAR``. No smoothing is applied, so a bin without bads (or without goods) gets an infinite WOE.
+        - With the default ``include_missing=True`` and ``missing_ref_value``, ``chi2_config`` raises ``ValueError: Bin
+          edges must be unique``. Pass ``include_missing=False``, or create the object with ``missing_ref_value=-999999``.
         """
         if fillna is None:
             fillna = self.missing_ref_value
@@ -457,8 +520,17 @@ class WOE_Master(object):
     def get_mapping_table(self):
         """Get WOE mapping table for all variables.
 
-        Returns:
-            pandas.DataFrame with WOE mapping information for all variables
+        Returns
+        -------
+        pandas.DataFrame
+            WOE mapping information for all variables: the tables of ``woe_dict`` stacked in dictionary order, with the
+            columns ``BIN_NUM``, ``BIN_RANGE``, ``MIN``, ``MAX``, ``N``, ``AVG_SCORE``, ``N_BAD``, ``N_GOOD``,
+            ``AVG_BAD``, ``AVG_GOOD``, ``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN``, ``LIFT``, ``WOE``, ``IV`` and ``VAR``.
+
+        Raises
+        ------
+        ValueError
+            If ``woe_dict`` is empty (``fit``, ``update_woe`` or ``load_mapping_table`` has not produced any table).
         """
         if not self.woe_dict:
             raise ValueError(
@@ -471,10 +543,21 @@ class WOE_Master(object):
     def save_mapping_table(self, save_dir):
         """Save WOE mapping table as CSV file.
 
-        Args:
-            save_dir: str, path to save the CSV file
-        Returns:
-            None, saves file directly
+        Parameters
+        ----------
+        save_dir : str
+            Path to save the CSV file. Despite its name it is the path of the file, not of a directory: it is passed to
+            ``DataFrame.to_csv``, so its folder must already exist.
+
+        Returns
+        -------
+        None
+            Saves the file directly (the mapping table of ``get_mapping_table`` without the index).
+
+        Raises
+        ------
+        ValueError
+            If ``woe_dict`` is empty.
         """
         mapping_table = self.get_mapping_table()
         mapping_table.to_csv(save_dir, index=False)
@@ -482,11 +565,31 @@ class WOE_Master(object):
     def transform(self, data=None, varlist=None):
         """Transform data using WOE encoding.
 
-        Args:
-            data: pandas.DataFrame, data to transform (default: train_data)
-            varlist: list, variables to transform (default: self.varlist)
-        Returns:
-            pandas.DataFrame with WOE transformed data
+        Parameters
+        ----------
+        data : pandas.DataFrame or None, default None
+            Data to transform (default: train_data). It must contain the raw columns of ``varlist``.
+        varlist : list of str or None, default None
+            Variables to transform (default: self.varlist).
+
+        Returns
+        -------
+        pandas.DataFrame
+            WOE transformed data: a copy of ``data`` with one ``<var><woe_suffix>`` column added per variable (an
+            existing column of that name is replaced). The original columns are kept.
+
+        Raises
+        ------
+        ValueError
+            If ``woe_dict`` is empty.
+        KeyError
+            If a variable of ``varlist`` has no rows in the mapping table.
+
+        Notes
+        -----
+        Missing values are replaced by ``missing_ref_value`` before they are binned, so they fall in the lowest bin
+        (or in the missing bin when the mapping table has one). A value that falls in no bin of the mapping table gets
+        a ``NaN`` WOE, and a warning ``Failed to Map WOE values for N Records`` is logged.
         """
         if data is None:
             data = self.train_data
@@ -510,24 +613,70 @@ class WOE_Master(object):
                    sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
         """Update WOE binning for specified variables.
 
-        Args:
-            varlist: list, variables to update WOE for
-            nbins: int, number of bins (default 10)
-            equal_freq: bool, use equal frequency binning (default True)
-            tree_binning_seed: int, random seed for tree-based binning
-            chi2_config: dict, chi-square binning configuration
-            precision: int, numerical precision (default 5)
-            min_bin_prop: float, minimum bin proportion (default 0.05)
-            include_missing: bool, include missing value bin (default True)
-            fillna: int/float, value to fill missing data
-            spec_values: list, special values to handle
-            sv_min_bin_size: float, low-frequency special-value bin threshold as a
-                share of all samples; 0.0 disables the fallback (legacy behaviour)
-            sv_small_policy: str, 'keep' (default) / 'neutral' / 'merge_missing'
-            sv_woe_smoothing: str, 'none' (default) / 'laplace'
-            sv_smoothing_alpha: float, Laplace smoothing strength alpha (pseudo-counts)
-        Returns:
-            None, updates self.woe_dict attribute
+        Parameters
+        ----------
+        varlist : list of str
+            Variables to update WOE for. They are re-binned on ``train_data``; ``self.varlist`` is not changed, and the
+            tables of the other variables stay as they are.
+        nbins : int, default 10
+            Number of bins (maximum). The count is capped at ``max(5, 1 / min_bin_prop)`` and never exceeds 20, so a
+            larger value has no effect.
+        equal_freq : bool, default True
+            Use equal frequency binning (``False`` gives equal width bins). Decision-tree binning ignores it.
+        tree_binning_seed : int or None, default None
+            Random seed for tree-based binning. Any non-zero value switches to decision-tree bins; ``None`` and ``0``
+            keep the quantile bins.
+        chi2_config : tuple or None, default None
+            Chi-square binning configuration ``(init_bins, p_value)``, for example ``(100, 0.95)``: the number of
+            initial equal frequency bins and the confidence of the chi-square merge (a higher value gives fewer bins).
+            ``None`` disables chi-square binning. A dict raises ``KeyError``.
+        precision : int, default 5
+            Numerical precision: number of decimals of the bin edges (values are rounded to it before binning).
+        min_bin_prop : float, default 0.05
+            Minimum bin proportion. It lowers the cap on the number of bins (see ``nbins``) and sets the minimum bin
+            size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
+        include_missing : bool, default True
+            Include missing values in the binning. They are replaced with -999999 and share the lowest bin, unless
+            ``equal_freq`` is False or ``spec_values`` contains -999999, which gives them a bin of their own (``NaN``
+            in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
+            sends missing values to the lowest bin.
+        fillna : int, float or None, default None
+            Value to fill missing data. ``None`` uses ``missing_ref_value``. Only the chi-square step uses it: on the
+            default binning path missing values are filled with -999999 whatever its value.
+        spec_values : list, default []
+            Special values to handle. Each value becomes a bin edge, so it ends a bin of its own (together with any
+            values between the previous edge and the special value).
+        sv_min_bin_size : float, default 0.0
+            Low-frequency special-value bin threshold as a share of all samples; 0.0 disables the fallback (legacy
+            behaviour). It must be in [0.0, 1.0).
+        sv_small_policy : str, default "keep"
+            ``'keep'`` / ``'neutral'`` / ``'merge_missing'``. How a special-value or missing bin below
+            ``sv_min_bin_size`` is treated: ``'keep'`` leaves it, ``'neutral'`` sets its WOE and IV to 0, and
+            ``'merge_missing'`` merges its counts into the missing bin (falling back to ``'neutral'`` with a
+            ``UserWarning`` when there is no missing bin).
+        sv_woe_smoothing : str, default "none"
+            ``'none'`` / ``'laplace'``. ``'laplace'`` shrinks the bad rate of the special-value and missing bins that
+            are kept toward the overall bad rate before the WOE is computed (only when ``sv_smoothing_alpha`` > 0).
+        sv_smoothing_alpha : float, default 0.0
+            Laplace smoothing strength alpha (pseudo-counts). It must be >= 0; 0.0 leaves the WOE unchanged.
+
+        Returns
+        -------
+        None
+            Updates the ``woe_dict`` attribute.
+
+        Raises
+        ------
+        TypeError
+            If a variable of ``varlist`` is not numeric (for example a string column).
+        ValueError
+            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid, or if
+            ``chi2_config`` is used with the default ``include_missing=True`` and ``missing_ref_value`` (see ``fit``).
+
+        Notes
+        -----
+        The new tables are merged into ``woe_dict`` only after every variable has been binned, so an error leaves
+        ``woe_dict`` unchanged. A variable that is not yet in ``woe_dict`` is added to it (but not to ``self.varlist``).
         """
         if fillna is None:
             fillna = self.missing_ref_value
@@ -564,26 +713,42 @@ class WOE_Master(object):
     def plot_bivar_graph(self, data, group=None, dirname=None, varlist=None):
         """Plot bivariate WOE comparison graph.
 
-        Args:
-            data: pandas.DataFrame, data for plotting
-            group: str or None, grouping variable name for distinguishing curves.
-                When ``None`` a single ungrouped curve per variable is drawn
-                and no ``by_<group>`` output is produced. Prior to 0.6.2 this
-                was a required positional argument, which silently broke
-                ungrouped callers (see `_plot_woe` in
-                `Modeling_Tool.Pipeline.feature_validation`). 0.6.3 also
-                fixes ``WOE_Plot_Tool.get_bivar_graph``: the ``if group:``
-                guard there was moved up to wrap the summary/align/plot
-                triplet — the guard used to sit *after* an unconditional
-                ``data.groupby([None])`` that raised TypeError on ungrouped
-                calls.
-            dirname: str, subdirectory name for saving (under graph_save_dir).
-                Required in practice; kept keyword-only-in-practice by keeping
-                the ``group`` slot second for backward compatibility with any
-                pre-0.6.2 positional caller.
-            varlist: list, variables to plot (default: self.varlist)
-        Returns:
-            None, saves images directly
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Data for plotting. It must contain the raw columns of ``varlist`` (not the WOE columns), the target column
+            ``dep`` and, when ``group`` is given, the grouping column.
+        group : str or None, default None
+            Grouping variable name for distinguishing curves. When ``None`` a single ungrouped curve per variable is
+            drawn and no ``by_<group>`` output (the ``<var>_<group>.png`` charts) is produced. Prior to 0.6.2 this was
+            a required positional argument, which silently broke ungrouped callers (see ``_plot_woe`` in
+            ``Modeling_Tool.Pipeline.feature_validation``). 0.6.3 also fixes ``WOE_Plot_Tool.get_bivar_graph``: the
+            ``if group:`` guard there was moved up to wrap the summary/align/plot triplet. The guard used to sit
+            *after* an unconditional ``data.groupby([None])`` that raised ``TypeError`` on ungrouped calls.
+        dirname : str or None, default None
+            Subdirectory name for saving, under ``graph_save_dir``. Required in practice: ``None`` raises
+            ``TypeError``. It is kept keyword-only-in-practice by keeping the ``group`` slot second, for backward
+            compatibility with any pre-0.6.2 positional caller.
+        varlist : list of str or None, default None
+            Variables to plot (default: self.varlist).
+
+        Returns
+        -------
+        None
+            Saves images directly.
+
+        Raises
+        ------
+        TypeError
+            If ``dirname`` is ``None``.
+        ValueError
+            If ``woe_dict`` is empty.
+
+        Notes
+        -----
+        ``<graph_save_dir>/<dirname>/`` is created if it does not exist. The method writes ``<var>.png`` (the WOE of the
+        mapping table) for every variable, plus ``<var>_<group>.png`` when ``group`` is given. In the grouped charts,
+        rows with a missing value in the variable are dropped.
         """
         if dirname is None:
             raise TypeError("plot_bivar_graph() missing required argument: 'dirname'")
@@ -613,12 +778,22 @@ class WOE_Master(object):
 def load_mapping_table(mapping_table_csv):
     """Load WOE mapping table from CSV or DataFrame.
 
-    Args:
-        mapping_table_csv: str or pandas.DataFrame, path to CSV or DataFrame
-    Returns:
-        tuple: (varlist, woe_dict)
-    Raises:
-        AttributeError: if input is neither string path nor DataFrame
+    Parameters
+    ----------
+    mapping_table_csv : str or pandas.DataFrame
+        Path to a CSV file, or a DataFrame, that holds the mapping table. The table needs a ``VAR`` column that names
+        the variable of each row.
+
+    Returns
+    -------
+    tuple
+        ``(varlist, woe_dict)``: the list of variables in order of first appearance in the ``VAR`` column, and the
+        dictionary ``{variable: DataFrame}`` with the rows of each variable.
+
+    Raises
+    ------
+    AttributeError
+        If the input is neither a string path nor a DataFrame (a ``pathlib.Path`` is rejected too).
     """
     if isinstance(mapping_table_csv, str):
         woe_mapping_table = pd.read_csv(mapping_table_csv)
@@ -638,10 +813,21 @@ def load_mapping_table(mapping_table_csv):
 def get_mapping_table(woe_dict):
     """Get combined mapping table from WOE dictionary.
 
-    Args:
-        woe_dict: dict, WOE mapping dictionary
-    Returns:
-        pandas.DataFrame with WOE mapping information
+    Parameters
+    ----------
+    woe_dict : dict
+        WOE mapping dictionary ``{variable: DataFrame}``, for example the ``woe_dict`` attribute of a fitted
+        ``WOE_Master``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        WOE mapping information: the tables of ``woe_dict`` stacked in dictionary order.
+
+    Raises
+    ------
+    ValueError
+        If ``woe_dict`` is empty.
     """
     if not woe_dict:
         raise ValueError(
@@ -655,11 +841,23 @@ def get_mapping_table(woe_dict):
 def save_mapping_table(woe_dict, save_dir):
     """Save WOE dictionary as CSV file.
 
-    Args:
-        woe_dict: dict, WOE mapping dictionary
-        save_dir: str, path to save the CSV file
-    Returns:
-        None, saves file directly
+    Parameters
+    ----------
+    woe_dict : dict
+        WOE mapping dictionary ``{variable: DataFrame}``.
+    save_dir : str
+        Path to save the CSV file. Despite its name it is the path of the file, not of a directory: it is passed to
+        ``DataFrame.to_csv``, so its folder must already exist.
+
+    Returns
+    -------
+    None
+        Saves the file directly (the stacked tables of ``woe_dict`` without the index).
+
+    Raises
+    ------
+    ValueError
+        If ``woe_dict`` is empty.
     """
     mapping_table = get_mapping_table(woe_dict)
     mapping_table.to_csv(save_dir, index=False)
@@ -668,13 +866,34 @@ def save_mapping_table(woe_dict, save_dir):
 def transform(data, varlist, woe_mapping_table, woe_suffix="_woe"):
     """Transform data using WOE encoding.
 
-    Args:
-        data: pandas.DataFrame, data to transform
-        varlist: list, variables to transform
-        woe_mapping_table: pandas.DataFrame, WOE mapping table
-        woe_suffix: str, suffix for WOE variable names (default "_woe")
-    Returns:
-        pandas.DataFrame with WOE transformed data
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Data to transform. It must contain the raw columns of ``varlist``.
+    varlist : list of str
+        Variables to transform.
+    woe_mapping_table : pandas.DataFrame
+        WOE mapping table (for example ``WOE_Master.get_mapping_table()``), with the columns ``VAR``, ``BIN_NUM``,
+        ``BIN_RANGE``, ``WOE`` and ``N``.
+    woe_suffix : str, default "_woe"
+        Suffix for WOE variable names: the WOE of ``var`` is stored in the column ``<var><woe_suffix>``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        WOE transformed data: a copy of ``data`` with one ``<var><woe_suffix>`` column added per variable (an existing
+        column of that name is replaced). The original columns are kept.
+
+    Raises
+    ------
+    KeyError
+        If a variable of ``varlist`` has no rows in ``woe_mapping_table``.
+
+    Notes
+    -----
+    Missing values are replaced by -999999 (the default ``missing_ref_value`` of ``mapping_woe``) before they are
+    binned. This function cannot pass another value: for a table made with a custom ``missing_ref_value``, call
+    ``mapping_woe`` directly.
     """
     return mapping_woe(data, varlist, woe_mapping_table, suffix=woe_suffix, drop_bin_info=True)
 
@@ -682,15 +901,29 @@ def transform(data, varlist, woe_mapping_table, woe_suffix="_woe"):
 def plot_bivar_graph_func(data, varlist, dep, ref_woe_table, group, save_dir):
     """Plot bivariate WOE comparison graph.
 
-    Args:
-        data: pandas.DataFrame, data for plotting
-        varlist: list, variables to plot
-        dep: str, target variable name
-        ref_woe_table: pandas.DataFrame, reference WOE mapping table
-        group: str, grouping variable name for distinguishing curves
-        save_dir: str, directory path to save images
-    Returns:
-        None, saves images directly
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Data for plotting. It must contain the raw columns of ``varlist``, the target column ``dep`` and, when
+        ``group`` is given, the grouping column.
+    varlist : list of str
+        Variables to plot.
+    dep : str
+        Target variable name.
+    ref_woe_table : pandas.DataFrame
+        Reference WOE mapping table, with the rows of every variable of ``varlist`` (for example
+        ``WOE_Master.get_mapping_table()``).
+    group : str or None
+        Grouping variable name for distinguishing curves. A falsy value (``None`` or an empty string) draws only the
+        ungrouped chart of each variable. It has no default and must be passed.
+    save_dir : str
+        Directory path to save images. It must already exist (unlike ``WOE_Master.plot_bivar_graph``, this function
+        does not create it).
+
+    Returns
+    -------
+    None
+        Saves images directly: ``<var>.png`` for every variable, plus ``<var>_<group>.png`` when ``group`` is given.
     """
     get_bivar_graph(data=data,
                     varlist=varlist,

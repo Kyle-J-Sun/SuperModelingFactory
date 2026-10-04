@@ -97,7 +97,15 @@ class PSICalculator:
         Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
         Decimal precision for results. Default is 5.
-    
+    missing_policy : {"drop", "include", "warn_and_drop"}, optional
+        How NaN rows are handled. Default is "include", which routes NaN rows through a dedicated "__MISSING__" bin
+        so missing-rate drift contributes to the PSI. See ``__init__`` for the semantics of each mode.
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace". See ``__init__``.
+    feature_block_size : int or None, optional
+        Number of variables processed per block. Default is 64. This class only validates and stores it (a positive
+        integer or None); it has no effect on the calculation here.
+
     Examples
     --------
     >>> calculator = PSICalculator(buckets=10, equal_freq=True)
@@ -138,6 +146,21 @@ class PSICalculator:
             numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
             numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
             naming the NaN counts.
+        psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+            How a bin that holds rows on one side only (for example a category that disappears) is treated.
+            Default is "smooth_laplace": when such a bin exists, one is added to every bin count before the shares
+            are computed. "floor_1e6" clips the bin shares at ``content`` (``1e-6`` by default), so the empty side
+            counts as ``content``. "exclude" drops the one-sided bins from the sum. Any other value raises
+            ``ValueError``.
+        feature_block_size : int or None, optional
+            Number of variables processed per block. Default is 64. This class only validates and stores it (a
+            positive integer or None, otherwise ``ValueError``); it has no effect on the calculation here.
+
+        Raises
+        ------
+        ValueError
+            If ``missing_policy`` or ``psi_missing_bucket_policy`` is not one of the listed values, or if
+            ``feature_block_size`` is not None and not a positive integer.
         """
         if missing_policy not in {"include", "drop", "warn_and_drop"}:
             raise ValueError(
@@ -508,19 +531,34 @@ class PSICalculator:
         varlist : list
             List of variable names.
         group_by : str, optional
-            Column to group by in both datasets.
+            Column to group by in both datasets. Default is None. Legacy argument: without ``group_name`` it has no
+            effect on the default result (use ``group_name`` to get PSI by group); together with ``group_name`` the
+            PSI is computed per ``group_by`` value inside each ``group_name`` group.
         group_name : str, optional
-            Specific group column name for multi-group calculation.
+            Specific group column name for multi-group calculation. Default is None. It must be a column of
+            ``current_data``: every value (NaN becomes "__NULL__") defines a group that is compared with the whole
+            ``expected_df``, and the bins are built once on ``expected_df``.
+        return_details : bool, optional
+            Whether to return detailed bin information. Default is False. If True, a dict ``{'psi': psi_df,
+            'details': details_df}`` is returned, where ``details_df`` has one row per bin (and variable, and group)
+            with the columns ``bin``, ``expected_count``, ``actual_count``, ``expected_percent``,
+            ``actual_percent``, ``psi_component``, ``bucket_status``, ``psi_missing_bucket_policy`` (and the group
+            column) and ``var``.
         missing_policy : {"drop", "include", "warn_and_drop"}, optional
             How NaN rows are handled. If None (default), falls back to the value
             configured on ``self.missing_policy``. Pass an explicit value to
             override the class-level default for this call only. See
             ``PSICalculator.__init__`` for the semantics of each mode.
-            
+        psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+            How a bin that holds rows on one side only is treated. If None (default), falls back to the value
+            configured on ``self.psi_missing_bucket_policy``. Pass an explicit value to override it for this call
+            only. See ``PSICalculator.__init__`` for the semantics of each policy.
+
         Returns
         -------
-        pandas.DataFrame
-            Grouped PSI results.
+        pandas.DataFrame or dict
+            Grouped PSI results: a DataFrame with the columns ``var`` and ``psi`` (plus the ``group_name`` column
+            when it is given). If ``return_details`` is True, the dict ``{'psi': DataFrame, 'details': DataFrame}``.
         """
         effective_policy = missing_policy if missing_policy is not None else self.missing_policy
         effective_bucket_policy = (
@@ -787,15 +825,27 @@ def calculate_psi(
         numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
         numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
         naming the NaN counts.
-        
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace": when such a bin
+        exists, one is added to every bin count before the shares are computed. "floor_1e6" clips the bin shares at
+        ``content``, so the empty side counts as ``content``. "exclude" drops the one-sided bins from the sum. Any
+        other value raises ``ValueError``.
+
     Returns
     -------
     float, pandas.DataFrame, or tuple
         - If group_by is None and return_details is False: Single PSI float value.
-        - If group_by is None and return_details is True: Tuple of (psi_value, details_dict).
+        - If group_by is None and return_details is True: Tuple of (psi_value, details DataFrame), with one row per
+          bin and the columns ``expected_count``, ``actual_count``, ``expected_percent``, ``actual_percent``,
+          ``psi_component``, ``psi_component_floor_1e6``, ``bucket_status`` and ``psi_missing_bucket_policy``.
         - If group_by is set and return_details is False: DataFrame with PSI values per group.
         - If group_by is set and return_details is True: Tuple of (results_dict, details_dict).
-        
+
+    Notes
+    -----
+    With ``group_by``, a group that has rows in only one of the two datasets gets the placeholder PSI 999999 (and no
+    details).
+
     Examples
     --------
     >>> # Simple PSI calculation
@@ -923,7 +973,9 @@ def calculate_within_psi(
     target_col : str
         Column name to calculate PSI for.
     benchmark : str or callable, optional
-        Benchmark group value or filter function. If None, uses the first group.
+        Benchmark group value or filter function. Default is None: every group is compared with the whole dataset
+        (the code does not pick the first group). A callable receives ``data`` and must return a boolean mask that
+        selects the benchmark rows; every group is then compared with those rows.
     equal_freq : bool, optional
         Use equal frequency binning. Default is True.
     buckets : int, optional
@@ -937,7 +989,8 @@ def calculate_within_psi(
     precision : int, optional
         Decimal precision. Default is 5.
     benchmark_display_name : str, optional
-        Custom name for benchmark in results.
+        Custom name for benchmark in results. Default is None. When given, the result gets an extra first row
+        with this name and a PSI of 0; otherwise the benchmark group is not listed.
     missing_policy : {"drop", "include", "warn_and_drop"}, optional
         How NaN rows are handled. Default in 0.5.0 is "include", which routes
         NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
@@ -946,13 +999,20 @@ def calculate_within_psi(
         numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
         numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
         naming the NaN counts.
-        
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace": when such a bin
+        exists, one is added to every bin count before the shares are computed. "floor_1e6" clips the bin shares at
+        ``content``, so the empty side counts as ``content``. "exclude" drops the one-sided bins from the sum. Any
+        other value raises ``ValueError``.
+
     Returns
     -------
     pandas.DataFrame or dict
-        If return_details is False: DataFrame with PSI values per group.
-        If return_details is True: Dict with 'psi' (DataFrame) and 'details' (dict).
-        
+        If return_details is False: DataFrame with a column named as the ``grp_name`` argument (the group value)
+        and the column ``psi``, one row per group other than the benchmark.
+        If return_details is True: Dict with 'psi' (that DataFrame) and 'details' (dict ``{group value: details
+        DataFrame}``, see ``calculate_psi``).
+
     Examples
     --------
     >>> # Compare all months against January
@@ -1041,7 +1101,9 @@ def calculate_psi_within_dataset(
     varlist : list
         List of variable names to calculate PSI for.
     benchmark : str or callable, optional
-        Benchmark group value or filter function.
+        Benchmark group value or filter function. Default is None: every group is compared with the whole dataset.
+        A callable receives ``data`` and must return a boolean mask that selects the benchmark rows. The benchmark
+        group itself is not listed in the result.
     equal_freq : bool, optional
         Use equal frequency binning. Default is True.
     buckets : int, optional
@@ -1060,11 +1122,17 @@ def calculate_psi_within_dataset(
         numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
         numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
         naming the NaN counts.
-        
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace": when such a bin
+        exists, one is added to every bin count before the shares are computed. "floor_1e6" clips the bin shares at
+        ``content``, so the empty side counts as ``content``. "exclude" drops the one-sided bins from the sum. Any
+        other value raises ``ValueError``.
+
     Returns
     -------
     pandas.DataFrame
-        Combined PSI results for all variables, sorted by group.
+        Combined PSI results for all variables, sorted by group: a column named as the ``grp_name`` argument, the
+        column ``psi`` and the column ``var``. The rows of each variable are sorted by group.
         
     Examples
     --------
@@ -1141,12 +1209,18 @@ def calculate_multivar_psi_two_sets(
         numeric backward-compat). Pass "drop" to reproduce pre-0.5.0
         numbers, or "warn_and_drop" for legacy numbers with a RuntimeWarning
         naming the NaN counts.
-        
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace": when such a bin
+        exists, one is added to every bin count before the shares are computed. "floor_1e6" clips the bin shares at
+        ``content``, so the empty side counts as ``content``. "exclude" drops the one-sided bins from the sum. Any
+        other value raises ``ValueError``.
+
     Returns
     -------
     pandas.DataFrame
-        PSI results for all variables with 'var' and 'psi' columns.
-        
+        PSI results for all variables with 'var' and 'psi' columns. With ``group_by``, the group values are in the
+        index (one row per variable and group).
+
     Examples
     --------
     >>> variables = ['score', 'age', 'income']
@@ -1322,7 +1396,8 @@ def calculate_multigroup_psi_two_sets(
     varlist : list
         List of variable names to calculate PSI for.
     group_by : str or list, optional
-        Group column name(s); PSI is computed separately for each group. Default is None.
+        Group column name(s); PSI is computed separately for each group. Default is None. Legacy argument: when
+        ``group_name`` is None and ``return_details`` is False it is ignored (use ``group_name`` for PSI by group).
     buckets : int, optional
         Number of bins. Default is 10.
     equal_freq : bool, optional
@@ -1334,11 +1409,16 @@ def calculate_multigroup_psi_two_sets(
     precision : int, optional
         Decimal precision. Default is 5.
     group_name : str, optional
-        Name of the group column for multi-group calculation. Default is None.
+        Name of the group column for multi-group calculation. Default is None. When it is given (and ``group_by``
+        is None), every value of this column of ``actual_df`` (NaN becomes "__NULL__") is compared with the whole
+        ``expected_df``, and each variable is binned once on ``expected_df``.
     return_details : bool, optional
-        Whether to return detailed bin information. If True, return a dict
+        Whether to return detailed bin information. Default is False. If True, return a dict
         {'psi': psi_df, 'details': details_df};
-        details_df contains the columns: ['bin', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var']
+        details_df contains the columns: ['bin', 'expected_count', 'actual_count', 'expected_percent',
+        'actual_percent', 'psi_component', 'bucket_status', 'psi_missing_bucket_policy', group_name, 'var']
+        (without ``group_name`` when it is not given; with ``group_name`` and no ``group_by`` it also holds
+        'psi_component_floor_1e6').
     missing_policy : {"drop", "include", "warn_and_drop"}, optional
         How NaN rows are handled. Default in 0.5.0 is "include", which routes
         NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
@@ -1347,6 +1427,17 @@ def calculate_multigroup_psi_two_sets(
         numeric backward compatibility). Pass "drop" to reproduce pre-0.5.0
         numbers, or "warn_and_drop" to keep the legacy numbers while emitting
         a RuntimeWarning that reports the NaN counts on both sides.
+    psi_missing_bucket_policy : {"smooth_laplace", "floor_1e6", "exclude"}, optional
+        How a bin that holds rows on one side only is treated. Default is "smooth_laplace": when such a bin
+        exists, one is added to every bin count before the shares are computed. "floor_1e6" clips the bin shares at
+        ``content``, so the empty side counts as ``content``. "exclude" drops the one-sided bins from the sum. Any
+        other value raises ``ValueError``.
+
+    Returns
+    -------
+    pandas.DataFrame or dict
+        A DataFrame with the columns ``var`` and ``psi`` (plus the ``group_name`` column when it is given), or, if
+        ``return_details`` is True, the dict ``{'psi': DataFrame, 'details': DataFrame}``.
     """
     if group_name is not None and group_by is None:
         return _calculate_grouped_psi_fixed_reference(
