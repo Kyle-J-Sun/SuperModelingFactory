@@ -20,6 +20,68 @@ _ROW_ID_COL = "__proc_compare_row_number__"
 
 @dataclass
 class ProcCompareConfig:
+    """Settings of a ``ProcCompareEngine`` run (the keyword arguments of ``proc_compare``).
+
+    Parameters
+    ----------
+    output_dir : str, default "output/proc_compare"
+        Folder for the CSV files, the Excel report and the temporary files of CSV mode.
+    write_outputs : bool, default True
+        Write the six result tables as CSV files into ``output_dir``.
+    write_excel : bool, default False
+        Write the ExcelMaster report.
+    left_name : str, default "left"
+        Name of the left table, written to ``coverage_summary`` and ``duplicate_key_summary``.
+    right_name : str, default "right"
+        Name of the right table.
+    key_cols : list of str or None, default None
+        Key columns that align the two tables. Required unless ``row_order_compare`` is True.
+    row_order_compare : bool, default False
+        Align the tables by row number when there is no key.
+    compare_cols : list of str or None, default None
+        Columns to compare; None compares every column that exists in both tables.
+    ignore_cols : list of str, default empty list
+        Columns excluded from the comparison.
+    chunk_size : int, default 200000
+        Rows read per chunk in CSV mode; must be positive.
+    n_partitions : int, default 16
+        Number of hash partitions in CSV mode; must be positive.
+    backend : {"sequential", "thread", "process"}, default "sequential"
+        How the CSV partitions are compared.
+    compare_block_size : int, default 64
+        Columns compared per vectorized block; lower it for very wide tables to limit memory. It does not change the
+        results. Must be positive.
+    numeric_tol : float, default 1e-8
+        Absolute numeric tolerance: two numbers match when ``abs(left - right) <= numeric_tol + numeric_rtol * abs(right)``.
+        Must not be negative.
+    numeric_rtol : float, default 0.0
+        Relative numeric tolerance, applied to ``abs(right)``. Must not be negative.
+    datetime_tol_seconds : float, default 0.0
+        Tolerance for datetime columns, in seconds. Must not be negative.
+    datetime_cols : list of str, default empty list
+        Columns to compare as datetimes (recommended in CSV mode, where the dtype cannot be inferred from the file).
+    per_column_tolerance : dict, default empty dict
+        Per-column overrides of the tolerances: a number (absolute tolerance), or a dict with the keys ``tol``,
+        ``rtol`` and ``datetime_tol_seconds``.
+    both_null_equal : bool, default True
+        Count two nulls as consistent; with False they count as a mismatch.
+    missing_values : list, default empty list
+        Extra values (for example ``""`` or ``-999``) to convert to missing on both sides and in every column.
+    detail_mode : {"top", "full", "none"}, default "top"
+        Which mismatched cells ``cell_mismatches`` lists. ``"top"`` keeps at most ``top_n`` cells (all of them up to that
+        number, otherwise those with the largest ``abs_diff``), ``"full"`` keeps every mismatched cell and ``"none"``
+        returns an empty frame. The other result tables are always complete.
+    top_n : int, default 1000
+        Number of cells kept when ``detail_mode="top"``; must be positive.
+    duplicate_key_policy : {"raise", "first", "all"}, default "raise"
+        What to do with duplicated keys: ``"raise"`` raises ``ValueError``, ``"first"`` keeps the first row of each key
+        on both sides, and ``"all"`` keeps every row (matching duplicates multiply in the merge).
+    excel_output_path : str or None, default None
+        Path of the Excel report; None uses ``<output_dir>/Proc_Compare_Report.xlsx``.
+    max_excel_rows : int, default 100000
+        Maximum number of rows written per Excel sheet.
+    """
+
     output_dir: str = "output/proc_compare"
     write_outputs: bool = True
     write_excel: bool = False
@@ -55,6 +117,29 @@ class ProcCompareConfig:
 
 @dataclass
 class ProcCompareResult:
+    """Result of ``ProcCompareEngine.run``.
+
+    Parameters
+    ----------
+    coverage_summary : pandas.DataFrame
+        One row with the row counts of both tables, the common rows and the rows found on one side only.
+    schema_summary : pandas.DataFrame
+        One row per column of either table with its role, dtypes and comparison status.
+    column_summary : pandas.DataFrame
+        One row per compared column: counts of compared, equal, mismatching and null cells, and the mean and maximum
+        absolute difference.
+    row_summary : pandas.DataFrame
+        One row per key: ``row_status`` (``both``, ``left_only`` or ``right_only``) and the mismatching columns.
+    cell_mismatches : pandas.DataFrame
+        One row per mismatching cell (limited by ``detail_mode`` and ``top_n``).
+    duplicate_key_summary : pandas.DataFrame
+        One row per duplicated key and side; empty when there are no duplicates.
+    output_paths : dict, default empty dict
+        Table name to CSV path; empty unless ``write_outputs`` is True.
+    report_path : str or None, default None
+        Path of the Excel report, or None when it was not written.
+    """
+
     coverage_summary: pd.DataFrame
     schema_summary: pd.DataFrame
     column_summary: pd.DataFrame
@@ -66,7 +151,19 @@ class ProcCompareResult:
 
 
 class ProcCompareEngine:
-    """SAS proc_compare-like consistency checker for DataFrames and CSV files."""
+    """SAS proc_compare-like consistency checker for DataFrames and CSV files.
+
+    Parameters
+    ----------
+    config : ProcCompareConfig or None, default None
+        Settings; None uses ``ProcCompareConfig()``.
+
+    Raises
+    ------
+    ValueError
+        If a setting is invalid: ``backend``, ``detail_mode`` or ``duplicate_key_policy`` outside their allowed values,
+        a non-positive ``chunk_size``, ``n_partitions``, ``compare_block_size`` or ``top_n``, or a negative tolerance.
+    """
 
     _VALID_BACKENDS = {"sequential", "thread", "process"}
     _VALID_DETAIL_MODES = {"top", "full", "none"}
@@ -77,6 +174,29 @@ class ProcCompareEngine:
         self._validate_config()
 
     def run(self, left: pd.DataFrame | str | Path, right: pd.DataFrame | str | Path) -> ProcCompareResult:
+        """Compare two tables.
+
+        When either input is a CSV path the comparison runs in CSV mode (chunked reading and hash partitions);
+        otherwise both frames are compared in memory.
+
+        Parameters
+        ----------
+        left : pandas.DataFrame, str or pathlib.Path
+            The left table, or the path of a CSV file.
+        right : pandas.DataFrame, str or pathlib.Path
+            The right table, or the path of a CSV file.
+
+        Returns
+        -------
+        ProcCompareResult
+            The six result tables, plus the CSV paths and the Excel report path when they were written.
+
+        Raises
+        ------
+        ValueError
+            If neither ``key_cols`` nor ``row_order_compare`` is set, if a key column is missing from a table, or if a key
+            is duplicated while ``duplicate_key_policy="raise"``.
+        """
         key_cols = self._resolve_key_cols()
         if self._is_csv_like(left) or self._is_csv_like(right):
             result = self._run_csv(left, right, key_cols)
@@ -896,5 +1016,20 @@ def proc_compare(
     right: pd.DataFrame | str | Path,
     **kwargs: Any,
 ) -> ProcCompareResult:
-    """Convenience wrapper around :class:`ProcCompareEngine`."""
+    """Convenience wrapper around :class:`ProcCompareEngine`.
+
+    Parameters
+    ----------
+    left : pandas.DataFrame, str or pathlib.Path
+        The left table, or the path of a CSV file.
+    right : pandas.DataFrame, str or pathlib.Path
+        The right table, or the path of a CSV file.
+    **kwargs
+        Fields of ``ProcCompareConfig``, for example ``key_cols=["id"]`` or ``numeric_tol=1e-6``.
+
+    Returns
+    -------
+    ProcCompareResult
+        The result of ``ProcCompareEngine(ProcCompareConfig(**kwargs)).run(left, right)``.
+    """
     return ProcCompareEngine(ProcCompareConfig(**kwargs)).run(left, right)

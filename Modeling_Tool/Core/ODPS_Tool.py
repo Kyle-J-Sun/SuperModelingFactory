@@ -279,6 +279,28 @@ class ODPSRunner(object):
 
     @staticmethod
     def cre_table_schema(df, partition_name=None):
+        """Infer an ODPS table schema from the dtypes of a DataFrame.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Frame whose columns become the table columns.
+        partition_name : str or None, default None
+            Name of a column of ``df`` to declare as the partition column instead of an ordinary column; None creates
+            no partition.
+
+        Returns
+        -------
+        odps.models.Schema
+            One column per DataFrame column (bool -> boolean, integer -> bigint, float32 -> float, other floats ->
+            double, datetime -> datetime, string, object and category -> string) and, when ``partition_name`` matches a
+            column, one partition.
+
+        Raises
+        ------
+        TypeError
+            If a column has a dtype without an ODPS mapping (for example complex or timedelta).
+        """
         table_columns = []
         table_partitions = []
         for col, dtype in df.dtypes.items():
@@ -484,14 +506,24 @@ class ODPSRunner(object):
 
         Parameters
         ----------
-        df: pandas.DataFrame
-            Dataset to insert
-        table_name: str
-            Table name
-        overwrite: Bool, default True
-            Whether to overwrite existing data
-        partition: string, default None
-            Partition to write to; the default None means no partition
+        df : pandas.DataFrame
+            Dataset to insert.
+        table_name : str
+            Name of the existing table.
+        overwrite : bool, default True
+            Whether to replace the existing data: the target partition is replaced when ``partition`` is given,
+            otherwise the whole table is truncated. When False the rows are appended.
+        partition : str or None, default None
+            Partition spec to write to (for example ``"ds='20240101'"``); the default None writes to the table without
+            a partition.
+        atomic : bool, default True
+            Only used together with ``overwrite=True`` and a ``partition``. When True the data is first written to a
+            staging partition that is then swapped in by renaming, so a failed write leaves the previous partition
+            untouched; when False the partition is deleted first and then written.
+
+        Notes
+        -----
+        If the table has a ``py_inserttime`` column that ``df`` lacks, it is filled with the current time.
         """
         t = self.o.get_table(table_name)
         if "py_inserttime" in t.schema and "py_inserttime" not in df.columns:

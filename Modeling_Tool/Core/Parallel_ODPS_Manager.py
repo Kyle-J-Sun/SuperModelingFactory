@@ -22,6 +22,47 @@ PullSplitStrategy = Literal["auto", "hash", "row_number"]
 
 @dataclass
 class ParallelODPSConfig:
+    """Settings of a ``ParallelODPSManager``.
+
+    Parameters
+    ----------
+    unique_key : str or None, default None
+        Column whose hash splits a pulled query into chunks (``ABS(HASH(unique_key)) % n_chunks = chunk_id``). It must
+        be visible where ``{chunk_filter}`` is placed in the SQL template. With None, ``pull_split_strategy="auto"``
+        uses the ROW_NUMBER strategy.
+    chunk_size : int or None, default None
+        Rows per chunk. ``pull`` derives the number of chunks from the row count (``count_query`` or an automatic
+        ``COUNT``); ``push`` splits the data into chunks of this many rows. Cannot be combined with ``n_chunks``.
+    n_chunks : int or None, default None
+        Number of chunks. ``pull`` and ``push`` need either this or ``chunk_size``.
+    n_jobs : int, default 3
+        Number of parallel workers; must be positive.
+    backend : {"thread", "process", "sequential"}, default "thread"
+        Execution backend of the chunk workers. With ``"process"`` every worker creates its own ``ODPSRunner``.
+    pull_split_strategy : {"auto", "hash", "row_number"}, default "auto"
+        How ``pull`` splits the query: ``"hash"`` needs ``unique_key``, ``"row_number"`` first materializes the query
+        in a staging table with a ROW_NUMBER column, and ``"auto"`` picks ``"hash"`` when ``unique_key`` is set and
+        ``"row_number"`` otherwise.
+    row_number_order_by : str or None, default None
+        ``ORDER BY`` expression of the ROW_NUMBER window in the staging table; None means ``ORDER BY 1``.
+    row_number_col : str, default "__smf_parallel_odps_rn__"
+        Name of the helper row-number column of the staging table; it is dropped from the pulled data. Must not be empty.
+    validate_unique_key : bool, default True
+        In hash mode, run a ``LIMIT 1`` probe of the first chunk before pulling, so that a ``unique_key`` that is not
+        visible in the SQL scope fails early with ``ValueError``.
+    chunk_filter_key : str, default "chunk_filter"
+        Name of the placeholder that the SQL template must contain (``{chunk_filter}`` by default). Must not be empty.
+    tmp_dir : pathlib.Path or str, default Path("data/_chunks")
+        Local folder for chunk files; it is created when needed.
+    tmp_table_prefix : str, default "tmp_parallel_odps"
+        Prefix of the temporary ODPS tables (the staging table of ``pull`` and the chunk tables of ``push``). Must not
+        be empty.
+    cleanup_tmp : bool, default True
+        Drop the temporary ODPS tables when the run ends.
+    keep_tmp_on_error : bool, default False
+        Keep the temporary tables when the run fails, for debugging. Only relevant when ``cleanup_tmp`` is True.
+    """
+
     unique_key: str | None = None
     chunk_size: int | None = None
     n_chunks: int | None = None
@@ -124,7 +165,22 @@ def _push_one_chunk(
 
 
 class ParallelODPSManager:
-    """Parallel ODPS pull/push helper built on ODPSRunner and ParallelApplyEngine."""
+    """Parallel ODPS pull/push helper built on ODPSRunner and ParallelApplyEngine.
+
+    Parameters
+    ----------
+    config : ParallelODPSConfig
+        Settings of the manager.
+    odps_runner : ODPSRunner or None, default None
+        Client used to run the SQL; None creates an ``ODPSRunner()`` (which reads its credentials from the environment).
+
+    Raises
+    ------
+    ValueError
+        If the configuration is invalid: an unknown ``backend`` or ``pull_split_strategy``, a non-positive
+        ``chunk_size``, ``n_chunks`` or ``n_jobs``, both ``chunk_size`` and ``n_chunks``, or an empty
+        ``chunk_filter_key``, ``row_number_col`` or ``tmp_table_prefix``.
+    """
 
     _VALID_BACKENDS = {"thread", "process", "sequential"}
     _VALID_WRITE_MODES = {"overwrite", "append"}
@@ -334,6 +390,33 @@ class ParallelODPSManager:
         count_query: str | None = None,
         **template_kwargs: Any,
     ) -> dict[str, Any]:
+        """Pull a large query in concurrent chunks and merge them into one local CSV.
+
+        Parameters
+        ----------
+        sql_path : str
+            Path of a SQL template file. It must contain the ``{chunk_filter}`` placeholder (see ``chunk_filter_key``)
+            in the ``WHERE`` clause of the table to split.
+        out_path : str
+            Local CSV file to write. Its folder is created and an existing file is replaced.
+        count_query : str or None, default None
+            SQL that returns the total row count in its first cell. It is only used when ``chunk_size`` is set (to
+            compute the number of chunks); None counts the rows of the query automatically.
+        **template_kwargs
+            Values for the other placeholders of the SQL template.
+
+        Returns
+        -------
+        dict
+            ``pull_strategy``, ``staging_table`` (None for hash pulls), ``n_chunks``, ``total_rows``, ``out_path`` and
+            ``per_chunk_rows``.
+
+        Raises
+        ------
+        ValueError
+            If the template lacks the placeholder, neither ``chunk_size`` nor ``n_chunks`` is configured, hash mode has
+            no ``unique_key``, or the ``unique_key`` probe fails.
+        """
         cfg = self.config
         self._assert_chunk_filter_placeholder(sql_path, template_kwargs)
         cfg.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -401,6 +484,39 @@ class ParallelODPSManager:
         target_table: str,
         write_mode: WriteMode | str | None = None,
     ) -> dict[str, Any]:
+        """Upload a DataFrame or CSV file in concurrent chunks and write them into one ODPS table.
+
+        Every chunk is uploaded to a temporary table; the target table is then created or filled from all of them with
+        ``UNION ALL``.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame, str or pathlib.Path
+            The rows to upload, or the path of a CSV file (read in chunks and copied to ``tmp_dir``).
+        target_table : str
+            Name of the table to write.
+        write_mode : {"overwrite", "append"}, default None
+            Required despite the default None. ``"overwrite"`` drops the target table and re-creates it from the chunks
+            (its schema, partitions and properties are replaced); ``"append"`` runs ``INSERT INTO TABLE``.
+
+        Returns
+        -------
+        dict
+            ``n_chunks``, ``total_rows``, ``target_table``, ``write_mode``, ``tmp_tables``, ``per_chunk_rows``,
+            ``union_sql`` and ``final_sql``.
+
+        Raises
+        ------
+        ValueError
+            If ``write_mode`` is missing or invalid, ``target_table`` is empty, no chunk size is configured, or the data
+            has no columns.
+        TypeError
+            If ``data`` is neither a DataFrame nor a path.
+        FileNotFoundError
+            If a CSV path does not exist.
+        RuntimeError
+            If any chunk fails to upload.
+        """
         if write_mode not in self._VALID_WRITE_MODES:
             raise ValueError("write_mode is required and must be one of ['append', 'overwrite'].")
         if not target_table:

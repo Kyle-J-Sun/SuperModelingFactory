@@ -35,7 +35,34 @@ def _build_imblearn_sampler(sampler_cls, random_state=None, **kwargs):
 
 
 def select_sample_seed(master_df, oot_split_col, model, tgt_name, seed_range = (3000, 3050), ins_prop = 0.7):
-    """ Select Best Seed for Sample Splitting. """
+    """Compare model performance across INS/OOS splits made with different seeds, to help choose a seed.
+
+    For every seed in ``range(seed_range[0], seed_range[1])`` the rows with ``oot_split_col == 1`` are split into INS
+    and OOS (stratified by ``tgt_name``), the rows with ``oot_split_col == 2`` are the OOT sample, and a
+    ``PerformanceEvaluator`` summarizes the model on the three samples.
+
+    Parameters
+    ----------
+    master_df : pandas.DataFrame
+        Full modeling population with the target, the split column and the features (or the score column).
+    oot_split_col : str
+        Column that marks the modeling sample (value 1) and the OOT sample (value 2).
+    model : object or str
+        A fitted model whose feature names can be read, or the name of a score column that already exists in
+        ``master_df``.
+    tgt_name : str
+        Name of the binary target column.
+    seed_range : tuple of int, default (3000, 3050)
+        ``(start, stop)`` of the seeds to try; ``stop`` is excluded.
+    ins_prop : float, default 0.7
+        Share of the modeling sample that goes to INS; the rest is OOS.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The performance summaries of all seeds stacked on top of each other, with a ``seed`` column. The function does
+        not pick a seed; choose one from this table.
+    """
     
     from tqdm import tqdm
     
@@ -185,7 +212,30 @@ class SampleSplitter:
         test_size: Optional[float] = None,
         stratify: Optional[bool] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Split index labels without copying the underlying feature frame."""
+        """Split index labels without copying the underlying feature frame.
+
+        Parameters
+        ----------
+        index : pandas.Index, numpy.ndarray or list
+            Row labels (or positions) to split.
+        y : pandas.Series or numpy.ndarray
+            Target values, one per label, used for stratification.
+        test_size : float or None, default None
+            Share of the labels that goes to the test side; None uses the ``test_size`` of the splitter.
+        stratify : bool or None, default None
+            Whether to stratify by ``y``; None uses the ``stratify`` setting of the splitter. Stratification is skipped
+            when ``y`` has a single class.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            ``(train_index, test_index)``. The same arrays are stored as ``train_index_`` and ``test_index_``.
+
+        Raises
+        ------
+        ValueError
+            If ``index`` and ``y`` have different lengths.
+        """
         resolved_test_size = test_size if test_size is not None else self.test_size
         resolved_stratify = self.stratify if stratify is None else bool(stratify)
         index_values = np.asarray(index)

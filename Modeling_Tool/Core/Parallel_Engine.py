@@ -19,6 +19,56 @@ ErrorMode = Literal["raise", "collect"]
 
 @dataclass
 class ParallelApplyConfig:
+    """Settings of a ``ParallelApplyEngine`` run.
+
+    Parameters
+    ----------
+    split_axis : {"row", "column", "chunk", "auto"}, default "row"
+        How the work is divided. ``"row"`` splits the DataFrame into row blocks. ``"column"`` splits it into column
+        blocks, each of which also carries ``id_cols`` and ``required_cols``. ``"chunk"`` calls the function once for
+        every object of the ``chunks`` argument of ``run``. ``"auto"`` applies the function to a sample of at most 20
+        rows, once whole and once in row blocks and in column blocks, and uses the axis whose combined result equals the
+        whole result; it raises ``ValueError`` when none or both match.
+    backend : {"process", "thread", "sequential"}, default "process"
+        ``"process"`` uses a joblib (loky) process pool, ``"thread"`` uses threads, and ``"sequential"`` runs the chunks
+        one after another in the calling process. One resolved job (or one chunk) also runs sequentially.
+    n_jobs : int, str or None, default "auto"
+        Number of workers: a positive integer, ``-1`` for all CPU cores, ``"auto"`` for all cores but one, or None for a
+        single worker. It never exceeds the number of chunks.
+    chunk_size : int or None, default None
+        Rows per row chunk, or columns per column chunk (not counting ``id_cols`` and ``required_cols``). Cannot be
+        combined with ``n_chunks``.
+    n_chunks : int or None, default None
+        Number of chunks to make (at most the number of rows or columns). Cannot be combined with ``chunk_size``. With
+        neither set, one chunk per worker is made.
+    preserve_order : bool, default True
+        Sort the chunk results by chunk id before they are combined.
+    combine : {"concat", "list", "dict", "none"}, default "concat"
+        How the chunk outputs become ``output``: ``"concat"`` joins them with ``pandas.concat``, ``"list"`` returns the
+        list of outputs, ``"dict"`` returns ``{chunk_id: output}``, and ``"none"`` returns None.
+    concat_axis : {0, 1} or None, default None
+        Axis of the ``pandas.concat`` call; None means 1 for column splits and 0 otherwise.
+    pass_chunk_info : bool, default False
+        When True the function also receives a ``chunk_info`` keyword argument, a dict with ``chunk_id``, ``rows`` and
+        ``columns`` (None for custom chunks).
+    timeout : float or None, default None
+        Seconds to wait for the workers, passed to joblib. It has no effect on sequential runs.
+    on_error : {"raise", "collect"}, default "raise"
+        ``"raise"`` stops with the first exception. ``"collect"`` records each failed chunk in ``errors`` (columns
+        ``chunk_id``, ``error_type``, ``error_message`` and ``traceback``) and combines the successful chunks.
+    validate_picklable : bool, default True
+        With the process backend, check with cloudpickle before the run that the function and its arguments can be
+        serialized, and raise ``TypeError`` if they cannot.
+    auto_probe : bool, default False
+        Accepted but not used by the engine.
+    random_state : int or None, default None
+        Seed of the row sample that the ``split_axis="auto"`` probe draws.
+    required_cols : list of str, default empty list
+        Columns added to every block of a column split.
+    id_cols : list of str, default empty list
+        Identifier columns added to every block of a column split (same effect as ``required_cols``).
+    """
+
     split_axis: SplitAxis = "row"
     backend: Backend = "process"
     n_jobs: int | str | None = "auto"
@@ -39,6 +89,26 @@ class ParallelApplyConfig:
 
 @dataclass
 class ParallelApplyResult:
+    """Result of ``ParallelApplyEngine.run``.
+
+    Parameters
+    ----------
+    output : object
+        The combined output, as selected by ``ParallelApplyConfig.combine``.
+    chunk_outputs : list, default empty list
+        Outputs of the successful chunks (in chunk order when ``preserve_order`` is True).
+    errors : pandas.DataFrame, default empty frame
+        One row per failed chunk when ``on_error="collect"``; empty otherwise.
+    summary : dict, default empty dict
+        Run statistics: ``split_axis``, ``backend``, ``n_jobs``, ``n_chunks``, ``n_success``, ``n_error`` and
+        ``elapsed_seconds``.
+    config : ParallelApplyConfig or None, default None
+        The configuration the run used.
+    split_axis_resolved : str or None, default None
+        The axis that was used (``"row"``, ``"column"`` or ``"chunk"``); this is how to read the outcome of
+        ``split_axis="auto"``.
+    """
+
     output: Any
     chunk_outputs: list[Any] = field(default_factory=list)
     errors: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -91,7 +161,20 @@ def _run_chunk(
 
 
 class ParallelApplyEngine:
-    """Parallel function dispatcher for DataFrame and custom chunk workloads."""
+    """Parallel function dispatcher for DataFrame and custom chunk workloads.
+
+    Parameters
+    ----------
+    config : ParallelApplyConfig or None, default None
+        Settings of the engine; None uses ``ParallelApplyConfig()``.
+
+    Raises
+    ------
+    ValueError
+        If a setting is invalid: an unknown ``split_axis``, ``backend``, ``combine`` or ``on_error``, a non-positive
+        ``chunk_size`` or ``n_chunks``, both ``chunk_size`` and ``n_chunks``, or a ``concat_axis`` other than 0, 1 or
+        None.
+    """
 
     _VALID_SPLIT_AXIS = {"row", "column", "chunk", "auto"}
     _VALID_BACKENDS = {"process", "thread", "sequential"}
@@ -110,6 +193,39 @@ class ParallelApplyEngine:
         func_kwargs: dict[str, Any] | None = None,
         chunks: Sequence[Any] | None = None,
     ) -> ParallelApplyResult:
+        """Split the work, run ``func`` on every chunk, and combine the outputs.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame or None, default None
+            Frame to split. It must be a DataFrame unless ``split_axis="chunk"``, and also with ``split_axis="auto"``.
+        func : callable
+            Called as ``func(chunk, *func_args, **func_kwargs)`` for every chunk, with an extra ``chunk_info`` keyword
+            argument when ``pass_chunk_info`` is True. It is required although the signature default is None.
+        func_args : sequence, default ()
+            Extra positional arguments for ``func``.
+        func_kwargs : dict or None, default None
+            Extra keyword arguments for ``func``.
+        chunks : sequence or None, default None
+            The objects to process one by one; required when ``split_axis="chunk"``. With ``split_axis="auto"`` a
+            given ``chunks`` selects the chunk mode.
+
+        Returns
+        -------
+        ParallelApplyResult
+            The combined ``output``, the per-chunk outputs, the collected ``errors`` and a ``summary``.
+
+        Raises
+        ------
+        ValueError
+            If ``func`` is None, ``split_axis="chunk"`` has no ``chunks``, ``split_axis="auto"`` cannot decide on a
+            single axis, or ``n_jobs`` is invalid.
+        TypeError
+            If ``data`` is not a DataFrame where one is required, or if ``func`` and its arguments cannot be serialized
+            for the process backend.
+        KeyError
+            If ``required_cols`` or ``id_cols`` are missing from ``data`` in a column split.
+        """
         if func is None:
             raise ValueError("func is required.")
 
@@ -444,7 +560,29 @@ def parallel_apply(
     chunks: Sequence[Any] | None = None,
     **config_kwargs: Any,
 ) -> Any:
-    """Run a function in parallel and return the combined output."""
+    """Run a function in parallel and return the combined output.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame or None, default None
+        Frame to split, as in ``ParallelApplyEngine.run``.
+    func : callable or None, default None
+        Function applied to every chunk; required.
+    func_args : sequence, default ()
+        Extra positional arguments for ``func``.
+    func_kwargs : dict or None, default None
+        Extra keyword arguments for ``func``.
+    chunks : sequence or None, default None
+        Objects to process one by one when ``split_axis="chunk"``.
+    **config_kwargs
+        Fields of ``ParallelApplyConfig``, for example ``n_jobs=4`` or ``split_axis="column"``.
+
+    Returns
+    -------
+    object
+        Only the combined output (``ParallelApplyResult.output``); use ``ParallelApplyEngine`` to get the errors and the
+        run summary.
+    """
 
     config = ParallelApplyConfig(**config_kwargs)
     return ParallelApplyEngine(config).run(
