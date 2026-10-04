@@ -57,8 +57,9 @@ ExcelMaster    (ExcelMaster.py)       worksheet-level API: cursor, tables, text,
 ```
 
 - **Cursor.** `ExcelMaster` tracks `curr_row` / `curr_col`. After each write the cursor moves down (`skipby='row'`, the
-  default) or right (`skipby='col'`) by the size of what was written plus `gap_number` blank cells (default 2; set
-  `em.gap_number = 1` to tighten). Read it with `get_curr_loc()`, move it with `reset_curr_loc((row, col))`, or pass
+  default) or right (`skipby='col'`) by the size of what was written plus `gap_number` blank rows or columns. The constructor stores
+  `gap_number + 1`, so the default `ExcelMaster(..., gap_number=2)` leaves three blank rows; assign `em.gap_number = 1` to
+  leave exactly one. Read it with `get_curr_loc()`, move it with `reset_curr_loc((row, col))`, or pass
   `loc=(row, col)` to a single call. Coordinates are zero-based.
 - **Return value.** Pass `retCellRange="value"` to get `[first_row, first_col, last_row, last_col]` of what was written
   (or `"text"` for an `A1:C7`-style range), which you can feed to formatting calls.
