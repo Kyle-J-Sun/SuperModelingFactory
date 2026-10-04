@@ -131,6 +131,16 @@ helpers live in `_common.py`. When adding config fields:
 - Validate inputs in `_validate_input()` before expensive work.
 - Add pytest coverage in `SuperModelingFactory_pytest/test_pipeline_api.py`.
 
+### 4.4  Language and docstrings
+
+Everything in the repositories is written in English: code comments, docstrings, log / warning / exception messages, plot
+labels, report headings, and documentation. `SuperModelingFactory_pytest/test_source_language_english.py` fails when CJK or
+other non-English text appears in the sources; a test that needs non-ASCII input writes it as `\uXXXX` escapes.
+
+Public classes and functions use NumPy-style docstrings: a one-line summary, then `Parameters` (every parameter of the
+signature, in order, with its type and default), `Returns`, `Raises` for exceptions the code raises on purpose, and
+`Examples` that run as written. Update the docstring in the same commit as a signature change.
+
 ---
 
 ## 5. Releasing a new version (maintainers only)

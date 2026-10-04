@@ -92,8 +92,8 @@ Notes:
   their headings with a custom format called `CUS_#`. The two performance templates register it for you; before calling
   either varimp function on its own, register it once:
   `em.add_new_format({"bold": True, "font_size": 18}, "CUS_#")`.
-- Several template headings are written in Chinese by the package (for example the multi-model sections); data, plots, and
-  tables are language-neutral.
+- The section headings of the templates are fixed strings (for example *Multi-Model Evaluation (Untuned)* and *Final Model
+  Evaluation*); they cannot be changed through arguments.
 
 ## Where it fits
 
