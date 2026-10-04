@@ -365,15 +365,16 @@ class ODPSRunner(object):
 
         Parameters
         ----------
-        table_name: str
-            Table name
-        table_schema: odps.models.Schema
-            Table schema
-        df: pandas.DataFrame
-            Dataset to upload
-        partition: string
-            Partition to save the data to
-        atomic: bool, default True
+        df : pandas.DataFrame
+            Dataset to upload.
+        table_name : str
+            Name of the table to create or replace.
+        table_schema : odps.models.Schema or None, default None
+            Table schema. When None, the schema is inferred from the dtypes of ``df`` (see ``cre_table_schema``) after a
+            ``py_inserttime`` column holding the current time has been added to the uploaded data.
+        partition : str or None, default None
+            Partition spec to write the data to (for example ``"ds='20240101'"``); None writes without a partition.
+        atomic : bool, default True
             When ``True`` (recommended, default from 0.4.2), the target table is
             replaced through a temp-table + rename swap so that a failure between
             ``delete_table`` and the completed write never leaves the caller

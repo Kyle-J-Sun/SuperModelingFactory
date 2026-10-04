@@ -15,7 +15,23 @@ def screen_result_to_summary(
     result: WeightedScreenResult,
     initial_features: list[str],
 ) -> dict[str, Any]:
-    """Convert a screening result into CM-compatible ``feature_selection_summary``."""
+    """Convert a screening result into CM-compatible ``feature_selection_summary``.
+
+    Parameters
+    ----------
+    result : WeightedScreenResult
+        Result of a weighted feature screen.
+    initial_features : list of str
+        The features that entered the screen.
+
+    Returns
+    -------
+    dict
+        Always ``initial_features``, ``corr_features``, ``screen_summary`` and ``final_features`` (the last two lists are
+        the selected features). Present only when not empty: ``psi`` (with a ``psi`` column taken from ``psi_ins_oos`` or
+        ``psi_max``), ``iv`` (``iv_weighted`` renamed to ``iv``), ``corr_dropped``, ``missing_rate``,
+        ``missing_rate_dropped``, ``dropped_detail`` and ``stage_tables``.
+    """
     summary: dict[str, Any] = {"initial_features": list(initial_features)}
     if not result.psi_table.empty:
         psi = result.psi_table.copy()
@@ -55,8 +71,20 @@ def woe_artifacts_from_screen_result(
 
     The returned dict matches what CreditModelPipeline._reuse_screening_woe
     consumes: ``by_target[target] = {engine, adapter, features}`` plus a
-    top-level ``woe_table``. Returns None when the screen did not attach a
-    reusable engine (e.g. WOE_Master screens attach table-only metadata).
+    top-level ``woe_table`` and the ``engine_meta`` of the screen.
+
+    Parameters
+    ----------
+    result : WeightedScreenResult
+        Result of a weighted feature screen; its ``woe_engine`` and ``woe_engine_meta`` attributes are used.
+    target_col : str
+        Target the engine was fitted for; it becomes the key of ``by_target``.
+
+    Returns
+    -------
+    dict or None
+        The reuse payload, or None when the screen did not attach a reusable engine (for example WOE_Master screens
+        attach table-only metadata).
     """
     engine = getattr(result, "woe_engine", None)
     meta = dict(getattr(result, "woe_engine_meta", {}) or {})
@@ -85,6 +113,28 @@ def woe_artifacts_from_screen_result(
 
 @dataclass
 class FeatureScreeningArtifact:
+    """Handoff contract between feature validation and credit modeling.
+
+    Parameters
+    ----------
+    selected_features : list of str
+        Features that survived the screening.
+    selection_summary : dict
+        The screening summary in the layout of ``screen_result_to_summary``.
+    woe_artifacts : dict or None
+        Reusable WOE engines and tables, or None when the screen did not keep any.
+    source : {"fvp", "cm", "standalone"}
+        Which pipeline produced the artifact.
+    target_col : str
+        Target the screening was run for.
+    weight_col : str or None
+        Sample-weight column used by the screening, or None.
+    config_snapshot : dict, default empty dict
+        Copy of the configuration that produced the screening.
+    created_at : str or None, default None
+        UTC creation time in ISO format.
+    """
+
     selected_features: list[str]
     selection_summary: dict[str, Any]
     woe_artifacts: dict[str, Any] | None
@@ -106,6 +156,29 @@ class FeatureScreeningArtifact:
         source: Literal["fvp", "cm", "standalone"],
         config_snapshot: dict[str, Any] | None = None,
     ) -> FeatureScreeningArtifact:
+        """Build an artifact from the result of a weighted feature screen.
+
+        Parameters
+        ----------
+        result : WeightedScreenResult
+            Result of the screen.
+        initial_features : list of str
+            The features that entered the screen.
+        target_col : str
+            Target the screen was run for.
+        weight_col : str or None
+            Sample-weight column used by the screen.
+        woe_artifacts : dict or None
+            WOE artifacts to store; when None, the engine that the screen itself fitted is wrapped (if there is one).
+        source : {"fvp", "cm", "standalone"}
+            Which pipeline produced the result.
+        config_snapshot : dict or None, default None
+            Copy of the configuration to store.
+
+        Returns
+        -------
+        FeatureScreeningArtifact
+        """
         if woe_artifacts is None:
             # G00: reuse the engine the screen itself fitted, when available.
             woe_artifacts = woe_artifacts_from_screen_result(result, target_col)
@@ -128,6 +201,31 @@ class FeatureScreeningArtifact:
         target_col: str | None = None,
         weight_col: str | None = None,
     ) -> FeatureScreeningArtifact:
+        """Build an artifact from a feature-validation pipeline result.
+
+        When the result already carries a ``screening_artifact`` it is returned unchanged. Otherwise the artifact is built
+        from the result's ``selection_summary`` and ``config_snapshot``. If the pipeline ran with selection switched off
+        and selected nothing, the configured ``new_feature_cols`` become the selected features.
+
+        Parameters
+        ----------
+        result : FeatureValidationPipelineResult
+            Result of a feature-validation run.
+        target_col : str or None, default None
+            Target column; when None it is read from the summary, then from the config snapshot (``target_col``, then the
+            first of ``target_cols``).
+        weight_col : str or None, default None
+            Weight column. A ``weight_col`` entry in the config snapshot takes precedence over this argument.
+
+        Returns
+        -------
+        FeatureScreeningArtifact
+
+        Raises
+        ------
+        ValueError
+            If no target column can be determined.
+        """
         if getattr(result, "screening_artifact", None) is not None:
             return result.screening_artifact
         summary = dict(getattr(result, "selection_summary", {}) or {})
@@ -172,6 +270,20 @@ class FeatureScreeningArtifact:
         )
 
     def validate_for_cm(self, *, target_col: str, weight_col: str | None = None) -> None:
+        """Check that the artifact was built for the same target and weight columns as a credit-model run.
+
+        Parameters
+        ----------
+        target_col : str
+            Target column of the credit-model configuration.
+        weight_col : str or None, default None
+            Weight column of the credit-model configuration.
+
+        Raises
+        ------
+        ValueError
+            If the artifact's ``target_col`` or ``weight_col`` differs.
+        """
         if self.target_col != target_col:
             raise ValueError(
                 f"screening artifact target_col {self.target_col!r} does not match CM target_col {target_col!r}"
@@ -182,6 +294,7 @@ class FeatureScreeningArtifact:
             )
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the artifact as a dictionary; top-level DataFrame values become lists of records."""
         payload = asdict(self)
         for key, value in list(payload.items()):
             if isinstance(value, pd.DataFrame):

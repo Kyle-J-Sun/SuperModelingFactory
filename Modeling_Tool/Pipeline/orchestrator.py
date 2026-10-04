@@ -24,7 +24,31 @@ def run_modeling_from_validation(
     selection_enabled: bool = True,
     reuse_screening_woe: bool = True,
 ) -> tuple[FeatureValidationPipelineResult, CreditModelPipelineResult]:
-    """Run feature validation/selection, then credit modeling on the same dataset."""
+    """Run feature validation/selection, then credit modeling on the same dataset.
+
+    The feature-validation result is turned into a ``FeatureScreeningArtifact``, which is handed to the credit-model
+    pipeline: the artifact's ``target_col`` and ``weight_col`` replace those of ``cm_config``, and its selected features
+    replace ``cm_config.feature_cols`` when there are any.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        The dataset both pipelines run on.
+    fvp_config : FeatureValidationPipelineConfig or None, default None
+        Settings of the feature-validation pipeline; None uses the defaults.
+    cm_config : CreditModelPipelineConfig or None, default None
+        Settings of the credit-model pipeline; None uses the defaults.
+    selection_enabled : bool, default True
+        When True and ``fvp_config.selection_enabled`` is False, the feature-validation run uses a copy of the config with
+        selection switched on. False leaves the setting of ``fvp_config`` as it is.
+    reuse_screening_woe : bool, default True
+        Passed to the credit-model config as ``reuse_screening_woe``: reuse the WOE engine fitted during screening.
+
+    Returns
+    -------
+    tuple
+        ``(FeatureValidationPipelineResult, CreditModelPipelineResult)``.
+    """
     fvp_cfg = fvp_config or FeatureValidationPipelineConfig()
     if selection_enabled and not fvp_cfg.selection_enabled:
         fvp_cfg = replace(fvp_cfg, selection_enabled=True)
