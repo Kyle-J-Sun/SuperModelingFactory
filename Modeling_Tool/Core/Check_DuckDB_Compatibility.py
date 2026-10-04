@@ -427,13 +427,19 @@ def scan_sql_content(
     """
     Scan SQL text line by line, apply all rules, and return the list of detected issues.
 
-    Args:
-        sql_content: SQL text content (a string)
-        rules: List of rules; defaults to the global RULES
-        verbose: Whether to also output low-priority quiet/info level hints
+    Parameters
+    ----------
+    sql_content : str
+        SQL text content.
+    rules : list of dict or None, default None
+        Rules to apply; None uses the global ``RULES``.
+    verbose : bool, default False
+        Whether to also report the low-priority quiet/info level hints.
 
-    Returns:
-        List of CompatibilityIssue, sorted by line number
+    Returns
+    -------
+    list of CompatibilityIssue
+        The detected issues, sorted by line number.
     """
     if rules is None:
         rules = RULES
@@ -499,12 +505,22 @@ def scan_sql_file(
     """
     Scan a single SQL file and return the complete FileReport.
 
-    Args:
-        file_path: Absolute or relative path of the SQL file
-        rules: List of rules; defaults to the global RULES
+    The file is read as UTF-8 and, if that fails, as Latin-1. A file that does not exist or cannot be read yields a
+    report with one error-level ``file_read`` issue instead of raising.
 
-    Returns:
-        FileReport object containing all detected issues
+    Parameters
+    ----------
+    file_path : str
+        Absolute or relative path of the SQL file.
+    rules : list of dict or None, default None
+        Rules to apply; None uses the global ``RULES``.
+    verbose : bool, default False
+        Whether to also report the low-priority quiet/info level hints.
+
+    Returns
+    -------
+    FileReport
+        Report object containing all detected issues.
     """
     report = FileReport(file_path=file_path)
 
@@ -551,11 +567,15 @@ def collect_sql_files(sql_folder: str) -> List[str]:
     """
     Recursively collect all .sql files under sql_folder (hidden directories such as .ipynb_checkpoints are excluded).
 
-    Args:
-        sql_folder: Path of the SQL folder
+    Parameters
+    ----------
+    sql_folder : str
+        Path of the SQL folder.
 
-    Returns:
-        List of .sql file paths, sorted by path
+    Returns
+    -------
+    list of str
+        The .sql file paths, sorted by path.
     """
     sql_files = []
     for root, dirs, files in os.walk(sql_folder):
@@ -584,32 +604,42 @@ def check_duckdb_compatibility(
 
     This is the main entry function; it can be imported by external scripts or run directly from the command line.
 
-    Args:
-        sql_folder:  Path of the SQL folder, defaults to ./sql/
-        fail_on_error: If True, raise SystemExit when error-level issues are found
-        output_json:   Optional, path of a JSON file to write the report to
-        verbose:       Whether to print the detailed report to stdout
+    Parameters
+    ----------
+    sql_folder : str, default "./sql"
+        Path of the SQL folder.
+    fail_on_error : bool, default False
+        If True, print a message and call ``sys.exit(1)`` (raising ``SystemExit``) when error-level issues are found.
+    output_json : str or None, default None
+        Path of a JSON file to write the report to; None writes no file.
+    print_report : bool, default True
+        Whether to print the human-readable report to the console.
+    verbose : bool, default False
+        Whether to also report the low-priority quiet/info level hints.
 
-    Returns:
-        dict: {
-            "total_files": int,              # total number of files scanned
-            "total_issues": int,              # total number of issues
-            "error_count": int,               # total number of error-level issues
-            "warning_count": int,             # total number of warning-level issues
-            "info_count": int,                # total number of info-level issues
-            "compatible_files": int,           # number of fully compatible files (no errors)
-            "incompatible_files": int,         # number of files with errors
-            "files": [FileReport, ...],        # detailed report for each file
-            "summary_by_category": dict,       # summary by category
-        }
+    Returns
+    -------
+    dict
+        The scan result with the keys ``total_files`` (number of files scanned), ``total_issues``, ``error_count``,
+        ``warning_count``, ``info_count``, ``compatible_files`` (files without errors), ``incompatible_files`` (files
+        with errors), ``files`` (list of FileReport, one per file) and ``summary_by_category`` (issue count per category).
 
-    Example:
-        >>> from check_duckdb_compatibility import check_duckdb_compatibility
-        >>> result = check_duckdb_compatibility("./sql")
-        >>> print(f"Compatible files: {result['compatible_files']}/{result['total_files']}")
+    Raises
+    ------
+    FileNotFoundError
+        If ``sql_folder`` is not a directory.
+    SystemExit
+        If ``fail_on_error`` is True and an error-level issue was found.
 
-        >>> # Use in CI
-        >>> result = check_duckdb_compatibility("./sql", fail_on_error=True)
+    Examples
+    --------
+    >>> from check_duckdb_compatibility import check_duckdb_compatibility
+    >>> result = check_duckdb_compatibility("./sql")
+    >>> print(f"Compatible files: {result['compatible_files']}/{result['total_files']}")
+
+    Use it in CI:
+
+    >>> result = check_duckdb_compatibility("./sql", fail_on_error=True)
     """
     if not os.path.isdir(sql_folder):
         raise FileNotFoundError(f"SQL folder does not exist: {sql_folder}")

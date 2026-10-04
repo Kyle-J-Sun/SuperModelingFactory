@@ -23,7 +23,7 @@ def bucket_by_cond(df: pd.DataFrame, cond_dict: dict, colname: str,
                    drop_unmatched: bool = True, default=np.nan) -> pd.DataFrame:
     """
     Bucket the rows of a DataFrame by a dictionary of query conditions and tag each bucket with its label.
-    
+
     Parameters
     ----------
     df : pandas.DataFrame
@@ -41,6 +41,15 @@ def bucket_by_cond(df: pd.DataFrame, cond_dict: dict, colname: str,
     -------
     pandas.DataFrame
         Data with the new label column.
+
+    Notes
+    -----
+    The conditions are evaluated with ``DataFrame.query`` when ``drop_unmatched=True`` and with ``DataFrame.eval`` when
+    ``drop_unmatched=False``; ``df`` itself is not modified. A row that satisfies several conditions is treated
+    differently by the two modes. With ``drop_unmatched=True`` it is repeated once for every matching label (it keeps its
+    original index value, so the index can contain duplicates) and the rows come out grouped by label, in the order of
+    ``cond_dict``. With ``drop_unmatched=False`` every row appears exactly once, in its original order, and carries the
+    label of the last matching condition. An empty ``cond_dict`` raises ``ValueError`` when ``drop_unmatched=True``.
     """
     if drop_unmatched:
         res_list = []
@@ -60,25 +69,35 @@ def bucket_by_cond(df: pd.DataFrame, cond_dict: dict, colname: str,
 def cut2pieces(varlist, n = 4):
     """
     Split a list into several sub-lists.
-    
-    Split the list evenly into the requested number of sub-lists.
-    
+
+    Split the list into consecutive chunks of ``len(varlist) // n`` elements. The elements left over at the end are added
+    to the last chunk, so that chunk is the longest, and the number of chunks is not always ``n`` (see Notes).
+
     Parameters
     ----------
     varlist : list
         List to split.
     n : int, default 4
-        Number of sub-lists.
-    
+        Number of sub-lists wanted. It sets the chunk size ``len(varlist) // n`` and must not exceed ``len(varlist)``.
+
     Returns
     -------
     list
-        The resulting sub-lists.
-    
+        The resulting sub-lists, in order (concatenating them gives ``varlist`` back).
+
+    Notes
+    -----
+    The number of chunks is ``ceil(len(varlist) / (len(varlist) // n)) - 1``, which is ``n`` only for some lengths: 10
+    items with ``n=4`` give 4 chunks (sizes 2, 2, 2, 4), whereas 8 items with ``n=4`` give only 3 chunks (sizes 2, 2, 4).
+    The call fails when ``n`` is larger than ``len(varlist)`` (the chunk size is 0: ``ValueError``) and when that formula
+    gives fewer than 2 chunks, which is the case for ``n=1`` and for ``n=2`` with an even number of items (``IndexError``).
+
     Examples
     --------
     >>> cut2pieces([1, 2, 3, 4, 5, 6, 7, 8], n=4)
-    [[1, 2], [3, 4], [5, 6], [7, 8]]
+    [[1, 2], [3, 4], [5, 6, 7, 8]]
+    >>> cut2pieces(list(range(1, 11)), n=4)
+    [[1, 2], [3, 4], [5, 6], [7, 8, 9, 10]]
     """
     
     cut_point = np.floor(len(varlist) / n)
@@ -264,17 +283,21 @@ def read_csv(path, *args, **kwargs):
 def df_to_h2oframe(data):
     """
     Convert a DataFrame to an H2OFrame.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
-        Input DataFrame.
-    
+        Input DataFrame. An object that already is an ``h2o.H2OFrame`` is returned unchanged.
+
     Returns
     -------
     h2o.H2OFrame
         The H2OFrame object.
-    
+
+    Notes
+    -----
+    ``h2o`` is imported inside the function and must be installed.
+
     Examples
     --------
     >>> hf = df_to_h2oframe(df)
@@ -289,25 +312,31 @@ def df_to_h2oframe(data):
 def move_column(data, colname, idx, return_kDF = True, h2o_frame = False):
     """
     Move the given column to a specific position in a DataFrame.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
-        Input DataFrame.
+        Input DataFrame (an ``h2o.H2OFrame`` when ``h2o_frame=True``).
     colname : str
         Name of the column to move.
     idx : int
-        Target position index.
+        Target position (0-based) of the column, with ``list.insert`` semantics: 0 puts it first and a value at or beyond
+        the number of columns puts it last.
     return_kDF : bool, default True
-        Whether to return a kDataFrame.
+        Whether to return a kDataFrame. Ignored (treated as False) when ``h2o_frame=True``.
     h2o_frame : bool, default False
         Whether the input is an H2OFrame.
-    
+
     Returns
     -------
-    pandas.DataFrame or kDataFrame
-        Data with the columns reordered.
-    
+    pandas.DataFrame, kDataFrame or h2o.H2OFrame
+        Data with the columns reordered (a new frame; ``data`` itself is not reordered).
+
+    Notes
+    -----
+    ``h2o`` is imported unconditionally at the start of the function, so the call raises ``ModuleNotFoundError`` when h2o
+    is not installed, even for pandas input.
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
@@ -330,23 +359,29 @@ def move_column(data, colname, idx, return_kDF = True, h2o_frame = False):
 def convert_to_vintage(data, vintage_colname = 'VINTAGE', by = 'TRAN_TMS', return_kDF = True):
     """
     Generate a vintage column from a time column.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input DataFrame.
     vintage_colname : str, default 'VINTAGE'
-        Name of the generated vintage column.
+        Name of the generated vintage column (a column with this name is overwritten).
     by : str, default 'TRAN_TMS'
-        Name of the time column.
+        Name of the time column. The column is cast to string and the first ``YYYY-MM`` pattern in the text is used.
     return_kDF : bool, default True
         Whether to return a kDataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame or kDataFrame
         Data with the vintage column added.
-    
+
+    Notes
+    -----
+    The vintage column is added to the input ``data`` itself (in place), so the caller's frame gains the column as well as
+    the returned one. The column has pandas ``string`` dtype and holds the vintage as ``YYYYMM`` text (for example
+    ``'202503'``); values without a ``YYYY-MM`` pattern (other separators, compact dates, missing values) become missing.
+
     Examples
     --------
     >>> df = pd.DataFrame({'TRAN_TMS': ['2025-03-15 10:00:00', '2025-03-20 11:00:00']})
@@ -367,25 +402,29 @@ def convert_to_vintage(data, vintage_colname = 'VINTAGE', by = 'TRAN_TMS', retur
 def col_filter_regex(data, regex = ".*?of_co_at_12m", case_sensitive = True, h2o_frame=False, return_kDF = True):
     """
     Filter the columns of a DataFrame by matching the column names against a regular expression.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame or h2o.H2OFrame
         Input data.
     regex : str, default ".*?of_co_at_12m"
-        Regular expression pattern.
+        Regular expression pattern, searched (``re.search``) anywhere in each column name.
     case_sensitive : bool, default True
-        Whether matching is case-sensitive.
+        Whether matching is case-sensitive. Ignored when ``h2o_frame=True`` (the match is always case-sensitive there).
     h2o_frame : bool, default False
-        Whether the input is an H2OFrame.
+        Whether the input is an H2OFrame. If True, ``return_kDF`` is ignored and an H2OFrame is returned.
     return_kDF : bool, default True
-        Whether to return a kDataFrame.
-    
+        Whether to return a kDataFrame. Ignored (treated as False) when ``h2o_frame=True``.
+
     Returns
     -------
-    pandas.DataFrame or kDataFrame
-        Filtered data (only the matching columns).
-    
+    pandas.DataFrame, kDataFrame or h2o.H2OFrame
+        Filtered data (only the matching columns, in their original order).
+
+    Notes
+    -----
+    For pandas input the column names must be strings.
+
     Examples
     --------
     >>> df = pd.DataFrame({'score_at_12m': [1, 2], 'other_col': [3, 4]})
@@ -409,7 +448,7 @@ def row_filter_regex(data, col, regex, case_sensitive = True,
                      as_index = False, return_kDF = True):
     """
     Filter the rows of a DataFrame by matching one column against a regular expression.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -417,19 +456,25 @@ def row_filter_regex(data, col, regex, case_sensitive = True,
     col : str
         Name of the column to filter on.
     regex : str
-        Regular expression pattern.
+        Regular expression pattern, searched (``re.search``) anywhere in the text of each value.
     case_sensitive : bool, default True
         Whether matching is case-sensitive.
     as_index : bool, default False
-        Whether to use the filter column as the index.
+        Whether to use the filter column as the index. It is only honored when ``return_kDF=False``: with the default
+        ``return_kDF=True`` the rows are returned with their original index.
     return_kDF : bool, default True
-        Whether to return a kDataFrame.
-    
+        Whether to return a kDataFrame. When True, ``as_index`` has no effect.
+
     Returns
     -------
     pandas.DataFrame or kDataFrame
         Filtered data.
-    
+
+    Notes
+    -----
+    The values of ``col`` are cast to ``str`` before matching, so numbers are matched through their text and missing values
+    through ``'nan'`` or ``'None'``.
+
     Examples
     --------
     >>> df = pd.DataFrame({'name': ['apple', 'banana', 'cherry'], 'value': [1, 2, 3]})
@@ -446,21 +491,27 @@ def row_filter_regex(data, col, regex, case_sensitive = True,
 def convert_colnames(data, how = "lowercase", return_kDF = True):
     """
     Convert the column names of a DataFrame to a uniform case.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input DataFrame.
     how : str, default "lowercase"
-        Conversion method. One of 'lower'/'lowercase', 'upper'/'uppercase', 'cap'/'capitalize'.
+        Conversion method. One of 'lower'/'lowercase', 'upper'/'uppercase', 'cap'/'capitalize' (compared
+        case-insensitively).
     return_kDF : bool, default True
         Whether to return a kDataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame or kDataFrame
         Data with the converted column names.
-    
+
+    Notes
+    -----
+    The columns of the input ``data`` are renamed in place, so the caller's frame changes as well as the returned one. The
+    column names must be strings. ``how`` is not validated: any other value fails with ``UnboundLocalError``.
+
     Examples
     --------
     >>> df = pd.DataFrame({'NAME': [1], 'Age': [2]})
@@ -482,7 +533,7 @@ def convert_colnames(data, how = "lowercase", return_kDF = True):
 def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
     """
     Compute frequencies and percentages, mimicking SAS PROC FREQ.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -491,12 +542,14 @@ def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
         Name of the column to tabulate.
     return_kDF : bool, default True
         Whether to return a kDataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame
-        Statistics table with the columns frequency, percent, cumFrequency and cumPercent.
-    
+        Statistics table with the columns frequency, percent, cumFrequency and cumPercent. It is indexed by the distinct
+        values of ``var`` (missing values form a row of their own) and sorted by that index, not by frequency. A
+        kDataFrame when ``return_kDF=True``.
+
     Examples
     --------
     >>> df = pd.DataFrame({'category': ['A', 'B', 'A', 'C', 'A']})
@@ -517,7 +570,7 @@ def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
 def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]):
     """
     Compute descriptive statistics, mimicking SAS PROC MEANS.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -526,12 +579,20 @@ def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0
         List of columns to summarize; defaults to all columns.
     quantiles : list, default [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
         List of quantiles.
-    
+
     Returns
     -------
     pandas.DataFrame
-        Statistics table with count, mean, std, min, max and the requested quantiles.
-    
+        Statistics table with one row per summarized column and the upper-case columns ``N`` (count of non-missing
+        values), ``MEAN``, ``STD``, ``MIN``, one ``Q<percent>`` column per requested quantile (``Q5`` for 0.05, ``Q50`` for
+        0.5), ``MAX`` and ``MISSING_RATE`` (``1 - N / number of rows of data``).
+
+    Notes
+    -----
+    Only numeric columns are summarized (the default of ``DataFrame.describe``): non-numeric columns of ``varlist`` are
+    silently left out of the result. A quantile that is not a whole number of percent (such as 0.075) keeps the pandas
+    column name (``'7.5%'``) instead of ``Q<percent>``.
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1, 2, 3, 4, 5], 'b': [10, 20, 30, 40, 50]})
@@ -556,27 +617,32 @@ def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0
 def capping_score(data, pb_score: str, multiplier = 1, df_type: str = 'DataFrame'):
     """
     Scale model scores and cap them at an upper limit.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
-        Input DataFrame.
+        Input DataFrame (an ``h2o.H2OFrame`` when ``df_type='h2o'``).
     pb_score : str
         Name of the score column.
     multiplier : float, default 1
         Score scaling multiplier.
     df_type : str, default 'DataFrame'
-        Data type, 'DataFrame' or 'h2o'.
-    
+        Data type, 'DataFrame' or 'h2o' (compared case-insensitively). Any value other than 'h2o' selects the pandas
+        branch.
+
     Returns
     -------
     pandas.Series or h2o.H2OFrame
-        Processed scores.
-    
+        Processed scores: ``data[pb_score] * multiplier`` with every value above 0.9999999 replaced by 0.9999999.
+
+    Notes
+    -----
+    Known limitation: as implemented, the pandas branch applies the cap with a scalar ``if`` on the whole column, so it
+    raises ``ValueError`` ("The truth value of a Series is ambiguous") for any pandas input; only ``df_type='h2o'`` works.
+
     Examples
     --------
-    >>> df = pd.DataFrame({'score': [0.1, 0.5, 0.99, 1.0]})
-    >>> capping_score(df, 'score', multiplier=600, df_type='DataFrame')
+    >>> capping_score(hf, 'score', multiplier=1, df_type='h2o')  # hf is an h2o.H2OFrame
     """
     scores = data[pb_score] * multiplier
     cond = (scores > 0.9999999)
@@ -590,19 +656,22 @@ def capping_score(data, pb_score: str, multiplier = 1, df_type: str = 'DataFrame
 def get_filenames(path: str, regex: str) -> [str]:
     """
     Get the names of the files under a path that match a regular expression.
-    
+
+    The folder is searched recursively, including its sub-folders.
+
     Parameters
     ----------
     path : str
         Folder path.
     regex : str
-        Regular expression pattern.
-    
+        Regular expression pattern, searched (``re.search``) in each file name (not in the whole path).
+
     Returns
     -------
     list
-        List of matching file names.
-    
+        List of matching file names, in ``os.walk`` order. Only the file names are returned, without the sub-folder in
+        which each file was found.
+
     Examples
     --------
     >>> get_filenames('/path/to/files', '.*\\.csv')
@@ -620,20 +689,27 @@ def get_filenames(path: str, regex: str) -> [str]:
 def sas_to_csv_by_folder(folder_path: str):
     """
     Convert all SAS datasets in a folder to CSV files.
-    
+
     Parameters
     ----------
     folder_path : str
-        Path of the folder containing the SAS files.
-    
+        Path of the folder containing the SAS files. It must end with a path separator (for example ``'/data/sas/'``),
+        because the file names are appended to it as they are.
+
     Returns
     -------
     int
         Execution status code (0 means success).
-    
+
+    Notes
+    -----
+    Every file whose name contains ``sas7bdat`` is converted with ``sas_to_csv`` and written next to the source file, with
+    ``sas7bdat`` replaced by ``csv`` in its path. Sub-folders are also searched, but only the file names are kept, so a
+    file located in a sub-folder is looked up in ``folder_path`` and the conversion fails.
+
     Examples
     --------
-    >>> sas_to_csv_by_folder('/path/to/sas/files')
+    >>> sas_to_csv_by_folder('/path/to/sas/files/')
     """
     filenames = get_filenames(path = folder_path, regex = ".*?sas7bdat")
     sasfilepaths = [folder_path + file for file in filenames]
@@ -670,19 +746,20 @@ def _last_modified_date(filename):
 def read_attr_list(path: str = "pe_attr_list.txt", lower = False):
     """
     Read an attribute list file (one attribute per line).
-    
+
     Parameters
     ----------
     path : str, default "pe_attr_list.txt"
         File path.
     lower : bool, default False
-        Whether to convert the attributes to lower case.
-    
+        Whether to convert the attributes to lower case. With the default False they are returned in upper case.
+
     Returns
     -------
     list
-        List of attributes.
-    
+        List of attributes, one per line of the file, with surrounding whitespace removed and converted to upper case (or
+        to lower case when ``lower=True``). Blank lines are kept as empty strings.
+
     Examples
     --------
     >>> read_attr_list('vars.txt', lower=True)
@@ -702,22 +779,25 @@ def read_attr_list(path: str = "pe_attr_list.txt", lower = False):
 def write_attr_list(var_list: list, path: str = "_vls_results.txt", sep="\n", quote='double'):
     """
     Write a list of variables to a file.
-    
+
+    Each variable is converted with ``str`` and written to the file followed by ``sep``, so the file also ends with a
+    separator. An existing file is overwritten.
+
     Parameters
     ----------
     var_list : list
         List of variables to write.
     path : str, default "_vls_results.txt"
         Output file path.
-    sep : str, default "\n"
-        Separator.
+    sep : str, default "\\n"
+        Separator written after every variable, the last one included. The default is the newline character.
     quote : str, default 'double'
-        Quote type: 'double', 'single' or 'none'.
-    
+        Quote type: 'double', 'single' or 'none'. Any other value is handled like 'none' (no quotes).
+
     Returns
     -------
     None
-    
+
     Examples
     --------
     >>> write_attr_list(['var1', 'var2'], 'output.txt', quote='single')
@@ -737,19 +817,19 @@ def write_attr_list(var_list: list, path: str = "_vls_results.txt", sep="\n", qu
 def list_filter_regex(ls, regex):
     """
     Filter list elements by a regular expression.
-    
+
     Parameters
     ----------
     ls : list
-        Input list.
+        Input list (of strings).
     regex : str
-        Regular expression pattern.
-    
+        Regular expression pattern, searched (``re.search``) anywhere in each element.
+
     Returns
     -------
     list
         List of matching elements.
-    
+
     Examples
     --------
     >>> list_filter_regex(['abc', 'def', 'abf'], 'ab.*')
@@ -766,19 +846,23 @@ def list_filter_regex(ls, regex):
 def list_to_h2oFrame(val: str or float or int, length: int):
     """
     Convert a value to an H2O Frame of the given length.
-    
+
     Parameters
     ----------
     val : str or float or int
         Value to repeat.
     length : int
         Length of the frame.
-    
+
     Returns
     -------
     h2o.H2OFrame
         H2OFrame containing the repeated value.
-    
+
+    Notes
+    -----
+    ``h2o`` is imported inside the function and must be installed.
+
     Examples
     --------
     >>> list_to_h2oFrame(5, 10)
@@ -791,29 +875,32 @@ def list_to_h2oFrame(val: str or float or int, length: int):
 def odds_score(pb_score, event_ratio = 15, margin_point = 20, score_point = 500):
     """
     Compute the odds score from a probability score.
-    
-    Used to convert a probability into a credit score scale.
-    
+
+    Used to convert a probability into a credit score scale. The score is
+    ``score_point - margin_point / ln(2) * (ln(event_ratio) + ln(pb_score / (1 - pb_score)))``.
+
     Parameters
     ----------
-    pb_score : float
-        Predicted probability (between 0 and 1).
+    pb_score : float or array-like
+        Predicted probability of the event, strictly between 0 and 1 (a scalar, a numpy array or a pandas Series).
     event_ratio : float, default 15
-        Event ratio.
+        Event ratio: the odds of non-event to event at which the score equals ``score_point``. With the default 15 a
+        probability of 1/16 scores exactly ``score_point``.
     margin_point : float, default 20
-        Score point difference.
+        Score point difference: the points subtracted from the score every time the odds ``pb_score / (1 - pb_score)``
+        double.
     score_point : float, default 500
         Base score point.
-    
+
     Returns
     -------
-    float
-        Odds score.
-    
+    float or array-like
+        Odds score, of the same kind as ``pb_score``. A higher probability gives a lower score.
+
     Examples
     --------
     >>> odds_score(0.03, event_ratio=15, margin_point=20, score_point=500)
-    619.3...
+    522.16...
     """
     a = (margin_point / np.log(2))
     b = (np.log(event_ratio) + np.log(pb_score/(1 - pb_score)))
@@ -822,8 +909,8 @@ def odds_score(pb_score, event_ratio = 15, margin_point = 20, score_point = 500)
 
 def last_Month_Vintage(year: int, month: int, day: int) -> str:
     """
-    Get the year-month string of the previous month.
-    
+    Get the year-month of the previous month as an integer in the format YYYYMM.
+
     Parameters
     ----------
     year : int
@@ -831,13 +918,14 @@ def last_Month_Vintage(year: int, month: int, day: int) -> str:
     month : int
         Month.
     day : int
-        Day.
-    
+        Day. It only has to be a valid day of ``month``; it does not change the result.
+
     Returns
     -------
-    str
-        Year-month string of the previous month, in the format 'YYYYMM'.
-    
+    int
+        Previous month of the date ``year-month-day`` as an integer in the format YYYYMM (for example ``202502``). The
+        ``-> str`` annotation of the function is inaccurate: an ``int`` is returned, not a string.
+
     Examples
     --------
     >>> last_Month_Vintage(2025, 3, 15)
@@ -853,19 +941,20 @@ def last_Month_Vintage(year: int, month: int, day: int) -> str:
 def read_sas_file(file_path_name=''):
     """
     Read a SAS dataset file.
-    
+
     The SAS file is read with latin-1 encoding, which is the default encoding of SAS Studio and SAS Grid.
-    
+
     Parameters
     ----------
-    file_path_name : str
-        Path to the SAS file.
-    
+    file_path_name : str, default ''
+        Path to the SAS file (a ``.sas7bdat`` file: the format is fixed to ``sas7bdat``). The empty default is not a
+        usable path, so always pass one.
+
     Returns
     -------
     kDataFrame
         kDataFrame containing the data.
-    
+
     Examples
     --------
     >>> df = read_sas_file('data.sas7bdat')
@@ -878,21 +967,21 @@ def read_sas_file(file_path_name=''):
 def sas_to_csv(fileNameWithPath, outputFileNameWithPath, timecounter = True):
     """
     Convert a SAS dataset to a CSV file.
-    
+
     Parameters
     ----------
     fileNameWithPath : str
         Path to the input SAS file.
     outputFileNameWithPath : str
-        Path to the output CSV file.
+        Path to the output CSV file (written without the index column).
     timecounter : bool, default True
-        Whether to report the execution time.
-    
+        Whether to report the execution time (in minutes) through the logger at INFO level.
+
     Returns
     -------
     int
         Execution status code (0 means success).
-    
+
     Examples
     --------
     >>> sas_to_csv('input.sas7bdat', 'output.csv')
@@ -913,23 +1002,30 @@ def sas_to_csv(fileNameWithPath, outputFileNameWithPath, timecounter = True):
 def merge_all_data(*args, on = "APPLICATION_ID", how = "left", return_kDF = True):
     """
     Merge multiple datasets.
-    
+
     Parameters
     ----------
     *args
-        The DataFrames to merge, passed as positional arguments.
+        The DataFrames to merge, passed as positional arguments. They are merged from left to right; at least one is
+        required.
     on : str, default "APPLICATION_ID"
-        Name of the join key column.
+        Name of the join key column. It must exist in every DataFrame.
     how : str, default "left"
         Join type: 'left', 'right', 'inner' or 'outer'.
     return_kDF : bool, default True
         Whether to return a kDataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame or kDataFrame
         Merged data.
-    
+
+    Notes
+    -----
+    In the i-th merge (counting from 0) the non-key columns that exist on both sides get the suffixes ``_merge{i}`` (left)
+    and ``_merge{i+1}`` (right). With a single DataFrame nothing is merged and that frame is returned; with no DataFrame
+    the call fails with ``IndexError``.
+
     Examples
     --------
     >>> df1 = pd.DataFrame({'id': [1, 2], 'a': [3, 4]})
@@ -948,19 +1044,19 @@ def merge_all_data(*args, on = "APPLICATION_ID", how = "left", return_kDF = True
 def get_valid_vintages(sVintage, eVintage):
     """
     Get the list of valid vintages within the given range.
-    
+
     Parameters
     ----------
     sVintage : int
         Start vintage (format YYYYMM).
     eVintage : int
         End vintage (format YYYYMM).
-    
+
     Returns
     -------
     list
-        List of valid vintages.
-    
+        List of valid vintages: the integers from ``sVintage`` to ``eVintage``, both included, whose month part is 01 to 12.
+
     Examples
     --------
     >>> get_valid_vintages(202001, 202503)
@@ -976,17 +1072,24 @@ def get_valid_vintages(sVintage, eVintage):
 def set_non_number_str(h2o_tbl_path):
     """
     Import a file as an H2OFrame and set all non-numeric columns to string type.
-    
+
     Parameters
     ----------
     h2o_tbl_path : str
-        Path to the H2O table.
-    
+        Path to the file to import (anything accepted by ``h2o.import_file``, for example a CSV file).
+
     Returns
     -------
     h2o.H2OFrame
-        The processed H2OFrame.
-    
+        The processed H2OFrame: columns detected as ``int``, ``enum``, ``string`` or ``real`` keep their type and every
+        other column is read as ``string``.
+
+    Notes
+    -----
+    The function calls ``h2o.init(min_mem_size='100G')`` (it connects to a running H2O cluster or starts a local one that
+    asks for at least 100 GB of memory) and imports the file twice: first to detect the column types, then again with the
+    final types. ``h2o`` must be installed.
+
     Examples
     --------
     >>> hf = set_non_number_str('/path/to/file.csv')
@@ -1004,23 +1107,30 @@ def set_non_number_str(h2o_tbl_path):
 def list_to_SQL(ls, excl=[], prefix = '', wquote=False):
     """
     Convert a list to a SQL-formatted string.
-    
+
     Parameters
     ----------
     ls : list
-        Input list.
+        Input list. Without ``wquote`` the elements must be strings.
     excl : list, default []
         List of elements to exclude.
     prefix : str, default ''
-        Column-name prefix (such as a table alias).
+        Column-name prefix (such as a table alias), written before every element as ``prefix.element``.
     wquote : bool, default False
-        Whether to wrap each element in quotes.
-    
+        Whether to wrap each element in single quotes.
+
     Returns
     -------
     str
-        SQL-formatted string.
-    
+        SQL-formatted string: the elements joined by commas without spaces.
+
+    Notes
+    -----
+    With ``wquote=True`` the elements are quoted before they are compared with ``excl``, so ``excl`` must then contain the
+    quoted text (``"'b'"``) to exclude anything. The comma after an element depends only on its position in ``ls``, so when
+    the last element of ``ls`` is excluded the result ends with a trailing comma (``list_to_SQL(['a', 'b'], excl=['b'])``
+    returns ``'a,'``).
+
     Examples
     --------
     >>> list_to_SQL(['col1', 'col2', 'col3'], prefix='t')
@@ -1049,17 +1159,18 @@ def list_to_SQL(ls, excl=[], prefix = '', wquote=False):
 def bool_to_str(data):
     """
     Convert the boolean columns of a DataFrame to string type.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input DataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame
-        Converted data.
-    
+        Converted data: a copy in which every boolean column holds the strings ``'True'`` / ``'False'``. ``data`` itself is
+        not modified.
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [True, False], 'b': [1, 2]})
@@ -1075,21 +1186,32 @@ def bool_to_str(data):
 def get_dtypes_file(data, outputFile = None, ck_format=False):
     """
     Get the data type of each column of a DataFrame.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input DataFrame.
     outputFile : str, optional
-        Output file path.
+        Output file path. If given, the table is also written there as CSV, without the index and without a header row.
     ck_format : bool, default False
-        Whether to use a custom format.
-    
+        Reserved for a ClickHouse dtype mapping that SMF does not ship: ``ck_format=True`` raises
+        ``NotImplementedError`` (before anything is written), so leave it at False.
+
     Returns
     -------
     pandas.DataFrame
-        DataFrame with the column names and data types.
-    
+        DataFrame with the column names (column ``colname``) and data types (column ``dtype``, as strings such as
+        ``'int64'``).
+
+    Raises
+    ------
+    NotImplementedError
+        If ``ck_format=True``.
+
+    Notes
+    -----
+    Boolean columns are converted to strings first (see ``bool_to_str``), so their type is reported as ``object``.
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1], 'b': ['x'], 'c': [1.5]})
@@ -1113,19 +1235,25 @@ def get_dtypes_file(data, outputFile = None, ck_format=False):
 def add_path_suffix(file, suffix = "_cut"):
     """
     Add a suffix to a file path (before the file extension).
-    
+
     Parameters
     ----------
     file : str
-        File path.
+        File path, with ``/`` as separator.
     suffix : str, default "_cut"
         Suffix to add.
-    
+
     Returns
     -------
     str
         File path with the suffix added.
-    
+
+    Notes
+    -----
+    The file name is split at its dots and only the first two parts are used, so ``'a.tar.gz'`` becomes ``'a_cut.tar'``
+    and a name without a dot fails with ``IndexError``. A bare file name (no ``/``) comes back with a leading ``/``
+    (``'file.csv'`` gives ``'/file_cut.csv'``).
+
     Examples
     --------
     >>> add_path_suffix('/path/to/file.csv', '_processed')
@@ -1143,21 +1271,28 @@ def add_path_suffix(file, suffix = "_cut"):
 def h2o_apply_regex(data, colname, func):
     """
     Apply a regular-expression transformation function to a column of an H2O Frame.
-    
+
     Parameters
     ----------
     data : h2o.H2OFrame
         Input data.
     colname : str
-        Column name.
+        Column name. It must be a string.
     func : callable
-        Function to apply.
-    
+        Function to apply to every element of the column.
+
     Returns
     -------
     h2o.H2OFrame
-        The transformed H2OFrame.
-    
+        The transformed H2OFrame: a new frame with the single column ``colname``, which holds the transformed values (the
+        other columns of ``data`` are not carried over).
+
+    Notes
+    -----
+    The column is downloaded as a pandas Series, ``func`` is applied there element by element and the result is uploaded
+    again, so the column must fit in memory. A ``colname`` that is not a string fails with ``UnboundLocalError``. ``h2o``
+    is imported inside the function and must be installed.
+
     Examples
     --------
     >>> h2o_apply_regex(hf, 'name', lambda x: x.upper())
@@ -1174,23 +1309,24 @@ def h2o_apply_regex(data, colname, func):
 def get_summary_rpt(means_rpt, iv_psi_rpt, corr_rpt):
     """
     Merge reports into a feature summary report.
-    
+
     Combine the Means report, the IV/PSI report and the correlation report into one comprehensive report.
-    
+
     Parameters
     ----------
     means_rpt : pandas.DataFrame
-        Means statistics report.
+        Means statistics report, indexed by variable name (for example the output of ``proc_means``).
     iv_psi_rpt : pandas.DataFrame
-        IV/PSI report.
+        IV/PSI report. It needs a ``Var_Name`` column, which is used as its index.
     corr_rpt : pandas.DataFrame
-        Correlation report.
-    
+        Correlation report. It needs a ``Var_Name`` column, which is used as its index.
+
     Returns
     -------
     pandas.DataFrame
-        Merged summary report.
-    
+        Merged summary report: the three reports joined on the variable name (an inner join, so a variable missing from
+        any report is dropped), with all column names converted to upper case.
+
     Examples
     --------
     >>> summary = get_summary_rpt(means, iv_psi, corr)
@@ -1209,19 +1345,28 @@ def get_summary_rpt(means_rpt, iv_psi_rpt, corr_rpt):
 def flatten_json_attr(data, jsonColname= "data"):
     """
     Flatten a column of JSON-format model attributes.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         DataFrame containing the JSON column.
     jsonColname : str, default "data"
-        Name of the JSON column.
-    
+        Name of the JSON column. Every cell must be a string that ``ast.literal_eval`` can evaluate to a dict.
+
     Returns
     -------
     pandas.DataFrame
-        The flattened DataFrame.
-    
+        The flattened DataFrame: the columns of ``data`` other than the column named ``data``, followed by the flattened
+        keys (nested keys are joined with a dot, such as ``b.c``).
+
+    Notes
+    -----
+    The cells are parsed with ``ast.literal_eval``, which means Python literal syntax: JSON ``true``, ``false`` and
+    ``null`` are not accepted. The column dropped from the output is the one literally named ``'data'``, whatever
+    ``jsonColname`` is, so with another ``jsonColname`` the JSON column itself stays in the result. The flattened keys are
+    joined side by side (``pd.concat(axis=1)``) with a new 0 to n-1 index, so ``data`` should have the default index;
+    with any other index the rows no longer line up (reset the index first).
+
     Examples
     --------
     >>> df = pd.DataFrame({'id': [1], 'data': ['{"key1":"val1"}']})
@@ -1241,20 +1386,21 @@ def flatten_json_attr(data, jsonColname= "data"):
 def parse_odps_schema(schema_list):   
     """
     Parse an ODPS schema.
-    
+
     Parameters
     ----------
     schema_list : list
-        List of ODPS schema entries.
-    
+        List of ODPS schema entries, one per column. The string form of each entry must look like
+        ``<column name, type string>``, as the ``odps.models.Column`` objects of a table schema (``schema.columns``) do.
+
     Returns
     -------
     dict
         Dictionary mapping field names to data types.
-    
+
     Examples
     --------
-    >>> schema = parse_odps_schema(['column col1 type=string, column col2 type=bigint'])
+    >>> parse_odps_schema(['<column col1, type string>', '<column col2, type bigint>'])
     {'col1': 'string', 'col2': 'bigint'}
     """
     import re
@@ -1269,17 +1415,24 @@ def parse_odps_schema(schema_list):
 def npnan2none(df):
     """
     Convert np.nan and np.nat values in a DataFrame to None.
-    
+
     Parameters
     ----------
     df : pandas.DataFrame
         Input DataFrame.
-    
+
     Returns
     -------
     pandas.DataFrame
-        Converted data.
-    
+        Converted data. Columns that contain missing values end up with ``object`` dtype and hold ``None`` instead of
+        NaN / NaT.
+
+    Notes
+    -----
+    The object-dtype columns of the input ``df`` are reassigned in place before the conversion, so the caller's frame is
+    modified as well: an object column whose values can all be cast to float (for example numeric strings) is converted to
+    float.
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1, np.nan], 'b': [np.nan, 2]})
@@ -1301,19 +1454,19 @@ def npnan2none(df):
 def drop_tmp_cols(df, drop_list = ['py_inserttime']):
     """
     Drop temporary columns from a DataFrame.
-    
+
     Parameters
     ----------
     df : pandas.DataFrame
         Input DataFrame.
     drop_list : list, default ['py_inserttime']
-        List of temporary columns to drop.
-    
+        List of temporary columns to drop. Names that are not columns of ``df`` are ignored.
+
     Returns
     -------
     pandas.DataFrame
-        Data with the temporary columns dropped.
-    
+        Data with the temporary columns dropped (a new frame; ``df`` itself is not modified).
+
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1, 2], 'py_inserttime': [0, 0]})
@@ -1336,19 +1489,21 @@ def drop_tmp_cols(df, drop_list = ['py_inserttime']):
 def mkdir_if_not_exist(folder_path, replace = False):
     """
     Create a directory if it does not exist.
-    
+
     Parameters
     ----------
     folder_path : str
-        Folder path.
+        Folder path. Missing parent folders are created as well. ``None`` does nothing.
     replace : bool, default False
-        Whether to replace the directory if it already exists.
-    
+        Whether to replace the directory if it already exists. Despite the name, an existing directory is neither deleted
+        nor emptied: with ``replace=True`` the function only logs that the folder has been replaced and returns 0.
+
     Returns
     -------
-    int
-        Status code: 0 means success, 1 means the directory already exists.
-    
+    int or None
+        Status code: 0 means success, 1 means the directory already exists (and ``replace=False``). ``None`` is returned
+        when ``folder_path`` is ``None``.
+
     Examples
     --------
     >>> mkdir_if_not_exist('/path/to/new/folder')
@@ -1640,20 +1795,33 @@ def parse_sql_file(sql_path:str=None,
     Parameters
     ----------
     sql_path : str, optional
-        Path to the SQL file.
+        Path to the SQL file. Exactly one of ``sql_path`` and ``sql_query`` must be given.
     sql_query : str, optional
-        SQL query string.
+        SQL query string. Exactly one of ``sql_path`` and ``sql_query`` must be given.
     split : bool, default False
         Whether to split multiple queries.
     format_select : bool, default False
         Whether to automatically format the SELECT fields (one field per line, leading-comma style).
     **kwargs
-        Variables in the SQL to substitute.
+        Variables in the SQL to substitute: every ``{name}`` placeholder is replaced by the value of the keyword argument
+        ``name``, which must be a string.
 
     Returns
     -------
     str or list
-        Parsed SQL string or list of strings.
+        Parsed SQL string or list of strings. With ``split=False`` it is one string: the queries joined with ``'; '`` and
+        ended by ``';'``. With ``split=True`` it is the list of the queries (without semicolons), or the single query
+        string when there is only one.
+
+    Raises
+    ------
+    AttributeError
+        If neither or both of ``sql_path`` and ``sql_query`` are given.
+
+    Notes
+    -----
+    Comments are removed first (optimizer hints ``/*+ ... */`` are kept). A placeholder without a matching keyword is left
+    as it is and a ``UserWarning`` ("Missing argument(s) ...") is issued.
 
     Examples
     --------
@@ -1726,9 +1894,9 @@ def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
 def calc_woe(data, bad_pct, good_pct, fillwoe=True):
     """
     Compute the weight of evidence (WOE).
-    
+
     WOE = ln(the bin's share of all bad samples / the bin's share of all good samples)
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -1738,13 +1906,20 @@ def calc_woe(data, bad_pct, good_pct, fillwoe=True):
     good_pct : str
         Name of the column holding the good-sample proportion.
     fillwoe : bool, default True
-        Whether to set the WOE to 0 when a proportion is 0.
-    
+        Value returned when ``data`` has no rows: 0 if True, NaN if False. It does not change the result for rows whose
+        proportion is 0 (see Notes).
+
     Returns
     -------
     float or pandas.Series
-        WOE value(s).
-    
+        WOE value(s): a Series aligned with ``data`` (``numpy.log(bad_pct / good_pct)`` row by row), or the scalar 0 / NaN
+        (see ``fillwoe``) when ``data`` is empty.
+
+    Notes
+    -----
+    A row in which a proportion is 0 is not filled: a zero bad proportion gives ``-inf``, a zero good proportion gives
+    ``inf`` and two zeros give NaN, whatever ``fillwoe`` is.
+
     Examples
     --------
     >>> df = pd.DataFrame({'bad_pct': [0.3, 0.5], 'good_pct': [0.7, 0.5]})
@@ -1757,9 +1932,9 @@ def calc_woe(data, bad_pct, good_pct, fillwoe=True):
 def calc_iv(data, bad_pct, good_pct, filliv=True):
     """
     Compute the information value (IV).
-    
+
     IV = (the bin's share of all bad samples - the bin's share of all good samples) * WOE
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -1769,13 +1944,20 @@ def calc_iv(data, bad_pct, good_pct, filliv=True):
     good_pct : str
         Name of the column holding the good-sample proportion.
     filliv : bool, default True
-        Whether to set the IV to 0 when a proportion is 0.
-    
+        Value returned when ``data`` has no rows: 0 if True, NaN if False. It does not change the result for rows whose
+        proportion is 0 (see Notes).
+
     Returns
     -------
     float or pandas.Series
-        IV value(s).
-    
+        IV value(s): a Series aligned with ``data`` (``(bad_pct - good_pct) * WOE`` row by row), or the scalar 0 / NaN (see
+        ``filliv``) when ``data`` is empty.
+
+    Notes
+    -----
+    A row in which one proportion is 0 is not filled: its IV is ``inf`` (NaN when both proportions are 0), whatever
+    ``filliv`` is.
+
     Examples
     --------
     >>> df = pd.DataFrame({'bad_pct': [0.3, 0.5], 'good_pct': [0.7, 0.5]})
@@ -1788,19 +1970,25 @@ def calc_iv(data, bad_pct, good_pct, filliv=True):
 def save_model(model, filename):
     """
     Save a LightGBM model using pickle.
-    
+
     Parameters
     ----------
     model : object
         Model object to save.
     filename : str
         Path to save the model to.
-    
+
     Returns
     -------
     int
         Execution status code (0 means success).
-    
+
+    Notes
+    -----
+    The object is written with ``joblib.dump`` exactly as given, with no SMF artifact envelope and no metadata, so any
+    picklable object works, not only LightGBM models. The exported ``Modeling_Tool.save_model`` is the metadata-aware
+    version from ``Modeling_Tool.Core.Model_Registry_Tool``.
+
     Examples
     --------
     >>> save_model(model, 'model.pkl')
@@ -1815,17 +2003,23 @@ def save_model(model, filename):
 def load_model(model_path):
     """
     Load a pickled model.
-    
+
     Parameters
     ----------
     model_path : str
         Path to the model file.
-    
+
     Returns
     -------
     object
         The loaded model object.
-    
+
+    Notes
+    -----
+    The file is read with ``joblib.load`` and the object is returned exactly as stored: a file written by the
+    metadata-aware ``Modeling_Tool.save_model`` comes back as its artifact dict, not as the model (use
+    ``Modeling_Tool.load_model`` for that). Only load files from a trusted source.
+
     Examples
     --------
     >>> model = load_model('model.pkl')
@@ -1840,27 +2034,35 @@ def load_model(model_path):
 def scoring(data, model, varlist, scr_name, keeplist = None, all_missing_spec_value = None):
     """
     Score data with a model.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input DataFrame.
     model : sklearn-like model
-        Machine learning model.
+        Machine learning model. It must provide ``predict_proba``; the score is the second column of its output (the
+        probability of class 1).
     varlist : list
         List of feature variables.
     scr_name : str
-        Name of the score column.
+        Name of the score column (an existing column with this name is overwritten).
     keeplist : list, optional
-        List of columns to keep.
+        List of columns to keep. The score column ``scr_name`` is always appended to it. If None, all the columns of
+        ``data`` and the score column are returned.
     all_missing_spec_value : float, optional
-        Score value to assign to samples in which all features are missing.
-    
+        Score value to assign to samples in which all features are missing. It is applied only when it is truthy, so ``0``
+        is treated as not given.
+
     Returns
     -------
     pandas.DataFrame
         DataFrame containing the scores.
-    
+
+    Notes
+    -----
+    ``data`` itself is not modified. When some rows have all ``varlist`` features missing, those rows are moved behind the
+    other rows (their index labels are kept), so the row order of the result can differ from ``data``.
+
     Examples
     --------
     >>> df = scoring(data, model, ['feat1', 'feat2'], 'score')
@@ -1896,7 +2098,25 @@ def scoring(data, model, varlist, scr_name, keeplist = None, all_missing_spec_va
     return fnl_data[keeplist]
 
 def get_missing_indicator(data, subset = None):
-    """ Add Missing Indicator. """
+    """
+    Add Missing Indicator.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Input DataFrame.
+    subset : list of str, default None
+        Names of the columns to check. Required in practice: ``None`` raises ``KeyError``.
+
+    Returns
+    -------
+    pandas.Series
+        Integer indicator aligned with ``data``: 1 when all the columns of ``subset`` are missing in the row, otherwise 0.
+
+    Notes
+    -----
+    The indicator is only returned: no column is added to ``data``.
+    """
     
     all_missing_logic = lambda data: (pd.isnull(data[subset]).sum(axis = 1) == len(subset))
     return all_missing_logic(data).astype(int)
@@ -1904,7 +2124,7 @@ def get_missing_indicator(data, subset = None):
 def upload_score(data, model, varlist, scr_name, table_name, keeplist = None, retPandas = False, all_missing_spec_value = None):
     """
     Upload model scores to MaxCompute.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -1918,17 +2138,24 @@ def upload_score(data, model, varlist, scr_name, table_name, keeplist = None, re
     table_name : str
         Name of the target table.
     keeplist : list, optional
-        List of columns to keep.
+        List of columns to keep. The score column ``scr_name`` is always appended to it.
     retPandas : bool, default False
         Whether to return the pandas DataFrame.
     all_missing_spec_value : float, optional
-        Score value to assign to samples in which all features are missing.
-    
+        Score value to assign to samples in which all features are missing (see ``scoring``).
+
     Returns
     -------
     int or pandas.DataFrame
-        Status code or DataFrame.
-    
+        Status code (0) or, when ``retPandas=True``, the DataFrame that was uploaded.
+
+    Notes
+    -----
+    The data are scored with ``scoring``, the missing values are converted to ``None`` (``npnan2none``), the temporary
+    column ``py_inserttime`` is dropped (``drop_tmp_cols``) and the result is uploaded with ``ODPSRunner.upload_df``,
+    which replaces the table ``table_name``. Creating the ``ODPSRunner`` needs the ``odps`` extra and the
+    ``ALIBABA_CLOUD_ACCESS_KEY_ID`` / ``ALIBABA_CLOUD_ACCESS_KEY_SECRET`` environment variables.
+
     Examples
     --------
     >>> upload_score(data, model, ['feat1', 'feat2'], 'score', 'output_table')
@@ -1960,7 +2187,41 @@ def upload_score(data, model, varlist, scr_name, table_name, keeplist = None, re
 
 
 def pull_attributes_in_batch(table_name, varlist, batch_num = 6, unikey = 'flow_id', main_info_select = ['*'], add_query = ''):
-    """ Pull Data from DataWorks in Vertical Batch. """
+    """
+    Pull Data from DataWorks in Vertical Batch.
+
+    The variables are cut into column batches (``cut2pieces``) and every batch is downloaded with its own query, which
+    also selects ``unikey``. The remaining columns come from a separate query and all pieces are merged on ``unikey``.
+
+    Parameters
+    ----------
+    table_name : str
+        Name of the source table.
+    varlist : list of str
+        Names of the attribute columns to pull in vertical batches. At least 6 names are needed (see Notes).
+    batch_num : int, default 6
+        Not used: the number of batches is fixed to 6 inside the function, whatever value is passed.
+    unikey : str, default 'flow_id'
+        Name of the unique key column. It is selected in every batch and used to merge the pieces.
+    main_info_select : list of str, default ['*']
+        Select items of the query that fetches the columns that are not in ``varlist``. The query is built as
+        ``SELECT <items joined by ','> EXCEPT (<varlist>) FROM <table_name> <add_query>``, so it is meant to hold
+        ``'*'`` (the default), and the result must contain ``unikey``.
+    add_query : str, default ''
+        SQL text appended after the table name in every query (for example a ``WHERE`` clause).
+
+    Returns
+    -------
+    pandas.DataFrame
+        The result of the main-info query merged (inner join on ``unikey``) with the columns of every batch.
+
+    Notes
+    -----
+    It needs an ``ODPSRunner`` (the ``odps`` extra and the ``ALIBABA_CLOUD_ACCESS_KEY_ID`` /
+    ``ALIBABA_CLOUD_ACCESS_KEY_SECRET`` environment variables) and downloads with ``cpu_count() - 1`` processes.
+    ``varlist`` is cut with ``cut2pieces(varlist, 6)``, which raises ``ValueError`` for fewer than 6 names and does not
+    always return exactly 6 batches.
+    """
     
     from .ODPS_Tool import ODPSRunner
     import multiprocessing
@@ -2038,56 +2299,60 @@ class DataFrameProcessor:
     def move_column(self, colname, idx, return_kDF=True, h2o_frame=False):
         """
         Move a column to a given position.
-        
+
         Parameters
         ----------
         colname : str
             Name of the column to move.
         idx : int
-            Target position index.
+            Target position (0-based) of the column, with ``list.insert`` semantics.
         return_kDF : bool, default True
-            Whether to return a kDataFrame.
+            Whether to return a kDataFrame. Ignored (treated as False) when ``h2o_frame=True``.
         h2o_frame : bool, default False
             Whether the input is an H2OFrame.
-        
+
         Returns
         -------
         DataFrame or kDataFrame
+            The data of the processor with the columns reordered (see the module-level ``move_column``, which this method
+            calls; ``h2o`` must be installed).
         """
         return move_column(self.data, colname, idx, return_kDF, h2o_frame)
     
     def convert_colnames(self, how="lowercase", return_kDF=True):
         """
         Convert the case of the column names.
-        
+
         Parameters
         ----------
         how : str, default "lowercase"
-            Conversion method.
+            Conversion method: one of 'lower'/'lowercase', 'upper'/'uppercase', 'cap'/'capitalize'.
         return_kDF : bool, default True
             Whether to return a kDataFrame.
-        
+
         Returns
         -------
         DataFrame or kDataFrame
+            The data with the converted column names. The columns of the processor's own ``data`` are renamed in place (see the
+            module-level ``convert_colnames``, which this method calls).
         """
         return convert_colnames(self.data, how, return_kDF)
     
     def col_filter_regex(self, regex, case_sensitive=True, h2o_frame=False, return_kDF=True):
         """
         Filter the columns by a regular expression.
-        
+
         Parameters
         ----------
         regex : str
             Regular expression.
         case_sensitive : bool, default True
-            Whether matching is case-sensitive.
+            Whether matching is case-sensitive (ignored when ``h2o_frame=True``).
         h2o_frame : bool, default False
             Whether the input is an H2OFrame.
         return_kDF : bool, default True
-            Whether to return a kDataFrame.
-        
+            Whether to return a kDataFrame. Ignored (treated as False) when ``h2o_frame=True``.
+
         Returns
         -------
         DataFrame or kDataFrame
@@ -2097,7 +2362,7 @@ class DataFrameProcessor:
     def row_filter_regex(self, col, regex, case_sensitive=True, as_index=False, return_kDF=True):
         """
         Filter the rows by a regular expression.
-        
+
         Parameters
         ----------
         col : str
@@ -2107,10 +2372,10 @@ class DataFrameProcessor:
         case_sensitive : bool, default True
             Whether matching is case-sensitive.
         as_index : bool, default False
-            Whether to use the filter column as the index.
+            Whether to use the filter column as the index. Only honored when ``return_kDF=False``.
         return_kDF : bool, default True
-            Whether to return a kDataFrame.
-        
+            Whether to return a kDataFrame. When True, ``as_index`` has no effect.
+
         Returns
         -------
         DataFrame or kDataFrame
@@ -2120,29 +2385,31 @@ class DataFrameProcessor:
     def get_dtypes(self, outputFile=None, ck_format=False):
         """
         Get the data types.
-        
+
         Parameters
         ----------
         outputFile : str, optional
-            Output file path.
+            Output file path. If given, the table is also written there as CSV, without the index and without a header row.
         ck_format : bool, default False
-            Whether to use a custom format.
-        
+            Reserved for a ClickHouse dtype mapping that SMF does not ship: ``ck_format=True`` raises
+            ``NotImplementedError``, so leave it at False.
+
         Returns
         -------
         pandas.DataFrame
+            The column names and data types (see ``get_dtypes_file``, which this method calls).
         """
         return get_dtypes_file(self.data, outputFile, ck_format)
     
     def drop_tmp_cols(self, drop_list=['py_inserttime']):
         """
         Drop temporary columns.
-        
+
         Parameters
         ----------
         drop_list : list, default ['py_inserttime']
-            List of columns to drop.
-        
+            List of columns to drop. Names that are not columns of the data are ignored.
+
         Returns
         -------
         DataFrame
@@ -2163,41 +2430,48 @@ class DataFrameProcessor:
 class FilePathManager:
     """
     Utility class for managing file paths.
-    
+
     Provide path operations, file listing and directory creation.
-    
+
+    Attributes
+    ----------
+    base_path : str
+        Base path given to the constructor (the current working directory when none is given). It is only stored: none of
+        the methods uses it.
+
     Examples
     --------
     >>> fpm = FilePathManager('/base/path')
-    >>> fpm.get_filenames('.*\\.csv')
-    >>> fpm.mkdir_if_not_exist('output')
+    >>> fpm.get_filenames('/base/path', '.*\\.csv')
+    >>> fpm.mkdir('output')
     """
     
     def __init__(self, base_path=None):
         """
         Initialize the path manager.
-        
+
         Parameters
         ----------
         base_path : str, optional
-            Base path.
+            Base path. The current working directory is used when it is not given (None or empty).
         """
         self.base_path = base_path or os.getcwd()
     
     def get_filenames(self, path, regex):
         """
         Get the list of matching file names.
-        
+
         Parameters
         ----------
         path : str
             Directory path.
         regex : str
             Regular expression.
-        
+
         Returns
         -------
         list
+            The matching file names, searched recursively (see the module-level ``get_filenames``).
         """
         return get_filenames(path, regex)
     
@@ -2221,29 +2495,32 @@ class FilePathManager:
     def mkdir(self, folder_path, replace=False):
         """
         Create a directory.
-        
+
         Parameters
         ----------
         folder_path : str
             Directory path.
         replace : bool, default False
-            Whether to replace an existing directory.
-        
+            Whether to replace an existing directory. An existing directory is not deleted or emptied (see the module-level
+            ``mkdir_if_not_exist``, which this method calls).
+
         Returns
         -------
         int
+            Status code: 0 means success, 1 means the directory already exists (``None`` when ``folder_path`` is ``None``).
         """
         return mkdir_if_not_exist(folder_path, replace)
     
     def get_curr_abs_path(self, path):
         """
         Get the absolute path.
-        
+
         Parameters
         ----------
         path : str
-            Relative path.
-        
+            Relative path, resolved against the directory of the module ``Modeling_Tool/Core/utils.py`` (not against
+            ``base_path``).
+
         Returns
         -------
         str
@@ -2254,14 +2531,14 @@ class FilePathManager:
 class DateTimeUtils:
     """
     Utility class for dates and times.
-    
+
     Provide convenient date- and time-related methods.
-    
+
     Examples
     --------
     >>> dt_utils = DateTimeUtils()
     >>> dt_utils.get_curr_datetime('-')
-    '2025-03-30-143624'
+    '20250330-143624'
     >>> dt_utils.get_last_vintage()
     '202502'
     """
@@ -2356,9 +2633,9 @@ class DateTimeUtils:
 class WOEIVCalculator:
     """
     Utility class for computing WOE and IV.
-    
+
     Provide the WOE and IV calculations commonly used in credit scoring.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
@@ -2367,12 +2644,13 @@ class WOEIVCalculator:
         Name of the column holding the bad-sample proportion.
     good_pct_col : str
         Name of the column holding the good-sample proportion.
-    
+
     Examples
     --------
     >>> calc = WOEIVCalculator(df, 'bad_pct', 'good_pct')
-    >>> calc.woe()
-    >>> calc.iv()
+    >>> calc.calc_woe()
+    >>> calc.calc_iv()
+    >>> woe, iv = calc.calc_both()
     """
     
     def __init__(self, data, bad_pct_col, good_pct_col):
@@ -2395,12 +2673,13 @@ class WOEIVCalculator:
     def calc_woe(self, fillna=True):
         """
         Compute the WOE values.
-        
+
         Parameters
         ----------
         fillna : bool, default True
-            Whether to fill NA with 0.
-        
+            Passed to ``calc_woe`` as ``fillwoe``: the value returned when the data has no rows (0 if True, NaN if False). It
+            does not fill rows with a zero proportion, which give ``inf``, ``-inf`` or NaN.
+
         Returns
         -------
         float or Series
@@ -2410,12 +2689,13 @@ class WOEIVCalculator:
     def calc_iv(self, fillna=True):
         """
         Compute the IV values.
-        
+
         Parameters
         ----------
         fillna : bool, default True
-            Whether to fill NA with 0.
-        
+            Passed to ``calc_iv`` as ``filliv``: the value returned when the data has no rows (0 if True, NaN if False). It
+            does not fill rows with a zero proportion, which give ``inf`` or NaN.
+
         Returns
         -------
         float or Series
@@ -2425,15 +2705,17 @@ class WOEIVCalculator:
     def calc_both(self, fillna=True):
         """
         Compute the WOE and IV together.
-        
+
         Parameters
         ----------
         fillna : bool, default True
-            Whether to fill NA with 0.
-        
+            Used as both ``fillwoe`` and ``filliv``: the value returned when the data has no rows (0 if True, NaN if False). It
+            does not fill rows with a zero proportion.
+
         Returns
         -------
         tuple
+            ``(woe, iv)``: the WOE and the IV, each a Series aligned with the data (the scalars 0 / NaN when the data is empty).
         """
         return _calc_woe_iv_values(
             self.data,
@@ -2445,7 +2727,8 @@ class WOEIVCalculator:
 
 
 def get_feature_names(model, model_type=None):
-    """Get the list of feature names of a model.
+    """
+    Get the list of feature names of a model.
 
     Detect the model type automatically and return its feature names.
     Supports LightGBM, XGBoost, sklearn and other models.
@@ -2455,12 +2738,14 @@ def get_feature_names(model, model_type=None):
     model : object
         Trained machine learning model object.
     model_type : str, optional
-        Model type hint. Allowed values:
+        Model type hint, compared case-insensitively. Allowed values:
 
         - 'lgb' or 'lightgbm': LightGBM model
         - 'xgb' or 'xgboost': XGBoost model
-        - 'sklearn': sklearn model
+        - 'sklearn': sklearn model (the type is detected automatically, as with None)
         - None: detect automatically (default)
+
+        Any other string is handled like None.
 
     Returns
     -------
@@ -2611,7 +2896,8 @@ def get_feature_names_lgb(model):
 
 
 def get_feature_names_xgb(model):
-    """Get the feature names of an XGBoost model.
+    """
+    Get the feature names of an XGBoost model.
 
     Parameters
     ----------
@@ -2621,7 +2907,7 @@ def get_feature_names_xgb(model):
     Returns
     -------
     list
-        List of feature names.
+        List of feature names (an empty list when the booster carries no feature names).
 
     Raises
     ------
@@ -2667,19 +2953,25 @@ def get_feature_names_xgb(model):
 # ============================================================================
 
 def get_feature_names_batch(models, model_type=None):
-    """Get the feature names of multiple models in batch.
+    """
+    Get the feature names of multiple models in batch.
 
     Parameters
     ----------
     models : dict or list
         Model dictionary {name: model} or list of models.
     model_type : str, optional
-        Model type hint.
+        Model type hint (see ``get_feature_names``).
 
     Returns
     -------
     dict or list
         Dictionary or list of feature names, matching the structure of the input.
+
+    Raises
+    ------
+    TypeError
+        If ``models`` is neither a dict nor a list.
 
     Examples
     --------

@@ -96,7 +96,38 @@ def make_model_artifact(
     model_name: Optional[str] = None,
     model_version: Optional[str] = None,
 ):
-    """Create an in-memory SMF model artifact without writing it to disk."""
+    """Create an in-memory SMF model artifact without writing it to disk.
+
+    Parameters
+    ----------
+    model : object
+        Model object to wrap. It is referenced, not copied.
+    metadata : dict, optional
+        Additional or overriding metadata fields. They are applied last, so a key given here replaces the generated
+        value of the same name (including ``model_name`` and ``model_version`` passed as arguments).
+    feature_cols : list-like, optional
+        Training feature list. A single string is stored as a one-element list and any other iterable is stored as a
+        list.
+    woe_mapping_path : str, optional
+        Path to the WOE mapping table used by the model.
+    train_window : dict, optional
+        Training / validation / OOT sample window metadata.
+    metrics : dict, optional
+        Evaluation metrics such as AUC / KS by dataset.
+    model_name : str, optional
+        Business model name.
+    model_version : str, optional
+        Business model version.
+
+    Returns
+    -------
+    dict
+        The artifact envelope with the keys ``"__smf_model_artifact__"`` (``True``), ``"artifact_version"``
+        (``"1.0"``), ``"model"`` (the object passed in) and ``"metadata"``. The ``"metadata"`` dict holds
+        ``smf_version``, ``artifact_version``, ``model_name``, ``model_version``, ``model_class``, ``model_module``,
+        ``feature_cols``, ``woe_mapping_path``, ``train_window``, ``metrics``, ``created_at`` (UTC ISO timestamp),
+        ``python_version`` and ``platform``, updated with the entries of ``metadata``.
+    """
     artifact_metadata = _build_model_metadata(
         model=model,
         metadata=metadata,
@@ -179,6 +210,23 @@ def load_model(model_path, return_metadata: bool = False):
 
     By default this keeps backward compatibility and returns only the model
     object.  Set ``return_metadata=True`` to receive ``(model, metadata)``.
+
+    Parameters
+    ----------
+    model_path : str or path-like
+        Path of a file written by ``save_model`` (an SMF artifact) or by ``joblib.dump`` (a raw model object).
+    return_metadata : bool, default False
+        If False, return only the model object. If True, return a ``(model, metadata)`` tuple.
+
+    Returns
+    -------
+    object or tuple
+        The model object, or ``(model, metadata)`` when ``return_metadata=True``. ``metadata`` is the dict stored in
+        the artifact, and an empty dict ``{}`` for a legacy raw-model file.
+
+    Notes
+    -----
+    The file is read with ``joblib.load``, which unpickles it: load only files from a trusted source.
     """
     obj = joblib.load(model_path)
     if _is_smf_model_artifact(obj):
@@ -192,6 +240,21 @@ def load_model_metadata(model_path):
     """Load only metadata from an SMF model artifact.
 
     Legacy raw-model files return an empty dict.
+
+    Parameters
+    ----------
+    model_path : str or path-like
+        Path of a file written by ``save_model`` (an SMF artifact) or by ``joblib.dump`` (a raw model object).
+
+    Returns
+    -------
+    dict
+        The metadata dict stored in the artifact, or an empty dict ``{}`` for a legacy raw-model file.
+
+    Notes
+    -----
+    The whole file is deserialized with ``joblib.load``, model included, so this is not cheaper than ``load_model``,
+    and the same trust requirement applies: load only files from a trusted source.
     """
     obj = joblib.load(model_path)
     if _is_smf_model_artifact(obj):
