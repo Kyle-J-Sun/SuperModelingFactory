@@ -1,19 +1,19 @@
 # ============================================================================
-# cdc_data_converter.py — CDC 征信数据格式双向转换工具
+# cdc_data_converter.py — Bidirectional conversion tool for CDC credit bureau data formats
 # ============================================================================
-# 功能:
-#   1) df_to_json(drv_df, input_vars)    — 将 drv_df DataFrame 转换为 expected JSON 格式
-#   2) json_to_df(json_data, input_vars) — 将 JSON 格式还原为 drv_df DataFrame
+# Features:
+#   1) df_to_json(drv_df, input_vars)    — Convert the drv_df DataFrame to the expected JSON format
+#   2) json_to_df(json_data, input_vars) — Restore the drv_df DataFrame from the JSON format
 #
-# 使用场景:
-#   drv_df 是从 ODPS SQL 查询返回的 pandas DataFrame，每行代表一条征信账户记录，
-#   所有行共享同一组元信息（requestid / listingid / pulllogid / inserttime），
-#   但每行对应不同的 input_vars 变量值（account_open_days / pagoactual 等）。
+# Use case:
+#   drv_df is a pandas DataFrame returned by an ODPS SQL query; each row is one credit bureau account record,
+#   all rows share the same set of metadata (requestid / listingid / pulllogid / inserttime),
+#   but each row carries different values of the input_vars variables (account_open_days / pagoactual, etc.).
 #
-#   JSON 格式将元信息提升为标量字段，input_vars 变成长度相等的数组放在
-#   cdc_credit_inputs 下，便于下游 API 消费和序列化传输。
+#   The JSON format promotes the metadata to scalar fields, and the input_vars become equal-length arrays placed
+#   under cdc_credit_inputs, which makes them easy for downstream APIs to consume and to serialize for transport.
 #
-# 数据格式对照:
+# Data format comparison:
 #
 #   drv_df (DataFrame):
 #   ┌──────────────┬───────────┬──────────┬──────────────┬───────────────────┬────────────┬───────────────┬─────────────────┬──────────────────┐
@@ -50,16 +50,16 @@ import pandas as pd
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 辅助函数
+# Helper functions
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _safe_json_value(val: Any) -> Any:
-    """将 numpy / pandas 类型转换为 JSON 友好的 Python 原生类型。
+    """Convert numpy / pandas types to JSON-friendly native Python types.
 
-    特别处理:
+    Special handling:
       - numpy NaN / Inf → None (JSON null)
       - Python native float NaN / Inf → None (JSON null)
-      - 其他 numpy/pandas 类型 → Python 原生类型
+      - Other numpy/pandas types → native Python types
     """
     if val is None:
         return None
@@ -70,7 +70,7 @@ def _safe_json_value(val: Any) -> Any:
             return None
         return float(val)
     if isinstance(val, float):
-        # 兜底: Python 原生 float 的 NaN / Inf
+        # Fallback: NaN / Inf of a native Python float
         if math.isnan(val) or math.isinf(val):
             return None
         return val
@@ -84,55 +84,55 @@ def _safe_json_value(val: Any) -> Any:
 
 
 def _safe_series_to_list(series: pd.Series) -> List[Any]:
-    """将 pandas Series 转换为 Python list，同时处理 numpy 类型转换和 NaN 替换。"""
-    # 先用 object 类型兜底，避免 numpy 类型的 JSON 序列化问题
+    """Convert a pandas Series to a Python list, handling numpy type conversion and NaN replacement."""
+    # Fall back to object type first to avoid JSON serialization problems with numpy types
     return [_safe_json_value(v) for v in series.to_list()]
 
 
 def _sanitize_for_json(obj: Any) -> Any:
-    """递归遍历数据结构，将所有 NaN / Inf 值替换为 None (JSON null)。
+    """Recursively traverse a data structure and replace every NaN / Inf value with None (JSON null).
 
-    这是一道兜底防线 —— 确保任何通过 json.dump / json.dumps 写出的数据
-    都是严格合法的 JSON，不会出现 ``NaN`` / ``Infinity`` / ``-Infinity`` 等
-    非标准 token。
+    This is a safety net: it ensures that any data written through json.dump / json.dumps
+    is strictly valid JSON and never contains non-standard tokens such as ``NaN`` / ``Infinity`` /
+    ``-Infinity``.
 
-    同时处理深藏在嵌套 dict / list 中的 numpy 标量类型。
+    It also handles numpy scalar types buried deep inside nested dicts / lists.
     """
-    # ── 标量: float NaN / Inf ──
+    # ── Scalar: float NaN / Inf ──
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return None
         return obj
 
-    # ── numpy 浮点标量 ──
+    # ── numpy float scalars ──
     if isinstance(obj, (np.floating,)):
         val = float(obj)
         if math.isnan(val) or math.isinf(val):
             return None
         return val
 
-    # ── 其他 numpy 标量 ──
+    # ── Other numpy scalars ──
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, np.bool_):
         return bool(obj)
 
-    # ── numpy 数组 → 递归处理 ──
+    # ── numpy arrays → process recursively ──
     if isinstance(obj, np.ndarray):
         return _sanitize_for_json(obj.tolist())
 
-    # ── 容器: 深度优先递归 ──
+    # ── Containers: depth-first recursion ──
     if isinstance(obj, dict):
         return {k: _sanitize_for_json(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(v) for v in obj]
 
-    # ── 其他类型原样返回 ──
+    # ── Return other types unchanged ──
     return obj
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 核心转换函数
+# Core conversion functions
 # ═══════════════════════════════════════════════════════════════════════════
 
 def df_to_json(
@@ -140,42 +140,42 @@ def df_to_json(
     input_vars: Optional[List[str]] = None,
     metadata_cols: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """将 drv_df DataFrame 转换为 JSON 格式。
+    """Convert a drv_df DataFrame to the JSON format.
 
-    两种模式:
-      - 分区模式 (input_vars 指定):
-          元信息列（非 input_vars 列）提取为标量，input_vars 列收集为数组
-          放入 cdc_credit_inputs 下。
-          输出: {"<meta>": <scalar>, ..., "cdc_credit_inputs": {"<var>": [...], ...}}
+    Two modes:
+      - Partitioned mode (input_vars specified):
+          Metadata columns (the columns that are not in input_vars) are extracted as scalars, and the input_vars
+          columns are collected into arrays placed under cdc_credit_inputs.
+          Output: {"<meta>": <scalar>, ..., "cdc_credit_inputs": {"<var>": [...], ...}}
 
-      - 平铺模式 (input_vars=None):
-          所有列都作为数组放在一级 JSON 下，不再区分 metadata / input_vars。
-          输出: {"<col_1>": [...], "<col_2>": [...], ...}
+      - Flat mode (input_vars=None):
+          All columns are placed as arrays at the top level of the JSON, with no distinction between metadata / input_vars.
+          Output: {"<col_1>": [...], "<col_2>": [...], ...}
 
     Parameters
     ----------
     drv_df : pd.DataFrame
-        源 DataFrame，每行一条记录。
+        Source DataFrame, one record per row.
     input_vars : Optional[List[str]]
-        入模特征列名列表。为 None 时使用平铺模式，所有列均为数组。
+        List of model input feature column names. If None, flat mode is used and every column becomes an array.
     metadata_cols : Optional[List[str]]
-        分区模式下显式指定元信息列。平铺模式下忽略。
+        Metadata columns to specify explicitly in partitioned mode. Ignored in flat mode.
 
     Returns
     -------
     Dict[str, Any]
-        JSON 格式的字典。
+        Dictionary in JSON format.
 
     Raises
     ------
     ValueError
-        分区模式下，如果 metadata 列值不一致。
+        In partitioned mode, if the metadata column values are inconsistent.
     KeyError
-        如果 input_vars 中的列在 DataFrame 中不存在。
+        If a column in input_vars does not exist in the DataFrame.
     """
-    # ── 平铺模式: 所有列直接作为一级字段 ──
-    #   - 单行 DataFrame → 值直接为标量
-    #   - 多行 DataFrame → 值为数组
+    # ── Flat mode: all columns become top-level fields directly ──
+    #   - Single-row DataFrame → values are scalars
+    #   - Multi-row DataFrame → values are arrays
     if input_vars is None:
         result: Dict[str, Any] = {}
         if len(drv_df) == 1:
@@ -187,11 +187,11 @@ def df_to_json(
                 result[col] = _safe_series_to_list(drv_df[col])
         return result
 
-    # ── 分区模式 (原有逻辑) ──
+    # ── Partitioned mode (original logic) ──
     missing_cols = set(input_vars) - set(drv_df.columns)
     if missing_cols:
         raise KeyError(
-            f"input_vars 中的列在 DataFrame 中不存在: {missing_cols}"
+            f"Columns in input_vars do not exist in the DataFrame: {missing_cols}"
         )
 
     if metadata_cols is None:
@@ -200,26 +200,26 @@ def df_to_json(
     missing_meta = set(metadata_cols) - set(drv_df.columns)
     if missing_meta:
         raise KeyError(
-            f"metadata_cols 中的列在 DataFrame 中不存在: {missing_meta}"
+            f"Columns in metadata_cols do not exist in the DataFrame: {missing_meta}"
         )
 
-    # 校验 metadata 列的值在整个 DataFrame 中是否一致
+    # Check that the metadata column values are consistent across the whole DataFrame
     for col in metadata_cols:
         unique_vals = drv_df[col].drop_duplicates()
         if len(unique_vals) > 1:
             raise ValueError(
-                f"元信息列 '{col}' 存在多个不同的值: {unique_vals.to_list()}。"
-                f"预期 metadata 列在所有行中保持一致，请检查数据或调整 metadata_cols 参数。"
+                f"Metadata column '{col}' has multiple distinct values: {unique_vals.to_list()}. "
+                f"Metadata columns are expected to be constant across all rows; check the data or adjust the metadata_cols argument."
             )
 
     result = {}
 
-    # 1) 元信息: 取自第一行
+    # 1) Metadata: taken from the first row
     first_row = drv_df.iloc[0]
     for col in metadata_cols:
         result[col] = _safe_json_value(first_row[col])
 
-    # 2) cdc_credit_inputs: 每个 input_var 的值收集为数组
+    # 2) cdc_credit_inputs: collect the values of each input_var into an array
     cdc_credit_inputs: Dict[str, List[Any]] = {}
     for col in input_vars:
         cdc_credit_inputs[col] = _safe_series_to_list(drv_df[col])
@@ -236,24 +236,24 @@ def df_to_json_custom(
     metadata_cols: Optional[List[str]] = None,
     unwrap_single: bool = True,
 ) -> Dict[str, Any]:
-    """将 drv_df DataFrame 转换为分区 JSON 格式，支持自定义二级 key 和自动解包。
+    """Convert a drv_df DataFrame to the partitioned JSON format, with a custom second-level key and automatic unwrapping.
 
-    与 df_to_json 分区模式类似，但:
-      - 二级 JSON 的 key 名称可自定义（通过 inputs_key）
-      - 二级 JSON 中长度为 1 的数组自动解包为标量（通过 unwrap_single）
+    Similar to the partitioned mode of df_to_json, but:
+      - The key name of the second-level JSON can be customized (via inputs_key)
+      - Arrays of length 1 in the second-level JSON are automatically unwrapped to scalars (via unwrap_single)
 
     Parameters
     ----------
     drv_df : pd.DataFrame
-        源 DataFrame。
+        Source DataFrame.
     input_vars : List[str]
-        放入二级 JSON 的列名列表。
+        Names of the columns placed in the second-level JSON.
     inputs_key : str
-        二级 JSON 的 key 名称，默认 "inputs"。
+        Key name of the second-level JSON; default "inputs".
     metadata_cols : Optional[List[str]]
-        一级元信息列。为 None 时自动推导（非 input_vars 的列）。
+        Top-level metadata columns. If None, they are derived automatically (the columns that are not in input_vars).
     unwrap_single : bool
-        是否将二级 JSON 中长度为 1 的数组解包为标量。默认 True。
+        Whether to unwrap arrays of length 1 in the second-level JSON to scalars. Default True.
 
     Returns
     -------
@@ -277,11 +277,11 @@ def df_to_json_custom(
     >>> df_to_json_custom(df_single, input_vars=['x','y'], inputs_key='features')
     {'req': 'a', 'features': {'x': 1, 'y': 3}}
     """
-    # ── 参数校验 ──
+    # ── Argument validation ──
     missing_cols = set(input_vars) - set(drv_df.columns)
     if missing_cols:
         raise KeyError(
-            f"input_vars 中的列在 DataFrame 中不存在: {missing_cols}"
+            f"Columns in input_vars do not exist in the DataFrame: {missing_cols}"
         )
 
     if metadata_cols is None:
@@ -290,27 +290,27 @@ def df_to_json_custom(
     missing_meta = set(metadata_cols) - set(drv_df.columns)
     if missing_meta:
         raise KeyError(
-            f"metadata_cols 中的列在 DataFrame 中不存在: {missing_meta}"
+            f"Columns in metadata_cols do not exist in the DataFrame: {missing_meta}"
         )
 
-    # 校验 metadata 列的值在整个 DataFrame 中是否一致
+    # Check that the metadata column values are consistent across the whole DataFrame
     for col in metadata_cols:
         unique_vals = drv_df[col].drop_duplicates()
         if len(unique_vals) > 1:
             raise ValueError(
-                f"元信息列 '{col}' 存在多个不同的值: {unique_vals.to_list()}。"
-                f"预期 metadata 列在所有行中保持一致，请检查数据或调整 metadata_cols 参数。"
+                f"Metadata column '{col}' has multiple distinct values: {unique_vals.to_list()}. "
+                f"Metadata columns are expected to be constant across all rows; check the data or adjust the metadata_cols argument."
             )
 
-    # ── 构建输出 ──
+    # ── Build the output ──
     result: Dict[str, Any] = {}
 
-    # 1) 元信息标量
+    # 1) Metadata scalars
     first_row = drv_df.iloc[0]
     for col in metadata_cols:
         result[col] = _safe_json_value(first_row[col])
 
-    # 2) 二级 JSON: 自定义 key + 单元素自动解包
+    # 2) Second-level JSON: custom key + automatic unwrapping of single elements
     inputs: Dict[str, Any] = {}
     for col in input_vars:
         arr = _safe_series_to_list(drv_df[col])
@@ -329,12 +329,12 @@ def json_to_df(
     input_vars: Optional[List[str]] = None,
     metadata_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """将 JSON 格式还原为 DataFrame（自动检测三种格式）。
+    """Restore a DataFrame from the JSON format (the three formats are detected automatically).
 
-    三种模式:
-      1) Row-Oriented 模式 (JSON 有 cdc_query_credits key)——NEW
-           一级标量为 metadata，cdc_query_credits 为对象数组，每个对象一行。
-           输出: metadata 列广播到所有行 + 对象字段展开为列。
+    Three modes:
+      1) Row-Oriented mode (the JSON has a cdc_query_credits key) - NEW
+           Top-level scalars are metadata and cdc_query_credits is an array of objects, one row per object.
+           Output: the metadata columns are broadcast to all rows + the object fields are expanded into columns.
 
            {
                "requestId": "req@123", "pullLogId": 3836171, ...,
@@ -344,8 +344,8 @@ def json_to_df(
                ]
            }
 
-      2) 分区模式 (JSON 有 cdc_credit_inputs key)
-           从 cdc_credit_inputs 取数组列，其余一级 key 为 metadata scalars。
+      2) Partitioned mode (the JSON has a cdc_credit_inputs key)
+           The array columns are taken from cdc_credit_inputs; all other top-level keys are metadata scalars.
 
            {
                "requestid": "req_001", "pulllogid": 3836171, ...,
@@ -355,28 +355,28 @@ def json_to_df(
                }
            }
 
-      3) 平铺模式 (JSON 无 cdc_credit_inputs 也无 cdc_query_credits)
-           所有一级 key 均为列名，list 值展开为行，scalar 值广播。
+      3) Flat mode (the JSON has neither cdc_credit_inputs nor cdc_query_credits)
+           All top-level keys are column names; list values are expanded into rows and scalar values are broadcast.
 
     Parameters
     ----------
     json_data : Union[str, Dict[str, Any]]
-        JSON 字符串或字典。
+        JSON string or dictionary.
     input_vars : Optional[List[str]]
-        分区模式下的入模特征列名。为 None 时自动检测 JSON 格式。
-        注: row-oriented 模式下忽略此参数（cdc_query_credits 中的全部字段均展开）。
+        Model input feature column names in partitioned mode. If None, the JSON format is detected automatically.
+        Note: this argument is ignored in row-oriented mode (all fields in cdc_query_credits are expanded).
     metadata_cols : Optional[List[str]]
-        元信息列名。为 None 时自动推导（非 cdc_* 的一级 key）。
+        Metadata column names. If None, they are derived automatically (top-level keys other than cdc_*).
 
     Returns
     -------
     pd.DataFrame
-        还原后的 DataFrame，metadata 列在前，数据列在后。
+        The restored DataFrame, with the metadata columns first and the data columns after.
 
     Raises
     ------
     ValueError
-        如果数组长度不一致，或 cdc_query_credits 不是数组。
+        If the array lengths are inconsistent, or cdc_query_credits is not an array.
     """
     if isinstance(json_data, str):
         data = json.loads(json_data)
@@ -387,22 +387,22 @@ def json_to_df(
     has_cdc_credits = "cdc_query_credits" in data
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 模式 1: Row-Oriented — cdc_query_credits（NEW）
+    # Mode 1: Row-Oriented — cdc_query_credits (NEW)
     # ═══════════════════════════════════════════════════════════════════════
     if has_cdc_credits:
         credits = data["cdc_query_credits"]
         if not isinstance(credits, list):
             raise ValueError(
-                f"cdc_query_credits 必须是数组，实际类型为 {type(credits).__name__}"
+                f"cdc_query_credits must be an array, got type {type(credits).__name__}"
             )
 
-        # 从对象数组构建 DataFrame
+        # Build the DataFrame from the array of objects
         if len(credits) == 0:
             df = pd.DataFrame()
         else:
             df = pd.DataFrame(credits)
 
-        # 广播一级 metadata 标量到所有行
+        # Broadcast the top-level metadata scalars to all rows
         for key, val in data.items():
             if key == "cdc_query_credits":
                 continue
@@ -411,7 +411,7 @@ def json_to_df(
             else:
                 df[key] = val
 
-        # 列排序: metadata 在前 → 数据字段在后
+        # Column order: metadata first → data fields after
         meta_cols_result = [k for k in data if k != "cdc_query_credits"]
         credit_cols_result = [c for c in df.columns if c not in meta_cols_result]
         df = df[meta_cols_result + credit_cols_result]
@@ -419,21 +419,21 @@ def json_to_df(
         return df
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 模式 2 & 3: cdc_credit_inputs 分区模式 / 平铺模式
+    # Modes 2 & 3: cdc_credit_inputs partitioned mode / flat mode
     # ═══════════════════════════════════════════════════════════════════════
 
-    # ── 自动检测: input_vars 未指定时的处理 ──
+    # ── Auto-detection: handling when input_vars is not specified ──
     if input_vars is None:
         if has_cdc_inputs:
-            # 分区模式: input_vars = cdc_credit_inputs 的全部 key
+            # Partitioned mode: input_vars = all keys of cdc_credit_inputs
             input_vars = list(data["cdc_credit_inputs"].keys())
         else:
-            # 平铺模式: 所有 list 值都是列
-            input_vars = []  # 无特殊 input_vars 区分
+            # Flat mode: every list value is a column
+            input_vars = []  # no special input_vars distinction
 
-    # ── 模式 3: 平铺模式: 所有一级 key 直接作为列 ──
+    # ── Mode 3: flat mode: all top-level keys become columns directly ──
     if not has_cdc_inputs:
-        # 找到所有 list 列和 scalar 列
+        # Find all list columns and scalar columns
         list_cols = {}
         scalar_cols = {}
         n_rows = 0
@@ -444,14 +444,14 @@ def json_to_df(
                     n_rows = len(val)
                 elif len(val) != n_rows:
                     raise ValueError(
-                        f"数组长度不一致: 期望 {n_rows}，'{key}' 长度为 {len(val)}"
+                        f"Inconsistent array lengths: expected {n_rows}, but '{key}' has length {len(val)}"
                     )
             else:
                 scalar_cols[key] = val
 
         if n_rows == 0:
-            # 没有 list 列时: 若存在 scalar 列，构造单行 DataFrame;
-            # 否则（空 JSON）返回空 DataFrame。
+            # With no list columns: if there are scalar columns, build a single-row DataFrame;
+            # otherwise (empty JSON) return an empty DataFrame.
             if scalar_cols:
                 return pd.DataFrame([scalar_cols])
             return pd.DataFrame()
@@ -461,16 +461,16 @@ def json_to_df(
             df[key] = val
         return df
 
-    # ── 模式 2: 分区模式 (原有逻辑) ──
+    # ── Mode 2: partitioned mode (original logic) ──
     cdc_inputs = data["cdc_credit_inputs"]
 
     missing_inputs = set(input_vars) - set(cdc_inputs.keys())
     if missing_inputs:
         raise ValueError(
-            f"input_vars 中的字段在 cdc_credit_inputs 中不存在: {missing_inputs}"
+            f"Fields in input_vars do not exist in cdc_credit_inputs: {missing_inputs}"
         )
 
-    # 校验所有数组长度一致
+    # Check that all array lengths are consistent
     lengths: Dict[str, int] = {}
     for key in cdc_inputs:
         if isinstance(cdc_inputs[key], list):
@@ -482,14 +482,14 @@ def json_to_df(
         for key, length in lengths.items():
             if length != ref_len:
                 raise ValueError(
-                    f"cdc_credit_inputs 中数组长度不一致: "
-                    f"'{ref_key}' 长度为 {ref_len}，但 '{key}' 长度为 {length}"
+                    f"Inconsistent array lengths in cdc_credit_inputs: "
+                    f"'{ref_key}' has length {ref_len}, but '{key}' has length {length}"
                 )
         n_rows = ref_len
     else:
         n_rows = 0
 
-    # 构建 DataFrame
+    # Build the DataFrame
     df = pd.DataFrame({col: cdc_inputs[col] for col in input_vars})
 
     extra_input_cols = [k for k in cdc_inputs if k not in input_vars]
@@ -514,7 +514,7 @@ def json_to_df(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 便捷函数: JSON 字符串序列化 / 反序列化
+# Convenience functions: JSON string serialization / deserialization
 # ═══════════════════════════════════════════════════════════════════════════
 
 def df_to_json_string(
@@ -524,7 +524,7 @@ def df_to_json_string(
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
 ) -> str:
-    """df_to_json 的便捷封装，直接返回 JSON 字符串。"""
+    """Convenience wrapper around df_to_json that returns the JSON string directly."""
     result = df_to_json(drv_df, input_vars, metadata_cols)
     result = _sanitize_for_json(result)
     return json.dumps(result, indent=indent, ensure_ascii=ensure_ascii)
@@ -535,7 +535,7 @@ def json_string_to_df(
     input_vars: Optional[List[str]] = None,
     metadata_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """json_to_df 的便捷封装，接受 JSON 字符串输入。"""
+    """Convenience wrapper around json_to_df that accepts a JSON string as input."""
     return json_to_df(json_string, input_vars, metadata_cols)
 
 
@@ -547,27 +547,27 @@ def df_to_json_file(
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
 ) -> str:
-    """将 drv_df DataFrame 转换为 expected JSON 格式并写入 .json 文件。
+    """Convert a drv_df DataFrame to the expected JSON format and write it to a .json file.
 
     Parameters
     ----------
     drv_df : pd.DataFrame
-        源 DataFrame，每行一条征信账户记录。
+        Source DataFrame, one credit bureau account record per row.
     input_vars : List[str]
-        入模特征列名列表。
+        List of model input feature column names.
     output_path : str
-        输出 .json 文件的路径。
+        Path of the output .json file.
     metadata_cols : Optional[List[str]]
-        显式指定元信息列名。为 None 时自动推导。
+        Metadata column names to specify explicitly. If None, they are derived automatically.
     indent : Optional[int]
-        JSON 缩进空格数。None 表示紧凑输出（单行），默认 2。
+        Number of spaces used to indent the JSON. None means compact output (single line); default 2.
     ensure_ascii : bool
-        是否将非 ASCII 字符转义为 \\uXXXX。默认 False，保留中文等原始字符。
+        Whether to escape non-ASCII characters as \\uXXXX. Default False, which keeps non-ASCII characters (such as CJK text) as they are.
 
     Returns
     -------
     str
-        写入文件的绝对路径。
+        Absolute path of the written file.
     """
     result = df_to_json(drv_df, input_vars, metadata_cols)
     result = _sanitize_for_json(result)
@@ -576,17 +576,17 @@ def df_to_json_file(
     return os.path.abspath(output_path)
 
 def load_json_file(file_path: str) -> Dict[str, Any]:
-    """从 .json 文件加载为字典。
+    """Load a .json file into a dictionary.
 
     Parameters
     ----------
     file_path : str
-        .json 文件的路径。
+        Path of the .json file.
 
     Returns
     -------
     Dict[str, Any]
-        解析后的字典，结构符合 expected JSON 格式。
+        The parsed dictionary, whose structure follows the expected JSON format.
     """
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -598,23 +598,23 @@ def json_to_file(
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
 ) -> str:
-    """将 Python dict 写入 .json 文件。
+    """Write a Python dict to a .json file.
 
     Parameters
     ----------
     data : Dict[str, Any]
-        待写入的字典。
+        Dictionary to write.
     output_path : str
-        输出 .json 文件路径。
+        Path of the output .json file.
     indent : Optional[int]
-        JSON 缩进空格数。None 表示紧凑单行，默认 2。
+        Number of spaces used to indent the JSON. None means compact single-line output; default 2.
     ensure_ascii : bool
-        是否转义非 ASCII 字符。默认 False。
+        Whether to escape non-ASCII characters. Default False.
 
     Returns
     -------
     str
-        写入文件的绝对路径。
+        Absolute path of the written file.
     """
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(_sanitize_for_json(data), f, indent=indent, ensure_ascii=ensure_ascii)

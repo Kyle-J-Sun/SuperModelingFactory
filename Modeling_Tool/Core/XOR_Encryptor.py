@@ -5,55 +5,55 @@ import numpy as np
 
 class TextEncryptor:
     """
-    基于XOR算法的文本加密解密工具类。
+    Text encryption and decryption utility class based on the XOR algorithm.
 
-    该类提供文本加密和解密功能，支持单个字符串以及整个Pandas DataFrame的加解密操作。
-    加密后的数据使用Base64 URL安全编码，便于存储和传输。
+    The class provides text encryption and decryption, and supports both single strings and entire pandas DataFrames.
+    Encrypted data is encoded as URL-safe Base64, which makes it easy to store and transmit.
 
     Attributes:
-        key (str): 加密解密使用的密钥。如果为None，则使用空字符串作为密钥。
-        suffix (str): DataFrame列名加密后的后缀，默认为'_encrypted'。
+        key (str): Key used for encryption and decryption. If None, an empty string is used as the key.
+        suffix (str): Suffix appended to DataFrame column names after encryption. Defaults to '_encrypted'.
 
     Example:
         >>> encryptor = TextEncryptor(key="my_secret_key")
         >>> encrypted = encryptor.encrypt("Hello World")
         >>> decrypted = encryptor.decrypt(encrypted)
-        >>> print(decrypted)  # 输出: Hello World
+        >>> print(decrypted)  # Output: Hello World
     """
 
     def __init__(self, key=None, suffix='_encrypted'):
         """
-        初始化加密器实例。
+        Initialize the encryptor instance.
 
         Parameters:
-            key (str, optional): 加密解密使用的密钥。如果为None，则使用空字符串作为密钥。
-                               注意：使用空密钥加密后的数据将不具有保密性。
-            suffix (str, optional): 当对DataFrame进行加密时，列名添加的后缀。
-                                  默认为'_encrypted'。解密时会移除此后缀。
+            key (str, optional): Key used for encryption and decryption. If None, an empty string is used as the key.
+                               Note: data encrypted with an empty key is not confidential.
+            suffix (str, optional): Suffix appended to column names when a DataFrame is encrypted.
+                                  Defaults to '_encrypted'. The suffix is removed on decryption.
         """
         self.key = key
         self.suffix = suffix
 
     def encrypt(self, text):
         """
-        对输入的文本进行加密。
+        Encrypt the input text.
 
-        使用XOR算法将明文与密钥进行异或操作，然后通过Base64 URL安全编码输出。
-        加密结果包含原始文本长度信息（前2个字节），用于解密时的验证。
+        XOR the plaintext with the key, then output the result as URL-safe Base64.
+        The encrypted result carries the original text length (the first 2 bytes), which is used for validation during decryption.
 
         Parameters:
-            text (str): 需要加密的明文字符串。
+            text (str): Plaintext string to encrypt.
 
         Returns:
-            str: 加密后的字符串，使用Base64 URL安全编码。
+            str: Encrypted string, encoded as URL-safe Base64.
 
         Raises:
-            AttributeError: 如果key属性为None（self.key为None时，实际使用空字符串）。
+            AttributeError: If the key attribute is None (when self.key is None, an empty string is actually used).
 
         Example:
             >>> encryptor = TextEncryptor(key="secret")
             >>> encrypted = encryptor.encrypt("Hello")
-            >>> print(encrypted)  # 输出类似: aAAAAS垂涎==
+            >>> print(encrypted)  # Output: AAU7AA8eCg==
         """
         # Text to bytes
         text_bytes = text.encode('utf-8')
@@ -74,28 +74,28 @@ class TextEncryptor:
 
     def decrypt(self, encrypted_text):
         """
-        对加密后的文本进行解密。
+        Decrypt previously encrypted text.
 
-        首先使用Base64解码，然后提取长度信息（前2字节），接着使用XOR算法与密钥进行异或操作恢复明文。
-        解密后会验证恢复文本的长度是否与存储的长度信息匹配，以确保数据完整性。
+        Decode the Base64 string, extract the length information (the first 2 bytes), then XOR the remaining bytes with the key to recover the plaintext.
+        After decryption, the length of the recovered text is checked against the stored length to ensure data integrity.
 
         Parameters:
-            encrypted_text (str): 经过encrypt方法加密的Base64编码字符串。
+            encrypted_text (str): Base64-encoded string produced by the encrypt method.
 
         Returns:
-            str: 解密后的原始明文字符串。
+            str: Original plaintext string after decryption.
 
         Raises:
-            ValueError: 如果解密失败，可能原因包括：
-                       - Base64解码失败（输入不是有效的Base64字符串）
-                       - 长度验证失败（数据被篡改或使用了不同的密钥）
-                       - 其他解码错误
+            ValueError: If decryption fails. Possible causes include:
+                       - Base64 decoding failed (the input is not a valid Base64 string)
+                       - Length validation failed (the data was tampered with or a different key was used)
+                       - Other decoding errors
 
         Example:
             >>> encryptor = TextEncryptor(key="secret")
             >>> encrypted = encryptor.encrypt("Hello")
             >>> decrypted = encryptor.decrypt(encrypted)
-            >>> print(decrypted)  # 输出: Hello
+            >>> print(decrypted)  # Output: Hello
         """
         try:
             # b64 decryption
@@ -124,34 +124,34 @@ class TextEncryptor:
 
     def encrypt_dataframe(self, data):
         """
-        对整个Pandas DataFrame进行加密。
+        Encrypt an entire pandas DataFrame.
 
-        将DataFrame中的所有列值转换为字符串格式后进行加密，同时为列名添加指定的后缀。
-        该方法返回一个全新的DataFrame，原始数据不会被修改。
+        Convert all column values of the DataFrame to strings and encrypt them, and append the configured suffix to the column names.
+        The method returns a new DataFrame; the original data is not modified.
 
         Parameters:
-            data (pandas.DataFrame): 需要加密的Pandas DataFrame对象。
-                                   所有列的值都会被转换为字符串格式进行加密。
+            data (pandas.DataFrame): pandas DataFrame to encrypt.
+                                   The values of all columns are converted to strings before encryption.
 
         Returns:
-            pandas.DataFrame: 加密后的新DataFrame，具有以下特点：
-                             - 所有列值都经过加密，使用Base64编码
-                             - 所有列名都添加了初始化时指定的后缀（默认为'_encrypted'）
-                             - 返回的是副本，原始DataFrame保持不变
+            pandas.DataFrame: New encrypted DataFrame with the following properties:
+                             - All column values are encrypted and Base64-encoded
+                             - All column names carry the suffix specified at initialization (default '_encrypted')
+                             - A copy is returned; the original DataFrame is unchanged
 
         Raises:
-            AttributeError: 如果key属性为None导致加密失败。
+            AttributeError: If encryption fails because the key attribute is None.
 
         Note:
-            - 加密后的DataFrame无法直接用于数据分析，必须先解密
-            - 建议在加密前备份原始DataFrame的列名对应关系
+            - An encrypted DataFrame cannot be used directly for data analysis; it must be decrypted first
+            - Back up the mapping of the original DataFrame column names before encrypting
 
         Example:
             >>> import pandas as pd
             >>> df = pd.DataFrame({'name': ['Alice', 'Bob'], 'age': [25, 30]})
             >>> encryptor = TextEncryptor(key="secret")
             >>> encrypted_df = encryptor.encrypt_dataframe(df)
-            >>> print(encrypted_df.columns.tolist())  # 输出: ['name_encrypted', 'age_encrypted']
+            >>> print(encrypted_df.columns.tolist())  # Output: ['name_encrypted', 'age_encrypted']
         """
         res = data.copy()
         collist = data.columns.tolist()
@@ -164,31 +164,31 @@ class TextEncryptor:
 
     def decrypt_dataframe(self, data):
         """
-        对加密后的Pandas DataFrame进行解密。
+        Decrypt an encrypted pandas DataFrame.
 
-        遍历DataFrame中的所有列，对每个列值进行解密，同时移除列名中的加密后缀。
-        该方法返回一个全新的DataFrame，原始数据不会被修改。
+        Iterate over all columns of the DataFrame, decrypt every column value, and remove the encryption suffix from the column names.
+        The method returns a new DataFrame; the original data is not modified.
 
         Parameters:
-            data (pandas.DataFrame): 需要解密的Pandas DataFrame对象。
-                                   应该是由encrypt_dataframe方法加密产生的DataFrame。
+            data (pandas.DataFrame): pandas DataFrame to decrypt.
+                                   It should be a DataFrame produced by the encrypt_dataframe method.
 
         Returns:
-            pandas.DataFrame: 解密后的新DataFrame，具有以下特点：
-                             - 所有列值都经过解密，恢复为原始字符串格式
-                             - 所有列名都移除了初始化时指定的后缀（默认为'_encrypted'）
-                             - 返回的是副本，原始DataFrame保持不变
+            pandas.DataFrame: New decrypted DataFrame with the following properties:
+                             - All column values are decrypted and restored to their original string form
+                             - The suffix specified at initialization (default '_encrypted') is removed from all column names
+                             - A copy is returned; the original DataFrame is unchanged
 
         Raises:
-            ValueError: 如果解密失败，可能原因包括：
-                       - 列值不是有效的加密字符串
-                       - 使用了错误的密钥进行解密
-                       - 数据在传输或存储过程中被损坏
-            UnicodeDecodeError: 如果解密后的字节无法正确解码为UTF-8字符串。
+            ValueError: If decryption fails. Possible causes include:
+                       - A column value is not a valid encrypted string
+                       - The wrong key was used for decryption
+                       - The data was corrupted during transmission or storage
+            UnicodeDecodeError: If the decrypted bytes cannot be decoded as a UTF-8 string.
 
         Note:
-            - 加密和解密必须使用相同的密钥
-            - 如果DataFrame包含非加密的列，解密操作可能会失败
+            - Encryption and decryption must use the same key
+            - Decryption may fail if the DataFrame contains columns that are not encrypted
 
         Example:
             >>> import pandas as pd
@@ -196,7 +196,7 @@ class TextEncryptor:
             ...                    'age_encrypted': ['c2F2ZWQ=', 'dGVzdA==']})
             >>> encryptor = TextEncryptor(key="secret")
             >>> decrypted_df = encryptor.decrypt_dataframe(df)
-            >>> print(decrypted_df.columns.tolist())  # 输出: ['name', 'age']
+            >>> print(decrypted_df.columns.tolist())  # Output: ['name', 'age']
         """
         res = data.copy()
         collist = data.columns.tolist()

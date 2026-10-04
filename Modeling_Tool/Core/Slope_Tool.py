@@ -6,22 +6,22 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def calculate_slope_sklearn(data, column):
     """
-    使用SKlearn的LinearRegression计算数据列的斜率。
+    Compute the slope of a data column using scikit-learn's LinearRegression.
     
-    基于最小二乘法，通过LinearRegression模型拟合数据点，
-    返回线性回归的斜率系数。
+    Based on ordinary least squares: fit the data points with a LinearRegression model
+    and return the slope coefficient of the linear regression.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        数据列名
+        Name of the data column
     
     Returns
     -------
     float
-        线性回归的斜率值
+        Slope of the linear regression
     
     Examples
     --------
@@ -33,17 +33,17 @@ def calculate_slope_sklearn(data, column):
     from sklearn.linear_model import LinearRegression
     
     series = data[column]
-    # 确保数据是NumPy数组格式
+    # Make sure the data is a NumPy array
     y = np.array(series).reshape(-1, 1)
     
-    # 创建x轴（索引）
+    # Create the x axis (index)
     x = np.arange(len(series)).reshape(-1, 1)
     
-    # 创建并拟合线性回归模型
+    # Create and fit the linear regression model
     model = LinearRegression()
     model.fit(x, y)
     
-    # 获取斜率
+    # Get the slope
     slope = model.coef_[0][0]
     
     return slope
@@ -51,45 +51,45 @@ def calculate_slope_sklearn(data, column):
 
 def calculate_slope_scipy(data, column):
     """
-    使用SciPy的linregress函数计算数据列的斜率。
+    Compute the slope of a data column using SciPy's linregress function.
     
-    基于最小二乘法，通过scipy.stats.linregress函数拟合数据点，
-    返回斜率及更多统计信息。
+    Based on ordinary least squares: fit the data points with scipy.stats.linregress
+    and return the slope along with additional statistics.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        数据列名
+        Name of the data column
     
     Returns
     -------
     tuple
-        (slope, r_value, p_value, std_err) 元组，包含：
-        - slope: 斜率值
-        - r_value: 相关系数
-        - p_value: p值
-        - std_err: 标准误差
+        Tuple (slope, r_value, p_value, std_err) containing:
+        - slope: slope value
+        - r_value: correlation coefficient
+        - p_value: p-value
+        - std_err: standard error
     
     Examples
     --------
     >>> df = pd.DataFrame({'values': [1, 2, 3, 4, 5]})
     >>> slope, r, p, se = calculate_slope_scipy(df, 'values')
-    >>> print(f"斜率: {slope}, 相关系数: {r}")
-    斜率: 1.0, 相关系数: 1.0
+    >>> print(f"Slope: {slope}, correlation: {r}")
+    Slope: 1.0, correlation: 1.0
     """
     
     from scipy import stats
     
     series = data[column]
-    # 确保数据是NumPy数组格式
+    # Make sure the data is a NumPy array
     y = np.array(series)
     
-    # 创建x轴（索引）
+    # Create the x axis (index)
     x = np.arange(len(y))
     
-    # 执行线性回归
+    # Run the linear regression
     slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
     
     return slope, r_value, p_value, std_err
@@ -97,22 +97,22 @@ def calculate_slope_scipy(data, column):
 
 def calculate_slope_numpy(data, column):
     """
-    使用NumPy的polyfit函数计算数据列的斜率。
+    Compute the slope of a data column using NumPy's polyfit function.
     
-    使用numpy.polyfit函数进行一阶多项式拟合，
-    返回线性回归的斜率。
+    Fit a first-degree polynomial with numpy.polyfit
+    and return the slope of the linear regression.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        数据列名
+        Name of the data column
     
     Returns
     -------
     float
-        线性回归的斜率值
+        Slope of the linear regression
     
     Examples
     --------
@@ -124,13 +124,13 @@ def calculate_slope_numpy(data, column):
     import numpy as np
     
     series = data[column]
-    # 确保数据是NumPy数组格式
+    # Make sure the data is a NumPy array
     y = np.array(series)
     
-    # 创建x轴（索引）
+    # Create the x axis (index)
     x = np.arange(len(y))
     
-    # 使用一次多项式拟合（线性回归），返回斜率和截距
+    # Fit a first-degree polynomial (linear regression); returns the slope and intercept
     slope, intercept = np.polyfit(x, y, 1)
     
     return slope
@@ -138,22 +138,22 @@ def calculate_slope_numpy(data, column):
 
 def calculate_slope_manual(data, column):
     """
-    手动使用最小二乘法计算数据列的斜率。
+    Compute the slope of a data column manually with ordinary least squares.
     
-    通过手动实现最小二乘法公式，计算线性回归的斜率：
+    Implement the least-squares formula by hand to compute the slope of the linear regression:
     slope = Σ((x - x_mean) * (y - y_mean)) / Σ((x - x_mean)²)
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        数据列名
+        Name of the data column
     
     Returns
     -------
     float
-        线性回归的斜率值
+        Slope of the linear regression
     
     Examples
     --------
@@ -164,17 +164,17 @@ def calculate_slope_manual(data, column):
     
     series = data[column]
     
-    # 确保数据是NumPy数组格式
+    # Make sure the data is a NumPy array
     y = np.array(series)
     
-    # 创建x轴（索引）
+    # Create the x axis (index)
     x = np.arange(len(y))
     
-    # 计算x和y的平均值
+    # Compute the means of x and y
     x_mean = np.mean(x)
     y_mean = np.mean(y)
     
-    # 计算斜率和截距
+    # Compute the slope and intercept
     numerator = np.sum((x - x_mean) * (y - y_mean))
     denominator = np.sum((x - x_mean) ** 2)
     
@@ -185,31 +185,31 @@ def calculate_slope_manual(data, column):
 
 class SlopeCalculator:
     """
-    斜率计算器。
+    Slope calculator.
     
-    提供多种方法计算数据列的线性回归斜率，支持：
+    Provide several methods to compute the linear-regression slope of a data column, supporting:
     - sklearn LinearRegression
     - scipy.stats.linregress
     - numpy.polyfit
-    - 手动最小二乘法
+    - manual least squares
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        数据列名
+        Name of the data column
     
     Attributes
     ----------
     data : pandas.DataFrame
-        输入数据
+        Input data
     column : str
-        列名
+        Column name
     y : numpy.ndarray
-        转换后的数据数组
+        Converted data array
     x : numpy.ndarray
-        x轴数组（索引）
+        x-axis array (index)
     
     Examples
     --------
@@ -223,14 +223,14 @@ class SlopeCalculator:
     
     def __init__(self, data, column):
         """
-        初始化斜率计算器。
+        Initialize the slope calculator.
         
         Parameters
         ----------
         data : pandas.DataFrame
-            包含数据的DataFrame
+            DataFrame containing the data
         column : str
-            数据列名
+            Name of the data column
         """
         self.data = data
         self.column = column
@@ -240,73 +240,73 @@ class SlopeCalculator:
     
     def calculate_sklearn(self):
         """
-        使用sklearn LinearRegression计算斜率。
+        Compute the slope using sklearn LinearRegression.
         
         Returns
         -------
         float
-            线性回归的斜率值
+            Slope of the linear regression
         """
         return calculate_slope_sklearn(self.data, self.column)
     
     def calculate_scipy(self):
         """
-        使用scipy.stats.linregress计算斜率。
+        Compute the slope using scipy.stats.linregress.
         
         Returns
         -------
         tuple
-            (slope, r_value, p_value, std_err) 元组
+            Tuple (slope, r_value, p_value, std_err)
         """
         return calculate_slope_scipy(self.data, self.column)
     
     def calculate_numpy(self):
         """
-        使用numpy.polyfit计算斜率。
+        Compute the slope using numpy.polyfit.
         
         Returns
         -------
         float
-            线性回归的斜率值
+            Slope of the linear regression
         """
         return calculate_slope_numpy(self.data, self.column)
     
     def calculate_manual(self):
         """
-        使用手动最小二乘法计算斜率。
+        Compute the slope using manual least squares.
         
         Returns
         -------
         float
-            线性回归的斜率值
+            Slope of the linear regression
         """
         return calculate_slope_manual(self.data, self.column)
     
     def calculate_all(self):
         """
-        使用所有方法计算斜率。
+        Compute the slope using all methods.
         
         Returns
         -------
         dict
-            包含各种方法计算结果的字典
+            Dictionary with the results of each method
         """
         results = {}
         
-        # sklearn方法
+        # sklearn method
         results['sklearn'] = self.calculate_sklearn()
         
-        # scipy方法
+        # scipy method
         scipy_result = self.calculate_scipy()
         results['scipy_slope'] = scipy_result[0]
         results['scipy_r_value'] = scipy_result[1]
         results['scipy_p_value'] = scipy_result[2]
         results['scipy_std_err'] = scipy_result[3]
         
-        # numpy方法
+        # numpy method
         results['numpy'] = self.calculate_numpy()
         
-        # 手动方法
+        # manual method
         results['manual'] = self.calculate_manual()
         
         return results
@@ -314,21 +314,21 @@ class SlopeCalculator:
     @staticmethod
     def calculate(data, column, method='sklearn'):
         """
-        静态方法：使用指定方法计算斜率。
+        Compute the slope using the specified method (static method).
         
         Parameters
         ----------
         data : pandas.DataFrame
-            包含数据的DataFrame
+            DataFrame containing the data
         column : str
-            数据列名
+            Name of the data column
         method : str, default 'sklearn'
-            计算方法，候选值：'sklearn', 'scipy', 'numpy', 'manual'
+            Computation method; one of 'sklearn', 'scipy', 'numpy', 'manual'
         
         Returns
         -------
         float or tuple
-            斜率值（scipy返回元组，其他返回浮点数）
+            Slope value (scipy returns a tuple; the other methods return a float)
         
         Examples
         --------
@@ -347,4 +347,4 @@ class SlopeCalculator:
         elif method == 'manual':
             return calc.calculate_manual()
         else:
-            raise ValueError(f"不支持的方法: {method}。请选择: 'sklearn', 'scipy', 'numpy', 'manual'")
+            raise ValueError(f"Unsupported method: {method}. Choose one of: 'sklearn', 'scipy', 'numpy', 'manual'")

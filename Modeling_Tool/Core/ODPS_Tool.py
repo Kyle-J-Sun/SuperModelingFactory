@@ -78,7 +78,7 @@ class ODPSRunner(object):
     _wide_schema_orig_build = None
     _wide_schema_patch_active = False
 
-    """ODPS执行类
+    """ODPS execution class.
     """
     def __init__(self):
         self.o = ODPS(
@@ -91,63 +91,63 @@ class ODPSRunner(object):
             ),
         )
         
-        options.retry_times = 6         # 请求重试次数
-        options.pool_maxsize = 200      # 连接池最大容量
-        options.connect_timeout = 3600  # 连接超时
-        options.read_timeout = 3600     # 读取超时
+        options.retry_times = 6         # number of request retries
+        options.pool_maxsize = 200      # maximum connection pool size
+        options.connect_timeout = 3600  # connection timeout
+        options.read_timeout = 3600     # read timeout
         
 
     def run_sql(self, sql, to_df=True, n_process=1, csv_path=None):
-        """运行SQL并下载结果。
+        """Run SQL and download the result.
 
         Parameters
         ----------
         sql : str
-            单个 SQL 代码。
+            A single SQL statement.
         to_df : bool, default True
-            是否把结果加载到内存中作为 ``pandas.DataFrame`` 返回。
-            若 ``False``, 函数返回**空 DataFrame**, 但仍会下载数据(当 ``csv_path`` 被指定时)。
+            Whether to load the result into memory and return it as a ``pandas.DataFrame``.
+            If ``False``, the function returns an **empty DataFrame** but still downloads the data (when ``csv_path`` is specified).
         n_process : int, default 1
-            ``executor.open_reader().to_pandas`` 的并行进程数。
+            Number of parallel processes for ``executor.open_reader().to_pandas``.
         csv_path : str, default None
-            把结果另存为本地 CSV 的路径。**与 ``to_df`` 互相独立**:
-                * 只设 ``csv_path`` → 下载 + 写 CSV, 不返回数据 (返回空 DataFrame)
-                * 只设 ``to_df=True`` → 下载 + 返回 DataFrame, 不写 CSV
-                * 两个都设 → 下载 + 返回 + 写 CSV
-                * 都不设 → 只跑 SQL 不下载 (用于 DDL/INSERT 等)
+            Path of a local CSV file to save the result to. **Independent of ``to_df``**:
+                * only ``csv_path`` set: download + write CSV, no data returned (an empty DataFrame is returned)
+                * only ``to_df=True`` set: download + return the DataFrame, no CSV written
+                * both set: download + return the DataFrame + write CSV
+                * neither set: run the SQL only, no download (for DDL/INSERT and similar)
 
         Returns
         -------
         pandas.DataFrame
-            当 ``to_df=True`` 时返回完整数据;
-            当 ``to_df=False`` 时返回空 DataFrame (用于占位).
+            The full data when ``to_df=True``;
+            an empty DataFrame (placeholder) when ``to_df=False``.
 
         Notes
         -----
-        - **执行**阶段(execute_sql)只跑一次, 无重试.
-        - **下载**阶段(to_pandas + to_csv)最多重试 6 次, 适用于网络抖动.
-        - 当 SQL 返回列数 > 200 时, 线程安全的 wide-schema patch 会自动 patch ODPS Tunnel,
-          防止 HTTP 414 (URI too long).
+        - The **execution** phase (execute_sql) runs only once, with no retries.
+        - The **download** phase (to_pandas + to_csv) retries up to 6 times, which covers transient network failures.
+        - When the SQL returns more than 200 columns, a thread-safe wide-schema patch automatically patches the ODPS Tunnel
+          to prevent HTTP 414 (URI too long).
 
         Examples
         --------
         >>> odps = ODPSRunner()
-        >>> df = odps.run_sql("SELECT * FROM dual LIMIT 10")                # 仅 DataFrame
+        >>> df = odps.run_sql("SELECT * FROM dual LIMIT 10")                # DataFrame only
         >>> df = odps.run_sql("SELECT * FROM dual LIMIT 10", csv_path="x.csv")  # DataFrame + CSV
-        >>> _  = odps.run_sql("SELECT * FROM dual LIMIT 10", to_df=False,  # 仅 CSV
+        >>> _  = odps.run_sql("SELECT * FROM dual LIMIT 10", to_df=False,  # CSV only
         ...                   csv_path="x.csv")
-        >>> _  = odps.run_sql("CREATE TABLE t AS SELECT 1")                # 仅执行, 不下载
+        >>> _  = odps.run_sql("CREATE TABLE t AS SELECT 1")                # execute only, no download
         """
-        # 准备SQL
+        # Prepare the SQL
         sqldesc = sql[:100]+"..." if len(sql)>100 else sql
         logging.info(f"SQL: \n{sqldesc}")
 
-        # 运行SQL（只执行一次，不重试）
+        # Run the SQL (executed once, no retries)
         starttime = datetime.now()
         logging.info(f'  execute_sql: {starttime.strftime("%Y-%m-%d %H:%M:%S")}')
         executor = self.o.execute_sql(sql)
 
-        # 决定是否需要下载: 至少满足 to_df=True 或 csv_path 不为空
+        # Decide whether to download: at least one of to_df=True or a non-empty csv_path is required
         should_download = bool(to_df) or bool(csv_path)
         df = pd.DataFrame()
 
@@ -175,7 +175,7 @@ class ODPSRunner(object):
                             f'  break: {endtime.strftime("%Y-%m-%d %H:%M:%S")} duration {duration}\n'
                         )
 
-        # 当用户显式要求不要 DataFrame 时, 主动释放引用, 节省内存
+        # When the caller explicitly does not want a DataFrame, release the reference to save memory
         if not to_df:
             df = pd.DataFrame()
 
@@ -185,23 +185,23 @@ class ODPSRunner(object):
         return df
 
     def download_table(self, table_name, partition=None, n_process=1, csv_path=None):
-        """读取表中数据至DataFrame 
+        """Read table data into a DataFrame.
 
         Parameters
         ----------
         table_name : str
-            表名
+            Table name
         partition : dict
-            分区, 例如: 'dt=2022-01-01,taino=0'
+            Partition, e.g. 'dt=2022-01-01,taino=0'
         n_process : int, default 1
-            将查询数据转为pandas.DataFrame的进程数
+            Number of processes used to convert the query data to a pandas.DataFrame
         csv_path : str
-            查询数据保存至csv文件路径
+            Path of the CSV file to save the query data to
 
         Returns
         -------
         df: pandas.DataFrame
-            SQL查询数据结果
+            Result data of the SQL query
         """
         logging.info(f"Table: \n{table_name} {partition}")
         starttime = datetime.now()
@@ -339,18 +339,18 @@ class ODPSRunner(object):
         return instance
 
     def upload_df(self, df, table_name, table_schema=None, partition=None, atomic=True):
-        """上传数据集至mc中创建新表
+        """Upload a dataset to MaxCompute and create a new table.
 
         Parameters
         ----------
         table_name: str
-            表名
+            Table name
         table_schema: odps.models.Schema
-            表Schema
+            Table schema
         df: pandas.DataFrame
-            数据集
+            Dataset to upload
         partition: string
-            保存分区
+            Partition to save the data to
         atomic: bool, default True
             When ``True`` (recommended, default from 0.4.2), the target table is
             replaced through a temp-table + rename swap so that a failure between
@@ -379,7 +379,7 @@ class ODPSRunner(object):
             else:
                 with t.open_writer() as writer:
                     writer.write(records)
-            logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
+            logger.info(f'<<<< Finished loading data into table {table_name}: shape={df.shape} >>>>')
             return
 
         # Atomic swap path (default from 0.4.2). If any step before the final
@@ -461,7 +461,7 @@ class ODPSRunner(object):
                     f"Safe to delete manually."
                 )
 
-        logger.info(f'<<<< 完成数据入表{table_name}: shape={df.shape} >>>>')
+        logger.info(f'<<<< Finished loading data into table {table_name}: shape={df.shape} >>>>')
 
     def _partition_exists(self, table, partition):
         if hasattr(table, "exist_partition"):
@@ -480,18 +480,18 @@ class ODPSRunner(object):
         )
 
     def insert_df(self, df, table_name, overwrite=True, partition=None, atomic=True):
-        """将数据集插入至mc已存在的表中.
+        """Insert a dataset into an existing MaxCompute table.
 
         Parameters
         ----------
         df: pandas.DataFrame
-            数据集
+            Dataset to insert
         table_name: str
-            表名
+            Table name
         overwrite: Bool, default True
-            是否覆盖
+            Whether to overwrite existing data
         partition: string, default None
-            写入分区, 默认为None即无分区
+            Partition to write to; the default None means no partition
         """
         t = self.o.get_table(table_name)
         if "py_inserttime" in t.schema and "py_inserttime" not in df.columns:
@@ -556,4 +556,4 @@ class ODPSRunner(object):
                 t.truncate()
             with t.open_writer() as writer:
                 writer.write(records)
-        logger.info('<<<< 完成数据入表: shape={0} >>>>'.format(df.shape))
+        logger.info('<<<< Finished loading data into table: shape={0} >>>>'.format(df.shape))

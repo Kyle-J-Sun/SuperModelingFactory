@@ -26,18 +26,19 @@ import pytest
 def _remove_comments(sql):
     """ Remove all comments from the SQL query. """
     # =========================================================================
-    # 正则分组 (按优先级排列，左起优先匹配):
-    #   group 1: 单引号字符串 '...'  (支持 SQL 标准 '' 转义)   — 保留
-    #   group 2: 双引号字符串/标识符 "..."                       — 保留
-    #   group 3: /*+ ... */ optimizer hint                      — 保留
-    #   group 4: /* ... */ 普通多行注释                          — 删除
-    #   group 5: -- ... 单行注释                                 — 删除
+    # Regex groups (listed by priority; the leftmost match wins):
+    #   group 1: single-quoted string '...'  (SQL-standard '' escape supported)   - keep
+    #   group 2: double-quoted string/identifier "..."                            - keep
+    #   group 3: /*+ ... */ optimizer hint                                        - keep
+    #   group 4: /* ... */ ordinary multi-line comment                            - remove
+    #   group 5: -- ... single-line comment                                       - remove
     # =========================================================================
-    # 关键修复:
-    #   1. 用 re.sub + 回调 替代 re.findall + str.replace,
-    #      避免全局替换破坏字符串字面量内相同文本 (Risk A)
-    #   2. 新增双引号保护分组, 防止 "--" 内的注释标记被误删 (Risk C)
-    #   3. 改进单引号正则: '([^']|'')*' — 支持 SQL 标准转义 (Risk B)
+    # Key fixes:
+    #   1. re.sub with a callback replaces re.findall + str.replace, so a global
+    #      replace can no longer damage identical text inside string literals (Risk A)
+    #   2. A double-quote protection group keeps comment markers inside "--" from
+    #      being removed by mistake (Risk C)
+    #   3. Improved single-quote regex: '([^']|'')*' supports the SQL-standard escape (Risk B)
     # =========================================================================
     pattern = r"""(?ms)('[^']*(?:''[^']*)*')|("[^"]*")|(\/\*\+.*?\*\/)|(\/\*.*?\*\/)|(\-\-.*?)$"""
 
@@ -538,15 +539,18 @@ class TestEdgeCases:
         assert "/*+ h2 */" in result
 
     def test_chinese_comment(self):
-        """T4.2.1: Chinese characters in comment."""
-        result = _remove_comments("-- 这是中文注释\nSELECT 1")
-        assert "这是中文注释" not in result
+        """T4.2.1: CJK characters in comment."""
+        # CJK text, written as \u escapes so that the source file stays ASCII
+        cjk_comment = "\u8fd9\u662f\u4e2d\u6587\u6ce8\u91ca"
+        result = _remove_comments("-- " + cjk_comment + "\nSELECT 1")
+        assert cjk_comment not in result
         assert "SELECT 1" in result
 
     def test_unicode_string_with_comment_marker(self):
         """T4.2.2: Unicode in string, preserved."""
-        result = _remove_comments("SELECT '中文 -- test' FROM t")
-        assert "'中文 -- test'" in result
+        quoted = "'\u4e2d\u6587 -- test'"     # CJK text written as \u escapes
+        result = _remove_comments("SELECT " + quoted + " FROM t")
+        assert quoted in result
 
     def test_emoji_in_comment(self):
         """T4.2.3: Emoji in comment."""

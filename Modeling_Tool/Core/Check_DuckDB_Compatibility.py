@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-DuckDB 兼容性检测工具
+DuckDB compatibility checking tool
 
-遍历指定 SQL 文件夹下的所有 .sql 文件，逐行检测是否存在 DuckDB 不兼容的语法、
-函数或模式，生成详细的检测报告。
+Walk all .sql files under the given SQL folder, scan each line for syntax, functions or patterns
+that are incompatible with DuckDB, and generate a detailed report.
 
-检测覆盖以下维度:
-  1. Hive/Spark 专属函数（DuckDB 中不存在或语法不同）
-  2. Hive/Spark 专属语法（如 LATERAL VIEW EXPLODE, DISTRIBUTE BY 等）
-  3. 模板占位符（{xxx} 格式，需 Python 预处理）
-  4. 隐式类型转换风险（DuckDB 比 Spark 更严格）
-  5. 其他 DuckDB 方言差异
+The scan covers the following dimensions:
+  1. Hive/Spark-specific functions (missing in DuckDB or with different syntax)
+  2. Hive/Spark-specific syntax (such as LATERAL VIEW EXPLODE, DISTRIBUTE BY)
+  3. Template placeholders ({xxx} format, which need Python preprocessing)
+  4. Implicit type-conversion risks (DuckDB is stricter than Spark)
+  5. Other DuckDB dialect differences
 
-使用方式:
+Usage:
     python check_duckdb_compatibility.py [sql_folder_path]
 
-    sql_folder_path 可选，默认为当前目录下的 ./sql/
+    sql_folder_path is optional and defaults to ./sql/ under the current directory
 """
 
 import os
@@ -27,26 +27,26 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 数据结构定义
+# Data structure definitions
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 @dataclass
 class CompatibilityIssue:
-    """单条兼容性问题"""
+    """A single compatibility issue"""
 
     severity: str  # "error" | "warning" | "info"
-    category: str  # 问题分类
-    line: int  # 行号
-    column: int  # 所在列（0 表示未知）
-    pattern: str  # 匹配到的原始文本
-    message: str  # 问题描述
-    suggestion: str  # DuckDB 兼容建议
+    category: str  # issue category
+    line: int  # line number
+    column: int  # column (0 means unknown)
+    pattern: str  # matched original text
+    message: str  # issue description
+    suggestion: str  # DuckDB-compatible suggestion
 
 
 @dataclass
 class FileReport:
-    """单个文件的检测报告"""
+    """Compatibility report for a single file"""
 
     file_path: str
     issues: List[CompatibilityIssue] = field(default_factory=list)
@@ -69,353 +69,353 @@ class FileReport:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 规则定义
+# Rule definitions
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# 每条规则是一个 dict:
-#   - pattern:     正则表达式（re.IGNORECASE 下匹配）
+# Each rule is a dict:
+#   - pattern:     regular expression (matched with re.IGNORECASE)
 #   - severity:    "error" | "warning" | "info"
-#   - category:    问题分类标签
-#   - message:     问题描述模板（可用 {match} 引用匹配到的文本）
-#   - suggestion:  DuckDB 兼容建议
+#   - category:    issue category label
+#   - message:     issue description template ({match} can be used to reference the matched text)
+#   - suggestion:  DuckDB-compatible suggestion
 
 RULES: List[dict] = [
-    # ── 1. Hive/Spark 专属函数 ───────────────────────────────────────────
+    # ── 1. Hive/Spark-specific functions ───────────────────────────────
     {
         "pattern": r"\bFROM_UNIXTIME\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "FROM_UNIXTIME 是 Hive/MySQL 函数，DuckDB 不支持",
-        "suggestion": "替换为 to_timestamp(epoch_seconds) 或 epoch_ms(milliseconds)。"
-                       "例如: FROM_UNIXTIME(CAST(col/1000 AS BIGINT)) → to_timestamp(CAST(col/1000 AS BIGINT))",
+        "message": "FROM_UNIXTIME is a Hive/MySQL function and is not supported by DuckDB",
+        "suggestion": "Replace with to_timestamp(epoch_seconds) or epoch_ms(milliseconds). "
+                       "For example: FROM_UNIXTIME(CAST(col/1000 AS BIGINT)) → to_timestamp(CAST(col/1000 AS BIGINT))",
     },
     {
         "pattern": r"\bUNIX_TIMESTAMP\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "UNIX_TIMESTAMP 是 Hive/MySQL 函数，DuckDB 不支持",
-        "suggestion": "替换为 epoch(expr) 或 extract(epoch FROM timestamp_expr)",
+        "message": "UNIX_TIMESTAMP is a Hive/MySQL function and is not supported by DuckDB",
+        "suggestion": "Replace with epoch(expr) or extract(epoch FROM timestamp_expr)",
     },
     {
         "pattern": r"\bGET_JSON_OBJECT\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "GET_JSON_OBJECT 是 Hive/Spark 函数，DuckDB 不支持",
-        "suggestion": "替换为 json_extract_string(col, '$.path') 或 col->>'$.path'（简写）。"
-                       "注意: DuckDB 的 JSON 路径语法以 '$.' 开头",
+        "message": "GET_JSON_OBJECT is a Hive/Spark function and is not supported by DuckDB",
+        "suggestion": "Replace with json_extract_string(col, '$.path') or col->>'$.path' (shorthand). "
+                       "Note: DuckDB JSON path syntax starts with '$.'",
     },
     {
         "pattern": r"\bNVL\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "NVL 是 Oracle/Hive 函数，DuckDB 不支持",
-        "suggestion": "替换为 coalesce(expr, default_value)，两者语义等价",
+        "message": "NVL is an Oracle/Hive function and is not supported by DuckDB",
+        "suggestion": "Replace with coalesce(expr, default_value); the two are semantically equivalent",
     },
     {
         "pattern": r"\bNVL2\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "NVL2 是 Oracle/Hive 函数，DuckDB 不支持",
-        "suggestion": "替换为 CASE WHEN expr IS NOT NULL THEN val1 ELSE val2 END",
+        "message": "NVL2 is an Oracle/Hive function and is not supported by DuckDB",
+        "suggestion": "Replace with CASE WHEN expr IS NOT NULL THEN val1 ELSE val2 END",
     },
     {
         "pattern": r"\bDECODE\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "DECODE 是 Oracle 函数，Hive 部分支持，DuckDB 不支持",
-        "suggestion": "替换为 CASE WHEN expr = v1 THEN r1 WHEN expr = v2 THEN r2 ... ELSE default END",
+        "message": "DECODE is an Oracle function; it is partially supported by Hive and not supported by DuckDB",
+        "suggestion": "Replace with CASE WHEN expr = v1 THEN r1 WHEN expr = v2 THEN r2 ... ELSE default END",
     },
     {
         "pattern": r"\bTO_DATE\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "TO_DATE 在 Hive 和 DuckDB 中语义可能不同",
-        "suggestion": "Hive: TO_DATE(string, format)。DuckDB: to_date(string) 或 strptime(str, fmt)::DATE。"
-                       "请检查参数个数和格式字符串",
+        "message": "TO_DATE may have different semantics in Hive and DuckDB",
+        "suggestion": "Hive: TO_DATE(string, format). DuckDB: to_date(string) or strptime(str, fmt)::DATE. "
+                       "Please check the number of arguments and the format string",
     },
     {
         "pattern": r"\bDATE_FORMAT\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "DATE_FORMAT 是 Hive/MySQL 函数，DuckDB 中不存在",
-        "suggestion": "替换为 strftime(timestamp, format_string)，注意格式符有差异",
+        "message": "DATE_FORMAT is a Hive/MySQL function and does not exist in DuckDB",
+        "suggestion": "Replace with strftime(timestamp, format_string); note that the format specifiers differ",
     },
     {
         "pattern": r"\bDATE_ADD\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "DATE_ADD 语法在 Hive 和 DuckDB 中不同",
-        "suggestion": "Hive: date_add(date, days)。DuckDB: date_add(date, INTERVAL n DAY) 或 date + INTERVAL n DAY",
+        "message": "DATE_ADD syntax differs between Hive and DuckDB",
+        "suggestion": "Hive: date_add(date, days). DuckDB: date_add(date, INTERVAL n DAY) or date + INTERVAL n DAY",
     },
     {
         "pattern": r"\bDATE_SUB\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "DATE_SUB 语法在 Hive 和 DuckDB 中不同",
-        "suggestion": "Hive: date_sub(date, days)。DuckDB: date_sub(part, date, date) 或 date - INTERVAL n DAY",
+        "message": "DATE_SUB syntax differs between Hive and DuckDB",
+        "suggestion": "Hive: date_sub(date, days). DuckDB: date_sub(part, date, date) or date - INTERVAL n DAY",
     },
     {
         "pattern": r"\bADD_MONTHS\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "ADD_MONTHS 是 Oracle/Hive 函数，DuckDB 不支持",
-        "suggestion": "替换为 date + INTERVAL n MONTH 或 date_add(date, INTERVAL n MONTH)",
+        "message": "ADD_MONTHS is an Oracle/Hive function and is not supported by DuckDB",
+        "suggestion": "Replace with date + INTERVAL n MONTH or date_add(date, INTERVAL n MONTH)",
     },
     {
         "pattern": r"\bMONTHS_BETWEEN\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "MONTHS_BETWEEN 是 Oracle/Hive 函数，DuckDB 不支持",
-        "suggestion": "替换为 date_diff('month', date1, date2) 或手动计算月份差",
+        "message": "MONTHS_BETWEEN is an Oracle/Hive function and is not supported by DuckDB",
+        "suggestion": "Replace with date_diff('month', date1, date2) or compute the month difference manually",
     },
     {
         "pattern": r"\bLAST_DAY\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "LAST_DAY 是 Hive/MySQL 函数，DuckDB 不支持",
-        "suggestion": "替换为 last_day(date) — DuckDB 也支持 last_day 但语义略有不同，"
-                       "或使用 date_trunc('month', date) + INTERVAL 1 MONTH - INTERVAL 1 DAY",
+        "message": "LAST_DAY is a Hive/MySQL function and is not supported by DuckDB",
+        "suggestion": "Replace with last_day(date) — DuckDB also supports last_day, but with slightly different semantics, "
+                       "or use date_trunc('month', date) + INTERVAL 1 MONTH - INTERVAL 1 DAY",
     },
     {
         "pattern": r"\bINSTR\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "INSTR 在 Hive 和 DuckDB 中存在但行为可能不同",
-        "suggestion": "DuckDB 使用 strpos(string, substring) 或 position(substring IN string)。"
-                       "INSTR 在 DuckDB 中也可用但参数顺序与 Oracle 相反",
+        "message": "INSTR exists in both Hive and DuckDB but may behave differently",
+        "suggestion": "DuckDB uses strpos(string, substring) or position(substring IN string). "
+                       "INSTR is also available in DuckDB, but its argument order is the reverse of Oracle's",
     },
     {
         "pattern": r"\bCONCAT_WS\s*\(",
         "severity": "info",
         "category": "hive_function",
-        "message": "CONCAT_WS 在 Spark 和 DuckDB 中都支持，但参数行为略有不同",
-        "suggestion": "DuckDB 的 concat_ws(sep, str1, str2, ...) 要求至少 2 个字符串参数。"
-                       "Spark 的 concat_ws 可以只传分隔符和单个数组。请确认参数类型",
+        "message": "CONCAT_WS is supported by both Spark and DuckDB, but the argument behavior differs slightly",
+        "suggestion": "DuckDB's concat_ws(sep, str1, str2, ...) requires at least 2 string arguments. "
+                       "Spark's concat_ws can take just a separator and a single array. Please confirm the argument types",
     },
     {
         "pattern": r"\bCOLLECT_LIST\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "COLLECT_LIST 是 Spark SQL 聚合函数，DuckDB 不支持",
-        "suggestion": "替换为 array_agg(expr) 或 list(expr)",
+        "message": "COLLECT_LIST is a Spark SQL aggregate function and is not supported by DuckDB",
+        "suggestion": "Replace with array_agg(expr) or list(expr)",
     },
     {
         "pattern": r"\bCOLLECT_SET\s*\(",
         "severity": "error",
         "category": "hive_function",
-        "message": "COLLECT_SET 是 Spark SQL 聚合函数，DuckDB 不支持",
-        "suggestion": "替换为 array_agg(DISTINCT expr) 或 list(DISTINCT expr)",
+        "message": "COLLECT_SET is a Spark SQL aggregate function and is not supported by DuckDB",
+        "suggestion": "Replace with array_agg(DISTINCT expr) or list(DISTINCT expr)",
     },
     {
         "pattern": r"\bARRAY_CONTAINS\s*\(",
         "severity": "warning",
         "category": "hive_function",
-        "message": "ARRAY_CONTAINS 在 DuckDB 中的等价函数为 list_contains 或 array_contains",
-        "suggestion": "替换为 list_contains(array, element) 或 array_has(array, element)",
+        "message": "The DuckDB equivalent of ARRAY_CONTAINS is list_contains or array_contains",
+        "suggestion": "Replace with list_contains(array, element) or array_has(array, element)",
     },
     {
         "pattern": r"\bSIZE\s*\(.*\)",  # size(collection)
         "severity": "warning",
         "category": "hive_function",
-        "message": "SIZE 函数在 Hive/Spark 中用于集合，DuckDB 中用法不同",
-        "suggestion": "DuckDB 使用 len(array) 或 array_length(array)。"
-                       "若 SIZE 用于字符串长度，请替换为 length(str)",
+        "message": "SIZE is used for collections in Hive/Spark and is used differently in DuckDB",
+        "suggestion": "DuckDB uses len(array) or array_length(array). "
+                       "If SIZE is used for string length, replace it with length(str)",
     },
     {
         "pattern": r"\bEXPLODE\s*\(",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "EXPLODE 是 Hive/Spark 表生成函数，DuckDB 不支持",
-        "suggestion": "替换为 UNNEST(array_column)。"
-                       "例如: SELECT ... FROM t, LATERAL VIEW EXPLODE(col) AS x → SELECT ... FROM t, UNNEST(col) AS x",
+        "message": "EXPLODE is a Hive/Spark table-generating function and is not supported by DuckDB",
+        "suggestion": "Replace with UNNEST(array_column). "
+                       "For example: SELECT ... FROM t, LATERAL VIEW EXPLODE(col) AS x → SELECT ... FROM t, UNNEST(col) AS x",
     },
     {
         "pattern": r"\bPOSEXPLODE\s*\(",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "POSEXPLODE 是 Spark 表生成函数，DuckDB 不支持",
-        "suggestion": "替换为 UNNEST(array) WITH ORDINALITY。"
-                       "例如: SELECT t.*, u.val, u.ordinal FROM t, UNNEST(col) WITH ORDINALITY AS u(val, idx)",
+        "message": "POSEXPLODE is a Spark table-generating function and is not supported by DuckDB",
+        "suggestion": "Replace with UNNEST(array) WITH ORDINALITY. "
+                       "For example: SELECT t.*, u.val, u.ordinal FROM t, UNNEST(col) WITH ORDINALITY AS u(val, idx)",
     },
 
-    # ── 2. Hive/Spark 专属语法 ───────────────────────────────────────────
+    # ── 2. Hive/Spark-specific syntax ──────────────────────────────────
     {
         "pattern": r"\bLATERAL\s+VIEW\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "LATERAL VIEW 是 Hive/Spark 表生成函数语法，DuckDB 不支持",
-        "suggestion": "替换为 CROSS JOIN LATERAL 或直接 , LATERAL 子查询。"
-                       "也可使用 UNNEST 替代 EXPLODE",
+        "message": "LATERAL VIEW is Hive/Spark table-generating function syntax and is not supported by DuckDB",
+        "suggestion": "Replace with CROSS JOIN LATERAL or a direct , LATERAL subquery. "
+                       "UNNEST can also be used in place of EXPLODE",
     },
     {
         "pattern": r"\bDISTRIBUTE\s+BY\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "DISTRIBUTE BY 是 Hive 语法，DuckDB 不支持",
-        "suggestion": "无需直接替代（DuckDB 不使用 MapReduce 模型）。"
-                       "若用于排序优化，可尝试 ORDER BY 代替",
+        "message": "DISTRIBUTE BY is Hive syntax and is not supported by DuckDB",
+        "suggestion": "No direct replacement is needed (DuckDB does not use the MapReduce model). "
+                       "If it is used for sort optimization, try ORDER BY instead",
     },
     {
         "pattern": r"\bCLUSTER\s+BY\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "CLUSTER BY 是 Hive 语法，DuckDB 不支持",
-        "suggestion": "无需直接替代。若需要排序输出，使用 ORDER BY",
+        "message": "CLUSTER BY is Hive syntax and is not supported by DuckDB",
+        "suggestion": "No direct replacement is needed. If sorted output is required, use ORDER BY",
     },
     {
         "pattern": r"\bSORT\s+BY\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "SORT BY 是 Hive 局部排序语法，DuckDB 不支持",
-        "suggestion": "替换为 ORDER BY。注意 SORT BY 只保证分区内有序，"
-                       "ORDER BY 保证全局有序",
+        "message": "SORT BY is Hive local-sort syntax and is not supported by DuckDB",
+        "suggestion": "Replace with ORDER BY. Note that SORT BY only guarantees ordering within each partition, "
+                       "whereas ORDER BY guarantees a global ordering",
     },
     {
         "pattern": r"\bTABLESAMPLE\s*\(",
         "severity": "warning",
         "category": "hive_syntax",
-        "message": "TABLESAMPLE 语法在 Hive 和 DuckDB 中不同",
+        "message": "TABLESAMPLE syntax differs between Hive and DuckDB",
         "suggestion": "DuckDB: SELECT ... FROM table TABLESAMPLE SYSTEM(10 PERCENT) "
-                       "或 USING SAMPLE reservoir(10 PERCENT)",
+                       "or USING SAMPLE reservoir(10 PERCENT)",
     },
     {
         "pattern": r"\bANALYZE\s+TABLE\b",
         "severity": "warning",
         "category": "hive_syntax",
-        "message": "ANALYZE TABLE 语法在 Hive 和 DuckDB 中不同",
-        "suggestion": "DuckDB 使用 ANALYZE table_name 或 SUMMARIZE table_name",
+        "message": "ANALYZE TABLE syntax differs between Hive and DuckDB",
+        "suggestion": "DuckDB uses ANALYZE table_name or SUMMARIZE table_name",
     },
     {
         "pattern": r"\bMSCK\s+REPAIR\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "MSCK REPAIR TABLE 是 Hive 分区修复命令，DuckDB 不支持",
-        "suggestion": "DuckDB 不依赖 Hive Metastore，无需此命令。分区通过目录结构自动发现",
+        "message": "MSCK REPAIR TABLE is a Hive partition repair command and is not supported by DuckDB",
+        "suggestion": "DuckDB does not depend on the Hive Metastore, so this command is not needed. Partitions are discovered automatically from the directory structure",
     },
     {
         "pattern": r"\bREFRESH\s+TABLE\b",
         "severity": "info",
         "category": "hive_syntax",
-        "message": "REFRESH TABLE 是 Spark/Hive 命令，DuckDB 中无对应概念",
-        "suggestion": "DuckDB 自动感知文件变更，无需手动刷新",
+        "message": "REFRESH TABLE is a Spark/Hive command with no corresponding concept in DuckDB",
+        "suggestion": "DuckDB detects file changes automatically; no manual refresh is needed",
     },
     {
         "pattern": r"\bCOMPUTE\s+STATISTICS\b",
         "severity": "info",
         "category": "hive_syntax",
-        "message": "COMPUTE STATISTICS 是 Hive/Spark 命令",
-        "suggestion": "DuckDB 使用 ANALYZE 收集统计信息",
+        "message": "COMPUTE STATISTICS is a Hive/Spark command",
+        "suggestion": "DuckDB uses ANALYZE to collect statistics",
     },
 
-    # ── 3. DATEDIFF 语法差异 ──────────────────────────────────────────────
+    # ── 3. DATEDIFF syntax differences ─────────────────────────────────
     {
         "pattern": r"\bDATEDIFF\s*\((?![^)]*'day')",
         "severity": "error",
         "category": "datediff_syntax",
-        "message": "DATEDIFF 在 Hive 和 DuckDB 中语法不同: Hive DATEDIFF(end, start) 返回天数，"
-                   "DuckDB 要求 datediff('day', start, end)",
-        "suggestion": "将 DATEDIFF(end, start) 替换为 datediff('day', start, end)。"
-                       "注意: Hive 的参数是 (end, start)，DuckDB 是 (part, start, end)",
+        "message": "DATEDIFF syntax differs between Hive and DuckDB: Hive DATEDIFF(end, start) returns the number of days, "
+                   "whereas DuckDB requires datediff('day', start, end)",
+        "suggestion": "Replace DATEDIFF(end, start) with datediff('day', start, end). "
+                       "Note: Hive's arguments are (end, start), whereas DuckDB's are (part, start, end)",
     },
     {
         "pattern": r"\bDATEDIFF\s*\(\s*'day'\s*,",
         "severity": "quiet",
         "category": "datediff_syntax",
-        "message": "DATEDIFF 已使用 DuckDB 兼容语法 (√)。请确认参数顺序为 (start, end)",
+        "message": "DATEDIFF already uses DuckDB-compatible syntax (√). Please confirm the argument order is (start, end)",
         "suggestion": "",
     },
 
-    # ── 4. 分区字段模式 ──────────────────────────────────────────────────
+    # ── 4. Partition column patterns ───────────────────────────────────
     {
         "pattern": r"\bDT\s*(<>|!=)\s*''",
         "severity": "info",
         "category": "partition_pruning",
-        "message": "DT <> '' 是 Hive 分区裁剪惯用写法。DuckDB 中可用同样的 WHERE 条件，"
-                   "但不会触发分区裁剪（DuckDB 的分区机制不同）",
-        "suggestion": "如果使用 DuckDB 的分区表（partitioned write），通过目录结构自动感知分区。"
-                       "WHERE DT IS NOT NULL AND DT != '' 可保留作为数据过滤条件",
+        "message": "DT <> '' is a common Hive partition-pruning idiom. The same WHERE condition works in DuckDB, "
+                   "but it does not trigger partition pruning (DuckDB's partitioning mechanism is different)",
+        "suggestion": "If you use DuckDB partitioned tables (partitioned write), partitions are discovered automatically from the directory structure. "
+                       "WHERE DT IS NOT NULL AND DT != '' can be kept as a data filter",
     },
 
-    # ── 5. 模板占位符 ──────────────────────────────────────────────────────
+    # ── 5. Template placeholders ───────────────────────────────────────
     {
         "pattern": r"\{[a-zA-Z_]\w*\}",
         "severity": "warning",
         "category": "template_placeholder",
-        "message": "检测到 Python 风格模板占位符，SQL 在执行前需经过字符串格式化预处理",
-        "suggestion": "确保在使用前通过 .format() 或 f-string 替换占位符。"
-                       "注意: 若为字符串类型占位符，需确保替换后带引号",
+        "message": "Python-style template placeholders detected; the SQL must be preprocessed with string formatting before execution",
+        "suggestion": "Make sure the placeholders are replaced via .format() or an f-string before use. "
+                       "Note: for string-type placeholders, make sure the replaced value is quoted",
     },
 
-    # ── 6. 隐式类型转换风险（仅 verbose 模式显示）─────────────────────────
+    # ── 6. Implicit type-conversion risks (shown only in verbose mode) ───
     {
         "pattern": r"CAST\s*\(\s*\S+\s+AS\s+FLOAT\s*\)",
         "severity": "quiet",
         "category": "type_conversion",
-        "message": "CAST(... AS FLOAT) 在 DuckDB 中为 32 位，Spark 中 DOUBLE 更常见",
-        "suggestion": "如需 64 位浮点，使用 CAST(... AS DOUBLE)。FLOAT=32-bit, DOUBLE=64-bit",
+        "message": "CAST(... AS FLOAT) is 32-bit in DuckDB, while DOUBLE is more common in Spark",
+        "suggestion": "If 64-bit floating point is needed, use CAST(... AS DOUBLE). FLOAT=32-bit, DOUBLE=64-bit",
     },
 
-    # ── 7. REGEXP_REPLACE 语义差异 ───────────────────────────────────────
+    # ── 7. REGEXP_REPLACE semantic differences ─────────────────────────
     {
         "pattern": r"\bREGEXP_REPLACE\s*\(",
         "severity": "warning",
         "category": "function_semantics",
-        "message": "REGEXP_REPLACE 在 Hive 和 DuckDB 中都支持，但参数顺序和默认行为可能不同",
-        "suggestion": "Hive: regexp_replace(string, pattern, replacement)。"
-                       "DuckDB: regexp_replace(string, pattern, replacement[, flags])。"
-                       "DuckDB 默认使用全局替换（类似 Hive 的 global flag），请确认行为一致",
+        "message": "REGEXP_REPLACE is supported by both Hive and DuckDB, but the argument order and default behavior may differ",
+        "suggestion": "Hive: regexp_replace(string, pattern, replacement). "
+                       "DuckDB: regexp_replace(string, pattern, replacement[, flags]). "
+                       "DuckDB uses global replacement by default (similar to Hive's global flag); please confirm the behavior is consistent",
     },
 
-    # ── 8. 中位数函数（DuckDB 已原生支持）────────────────────────────────
+    # ── 8. Median function (natively supported by DuckDB) ──────────────
     {
         "pattern": r"\bMEDIAN\s*\(",
         "severity": "info",
         "category": "duckdb_supported",
-        "message": "MEDIAN 聚合函数: DuckDB 已原生支持 (√)",
+        "message": "MEDIAN aggregate function: natively supported by DuckDB (√)",
         "suggestion": "",
     },
 
-    # ── 11. INSERT OVERWRITE 语法 ────────────────────────────────────────
+    # ── 11. INSERT OVERWRITE syntax ────────────────────────────────────
     {
         "pattern": r"\bINSERT\s+OVERWRITE\b",
         "severity": "error",
         "category": "hive_syntax",
-        "message": "INSERT OVERWRITE 是 Hive/Spark 语法，DuckDB 不支持",
-        "suggestion": "替换为 CREATE OR REPLACE TABLE table_name AS ... 或 "
+        "message": "INSERT OVERWRITE is Hive/Spark syntax and is not supported by DuckDB",
+        "suggestion": "Replace with CREATE OR REPLACE TABLE table_name AS ... or "
                        "DELETE FROM table_name; INSERT INTO table_name ...",
     },
     {
         "pattern": r"\bINSERT\s+INTO\s+TABLE\b",
         "severity": "warning",
         "category": "hive_syntax",
-        "message": "INSERT INTO TABLE 语法中的 TABLE 关键字在 DuckDB 中可选",
-        "suggestion": "DuckDB 使用 INSERT INTO schema.table_name (无需 TABLE 关键字)",
+        "message": "The TABLE keyword in INSERT INTO TABLE syntax is optional in DuckDB",
+        "suggestion": "DuckDB uses INSERT INTO schema.table_name (the TABLE keyword is not needed)",
     },
 
-    # ── 12. PARTITION 子句（写入时）───────────────────────────────────────
+    # ── 12. PARTITION clause (on write) ────────────────────────────────
     {
         "pattern": r"\bPARTITION\s*\(\s*\w+\s*\)",
         "severity": "warning",
         "category": "partition_syntax",
-        "message": "PARTITION(col) 在 INSERT/OVERWRITE 中是 Hive 语法，DuckDB 分区语法不同",
-        "suggestion": "DuckDB 分区写入使用 PARTITION_BY 而非 PARTITION。"
-                       "例如: COPY ... TO ... (PARTITION_BY col) 或在 CREATE TABLE 时指定 PARTITION BY",
+        "message": "PARTITION(col) in INSERT/OVERWRITE is Hive syntax; DuckDB partition syntax is different",
+        "suggestion": "DuckDB partitioned writes use PARTITION_BY instead of PARTITION. "
+                       "For example: COPY ... TO ... (PARTITION_BY col) or specify PARTITION BY in CREATE TABLE",
     },
 
-    # ── 13. NULL 排序行为 ─────────────────────────────────────────────────
+    # ── 13. NULL ordering behavior ─────────────────────────────────────
     {
         "pattern": r"\bORDER\s+BY\s+\S+\s+(ASC|DESC)\b",
         "severity": "info",
         "category": "null_ordering",
-        "message": "ORDER BY 中 NULL 的排序行为在 Hive 和 DuckDB 中不同",
-        "suggestion": "Hive 默认 NULLS FIRST (ASC 时)。DuckDB 默认 NULLS LAST (ASC 时)。"
-                       "如需明确控制，添加 NULLS FIRST 或 NULLS LAST",
+        "message": "NULL ordering in ORDER BY differs between Hive and DuckDB",
+        "suggestion": "Hive defaults to NULLS FIRST (for ASC). DuckDB defaults to NULLS LAST (for ASC). "
+                       "For explicit control, add NULLS FIRST or NULLS LAST",
     },
 ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 核心检测函数
+# Core detection functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -425,15 +425,15 @@ def scan_sql_content(
     verbose: bool = False,
 ) -> List[CompatibilityIssue]:
     """
-    逐行扫描 SQL 文本，应用所有规则，返回检测到的问题列表。
+    Scan SQL text line by line, apply all rules, and return the list of detected issues.
 
     Args:
-        sql_content: SQL 文本内容（字符串）
-        rules: 规则列表，默认使用全局 RULES
-        verbose: 是否输出 quiet/info 级别的低优先级提示
+        sql_content: SQL text content (a string)
+        rules: List of rules; defaults to the global RULES
+        verbose: Whether to also output low-priority quiet/info level hints
 
     Returns:
-        CompatibilityIssue 列表，按行号排序
+        List of CompatibilityIssue, sorted by line number
     """
     if rules is None:
         rules = RULES
@@ -442,7 +442,7 @@ def scan_sql_content(
     lines = sql_content.split("\n")
 
     for line_num, line in enumerate(lines, start=1):
-        # 跳过纯注释行和空行（减少噪音）
+        # Skip pure comment lines and blank lines (to reduce noise)
         stripped = line.strip()
         if not stripped or stripped.startswith("--"):
             continue
@@ -452,20 +452,20 @@ def scan_sql_content(
             for match in pattern.finditer(line):
                 matched_text = match.group(0)
 
-                # ── 非 verbose 模式下静默跳过的规则 ──
+                # ── Rules silently skipped in non-verbose mode ──
                 if not verbose:
                     if rule["severity"] == "quiet":
                         continue
-                    # info 级别的 duckdb_supported 和 null_ordering 默认静默
+                    # info-level duckdb_supported and null_ordering are silent by default
                     if rule["category"] == "duckdb_supported" and rule["severity"] == "info":
                         continue
                     if rule["category"] == "null_ordering":
                         continue
-                    # 分号结尾规则默认静默
+                    # The semicolon-terminator rule is silent by default
                     if rule["category"] == "syntax_convention":
                         continue
 
-                # 安全格式化: 仅在 message/suggestion 包含 {match} 时才替换
+                # Safe formatting: substitute only when message/suggestion contains {match}
                 formatted_message = rule["message"]
                 if "{match}" in formatted_message:
                     formatted_message = formatted_message.format(match=matched_text.strip())
@@ -486,7 +486,7 @@ def scan_sql_content(
                     )
                 )
 
-    # 按行号排序
+    # Sort by line number
     issues.sort(key=lambda x: (x.line, x.column))
     return issues
 
@@ -497,14 +497,14 @@ def scan_sql_file(
     verbose: bool = False,
 ) -> FileReport:
     """
-    扫描单个 SQL 文件，返回完整的 FileReport。
+    Scan a single SQL file and return the complete FileReport.
 
     Args:
-        file_path: SQL 文件的绝对或相对路径
-        rules: 规则列表，默认使用全局 RULES
+        file_path: Absolute or relative path of the SQL file
+        rules: List of rules; defaults to the global RULES
 
     Returns:
-        FileReport 对象，包含所有检测到的问题
+        FileReport object containing all detected issues
     """
     report = FileReport(file_path=file_path)
 
@@ -512,7 +512,7 @@ def scan_sql_file(
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
     except UnicodeDecodeError:
-        # 尝试其他编码
+        # Try another encoding
         try:
             with open(file_path, "r", encoding="latin-1") as f:
                 content = f.read()
@@ -524,8 +524,8 @@ def scan_sql_file(
                     line=0,
                     column=0,
                     pattern="",
-                    message=f"无法读取文件: {e}",
-                    suggestion="请检查文件编码（需 UTF-8 或 Latin-1）",
+                    message=f"Unable to read the file: {e}",
+                    suggestion="Please check the file encoding (UTF-8 or Latin-1 is required)",
                 )
             )
             return report
@@ -537,8 +537,8 @@ def scan_sql_file(
                 line=0,
                 column=0,
                 pattern="",
-                message=f"文件不存在: {file_path}",
-                suggestion="请检查文件路径是否正确",
+                message=f"File does not exist: {file_path}",
+                suggestion="Please check that the file path is correct",
             )
         )
         return report
@@ -549,17 +549,17 @@ def scan_sql_file(
 
 def collect_sql_files(sql_folder: str) -> List[str]:
     """
-    递归收集 sql_folder 下所有 .sql 文件（排除隐藏目录如 .ipynb_checkpoints）。
+    Recursively collect all .sql files under sql_folder (hidden directories such as .ipynb_checkpoints are excluded).
 
     Args:
-        sql_folder: SQL 文件夹路径
+        sql_folder: Path of the SQL folder
 
     Returns:
-        .sql 文件路径列表，按路径排序
+        List of .sql file paths, sorted by path
     """
     sql_files = []
     for root, dirs, files in os.walk(sql_folder):
-        # 排除隐藏目录
+        # Exclude hidden directories
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for f in files:
             if f.endswith(".sql"):
@@ -568,7 +568,7 @@ def collect_sql_files(sql_folder: str) -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 主入口函数
+# Main entry function
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -580,44 +580,44 @@ def check_duckdb_compatibility(
     verbose: bool = False,
 ) -> Dict:
     """
-    检测 SQL 文件夹下所有 .sql 文件的 DuckDB 兼容性。
+    Check the DuckDB compatibility of all .sql files under a SQL folder.
 
-    这是主要入口函数，供外部脚本 import 调用，也可从命令行直接运行。
+    This is the main entry function; it can be imported by external scripts or run directly from the command line.
 
     Args:
-        sql_folder:  SQL 文件夹路径，默认为 ./sql/
-        fail_on_error: 如果为 True，发现 error 级别问题时抛出 SystemExit
-        output_json:   可选，将报告输出到指定 JSON 文件路径
-        verbose:       是否打印详细报告到 stdout
+        sql_folder:  Path of the SQL folder, defaults to ./sql/
+        fail_on_error: If True, raise SystemExit when error-level issues are found
+        output_json:   Optional, path of a JSON file to write the report to
+        verbose:       Whether to print the detailed report to stdout
 
     Returns:
         dict: {
-            "total_files": int,              # 扫描的文件总数
-            "total_issues": int,              # 问题总数
-            "error_count": int,               # error 级别总数
-            "warning_count": int,             # warning 级别总数
-            "info_count": int,                # info 级别总数
-            "compatible_files": int,           # 完全兼容（无 error）的文件数
-            "incompatible_files": int,         # 存在 error 的文件数
-            "files": [FileReport, ...],        # 每个文件的详细报告
-            "summary_by_category": dict,       # 按类别汇总
+            "total_files": int,              # total number of files scanned
+            "total_issues": int,              # total number of issues
+            "error_count": int,               # total number of error-level issues
+            "warning_count": int,             # total number of warning-level issues
+            "info_count": int,                # total number of info-level issues
+            "compatible_files": int,           # number of fully compatible files (no errors)
+            "incompatible_files": int,         # number of files with errors
+            "files": [FileReport, ...],        # detailed report for each file
+            "summary_by_category": dict,       # summary by category
         }
 
     Example:
         >>> from check_duckdb_compatibility import check_duckdb_compatibility
         >>> result = check_duckdb_compatibility("./sql")
-        >>> print(f"兼容文件: {result['compatible_files']}/{result['total_files']}")
+        >>> print(f"Compatible files: {result['compatible_files']}/{result['total_files']}")
 
-        >>> # 在 CI 中使用
+        >>> # Use in CI
         >>> result = check_duckdb_compatibility("./sql", fail_on_error=True)
     """
     if not os.path.isdir(sql_folder):
-        raise FileNotFoundError(f"SQL 文件夹不存在: {sql_folder}")
+        raise FileNotFoundError(f"SQL folder does not exist: {sql_folder}")
 
-    # 1. 收集所有 SQL 文件
+    # 1. Collect all SQL files
     sql_files = collect_sql_files(sql_folder)
     if not sql_files:
-        print(f"[WARN] 在 {sql_folder} 下未找到任何 .sql 文件")
+        print(f"[WARN] No .sql files were found in {sql_folder}.")
         return {
             "total_files": 0,
             "total_issues": 0,
@@ -630,13 +630,13 @@ def check_duckdb_compatibility(
             "summary_by_category": {},
         }
 
-    # 2. 逐文件扫描
+    # 2. Scan file by file
     file_reports: List[FileReport] = []
     for fpath in sql_files:
         report = scan_sql_file(fpath, verbose=verbose)
         file_reports.append(report)
 
-    # 3. 汇总统计
+    # 3. Aggregate statistics
     total_issues = sum(len(r.issues) for r in file_reports)
     total_errors = sum(r.error_count for r in file_reports)
     total_warnings = sum(r.warning_count for r in file_reports)
@@ -644,7 +644,7 @@ def check_duckdb_compatibility(
     compatible = sum(1 for r in file_reports if r.is_compatible)
     incompatible = sum(1 for r in file_reports if not r.is_compatible)
 
-    # 4. 按类别汇总
+    # 4. Summarize by category
     category_counts: Dict[str, int] = {}
     for report in file_reports:
         for issue in report.issues:
@@ -662,51 +662,51 @@ def check_duckdb_compatibility(
         "summary_by_category": category_counts,
     }
 
-    # 5. 打印报告
+    # 5. Print the report
     if print_report:
         _print_report(result)
 
-    # 6. 输出 JSON（可选）
+    # 6. Write the JSON report (optional)
     if output_json:
         _write_json_report(result, output_json)
 
-    # 7. 按需失败退出
+    # 7. Exit with failure on demand
     if fail_on_error and total_errors > 0:
-        print(f"\n[FAIL] 发现 {total_errors} 个 DuckDB 兼容性错误，请修复后再试。")
+        print(f"\n[FAIL] Found {total_errors} DuckDB compatibility error(s). Please fix them and try again.")
         sys.exit(1)
 
     return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 报告输出辅助函数
+# Report output helper functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _print_report(result: Dict) -> None:
-    """打印人类可读的控制台报告。"""
+    """Print a human-readable console report."""
     print("=" * 80)
-    print("  DuckDB 兼容性检测报告")
+    print("  DuckDB Compatibility Report")
     print("=" * 80)
-    print(f"  扫描文件总数:       {result['total_files']}")
-    print(f"  完全兼容文件数:     {result['compatible_files']}")
-    print(f"  存在兼容问题文件数: {result['incompatible_files']}")
+    print(f"  Total files scanned:             {result['total_files']}")
+    print(f"  Fully compatible files:          {result['compatible_files']}")
+    print(f"  Files with compatibility issues: {result['incompatible_files']}")
     print(f"  ─────────────────────────────")
-    print(f"  Error 级别问题:     {result['error_count']}")
-    print(f"  Warning 级别问题:   {result['warning_count']}")
-    print(f"  Info 级别问题:      {result['info_count']}")
-    print(f"  问题总数:           {result['total_issues']}")
+    print(f"  Error-level issues:              {result['error_count']}")
+    print(f"  Warning-level issues:            {result['warning_count']}")
+    print(f"  Info-level issues:               {result['info_count']}")
+    print(f"  Total issues:                    {result['total_issues']}")
     print()
 
-    # 按类别汇总
+    # Summarize by category
     if result["summary_by_category"]:
         print("─" * 80)
-        print("  问题分类汇总:")
+        print("  Summary by issue category:")
         for cat, cnt in sorted(result["summary_by_category"].items()):
-            print(f"    • {cat}: {cnt} 处")
+            print(f"    • {cat}: {cnt} occurrence(s)")
         print()
 
-    # 按文件逐一输出
+    # Output file by file
     for report in result["files"]:
         if not report.issues:
             continue
@@ -719,22 +719,22 @@ def _print_report(result: Dict) -> None:
         for issue in report.issues:
             icon = {"error": "🔴", "warning": "🟡", "info": "🔵"}.get(issue.severity, "⚪")
             print(f"    {icon} L{issue.line:04d}:{issue.column:03d} [{issue.severity.upper()}] [{issue.category}]")
-            print(f"       匹配: {issue.pattern}")
-            print(f"       说明: {issue.message}")
+            print(f"       Match:      {issue.pattern}")
+            print(f"       Message:    {issue.message}")
             if issue.suggestion:
-                print(f"       建议: {issue.suggestion}")
+                print(f"       Suggestion: {issue.suggestion}")
             print()
 
     print("=" * 80)
     if result["incompatible_files"] == 0:
-        print("  ✅ 所有 SQL 文件均未发现 DuckDB 错误级兼容性问题。")
+        print("  ✅ No error-level DuckDB compatibility issues were found in any SQL file.")
     else:
-        print(f"  ❌ {result['incompatible_files']} 个文件存在错误级兼容性问题，需要手动修改。")
+        print(f"  ❌ {result['incompatible_files']} file(s) have error-level compatibility issues that need manual changes.")
     print("=" * 80)
 
 
 def _write_json_report(result: Dict, output_path: str) -> None:
-    """将检测报告序列化为 JSON 写入文件。"""
+    """Serialize the compatibility report to JSON and write it to a file."""
     serializable = {
         "total_files": result["total_files"],
         "total_issues": result["total_issues"],
@@ -772,21 +772,21 @@ def _write_json_report(result: Dict, output_path: str) -> None:
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] JSON 报告已写入: {output_path}")
+    print(f"[INFO] JSON report written to: {output_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CLI 入口
+# CLI entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="DuckDB 兼容性检测工具 — 扫描 SQL 文件夹并报告不兼容的语法/函数",
+        description="DuckDB compatibility checker — scans a SQL folder and reports incompatible syntax/functions",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-使用示例:
+Usage examples:
   python check_duckdb_compatibility.py
   python check_duckdb_compatibility.py ./sql
   python check_duckdb_compatibility.py ./sql --json report.json
@@ -797,31 +797,31 @@ if __name__ == "__main__":
         "sql_folder",
         nargs="?",
         default="./sql",
-        help="SQL 文件夹路径（默认: ./sql）",
+        help="Path of the SQL folder (default: ./sql)",
     )
     parser.add_argument(
         "--json",
         dest="output_json",
         default=None,
-        help="将报告输出到指定的 JSON 文件",
+        help="Write the report to the given JSON file",
     )
     parser.add_argument(
         "--fail-on-error",
         action="store_true",
         default=False,
-        help="如果发现 error 级别问题，以非零退出码退出（适用于 CI）",
+        help="Exit with a non-zero exit code if error-level issues are found (useful for CI)",
     )
     parser.add_argument(
         "--quiet",
         action="store_true",
         default=False,
-        help="静默模式，不打印详细报告（通常和 --json 一起使用）",
+        help="Quiet mode: do not print the detailed report (usually used together with --json)",
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
-        help="详细模式，输出包括 quiet/info 在内的所有低优先级提示",
+        help="Verbose mode: output all low-priority hints, including quiet/info",
     )
 
     args = parser.parse_args()
