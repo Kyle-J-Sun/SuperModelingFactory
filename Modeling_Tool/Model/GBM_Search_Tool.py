@@ -217,10 +217,14 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
         raise RuntimeError("param_search produced no successful candidates.")
     search_df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
     param_cols = [c for c in search_space.keys() if c in search_df.columns]
-    best_row = search_df.iloc[0]
-    self.best_params_ = {k: _native(best_row[k]) for k in param_cols}
+    # Read each column separately: ``search_df.iloc[0]`` would upcast integer parameters (num_leaves=7 -> 7.0)
+    # to float, and LightGBM rejects 7.0 for an int parameter.
+    self.best_params_ = {k: _native(search_df[k].iloc[0]) for k in param_cols}
     self.search_results_ = search_df
     self.params = {**self.params, **self.best_params_}
+    # The backend model keeps its own reference to the params dict; point it at the merged dict, otherwise the
+    # refit below (and every later fit) would silently keep using the pre-search parameters.
+    self._model.params = self.params
     if refit:
         refit_kwargs = dict(fit_kwargs)
         train_sw = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
