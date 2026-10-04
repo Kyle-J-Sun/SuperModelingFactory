@@ -6,22 +6,52 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ExcelFormat:
-    '''
-    Initialize excel format.
-    
+    '''Initialize excel format.
+
+    Opens the output workbook and registers the library of preset cell formats (``dict_cell_format``) that the writer
+    classes ``ExcelWorkbook`` and ``ExcelMaster`` refer to by name.
+
+    Parameters
+    ----------
+    filepath : str
+        Path of the ``.xlsx`` file to create. The file is opened when the object is created (through ``pandas.ExcelWriter``
+        with the xlsxwriter engine) and receives its content only when the workbook is closed, so a workbook that is never
+        closed stays an empty file.
+
+    Attributes
+    ----------
+    engine : pandas.ExcelWriter
+        Writer (xlsxwriter engine) through which DataFrames are written.
+    workbook : xlsxwriter.workbook.Workbook
+        The underlying xlsxwriter workbook (``engine.book``).
+    basename : str
+        File name part of ``filepath``.
+    base_filepath : str
+        Directory part of ``filepath`` including the trailing separator (``"out/"`` for ``"out/report.xlsx"``), or an
+        empty string for a bare file name.
+    dict_cell_format : dict
+        Maps format names to xlsxwriter ``Format`` objects. It holds 87 preset names, several of which are aliases of the
+        same format (for example ``HEADER_1`` and ``#``), plus the names added with ``add_new_format``. Examples of
+        presets: ``BLUE_H4``, ``ORANGE_H3``, ``TABLE_HEADER``, ``----``, ``NUM%.2``, ``B``, ``YELLOW_BG``; list all of them
+        with ``sorted(dict_cell_format)``. Every method that takes a format name looks it up here and raises ``KeyError``
+        for an unknown name. The presets are also set as attributes named after their long names (for example
+        ``HEADER_1``).
+
+    Notes
+    -----
+    Register your own formats with ``add_new_format``; presets cannot be overridden.
     '''
     
     def __init__(self, filepath):
-        '''
-        This creates the workbook using the filename specified in
-        filename_workbook.
-        
+        '''Create the workbook for ``filepath`` and register the preset cell formats.
+
+        The parameters and attributes are described in the class docstring.
         '''
 
         self.engine = pd.ExcelWriter(filepath, engine='xlsxwriter')
         self.workbook = self.engine.book
         self.basename = os.path.basename(filepath)
-        self.base_filepath = filepath.strip(self.basename)
+        self.base_filepath = filepath[:len(filepath) - len(self.basename)]
 
 
         ######### Basic Text-related Formatting ###############
@@ -479,7 +509,23 @@ class ExcelFormat:
         self.dict_cell_format['YELLOW_BG'] = self.BG_LIGHT_YELLOW
 
     def add_new_format(self, format_dict, format_name):
-        """ Add a new user-defined format. """
+        """Add a new user-defined format.
+
+        Parameters
+        ----------
+        format_dict : dict
+            xlsxwriter format properties, for example ``{"bold": True, "bg_color": "#FFE699"}``; passed to
+            ``workbook.add_format``.
+        format_name : str
+            Name under which the format is registered in ``dict_cell_format``. Use it wherever a format name is accepted
+            (``cformat``, ``titleformat``, ``headerformat``, ``valueformat``, ...).
+
+        Returns
+        -------
+        int
+            0 when the format was added; 1 when ``format_name`` is already registered (every preset name counts): the existing
+            format is kept, nothing is overwritten, and an INFO message is logged instead of raising an exception.
+        """
         if format_name not in self.dict_cell_format.keys():
             self.dict_cell_format[format_name] = self.workbook.add_format(format_dict)
             return 0
