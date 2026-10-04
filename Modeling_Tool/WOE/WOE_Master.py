@@ -11,7 +11,39 @@ from Modeling_Tool.Core.utils import _calc_woe_iv_values
 from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 def get_overall_woe_table(woe_master, data, varlist=None):
-    """Build the WOE statistics table for the overall sample, with a structure aligned to the training-set mapping table."""
+    """Build the WOE statistics table for the overall sample, with a structure aligned to the training-set mapping table.
+
+    Each variable is re-binned on ``data`` with the bin edges of its fitted mapping table
+    (``woe_master.woe_dict``), and the per-bin counts, WOE, IV and lift are recomputed on this sample.
+
+    Parameters
+    ----------
+    woe_master : WOE_Master
+        Fitted ``WOE_Master``. Its ``woe_dict``, ``varlist``, ``dep`` and ``missing_ref_value`` attributes are used.
+    data : pandas.DataFrame
+        Sample to profile. It must contain every variable in ``varlist`` and the target column ``woe_master.dep``.
+    varlist : list of str or None, default None
+        Variables to profile. ``None`` uses ``woe_master.varlist``. A variable without an entry in
+        ``woe_master.woe_dict`` raises ``KeyError``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per bin, stacked over the variables of ``varlist``, with the columns ``VAR``, ``BIN_NUM``,
+        ``BIN_RANGE``, ``MIN``, ``MAX``, ``N``, ``AVG_BAD``, ``WOE``, ``IV``, ``N_BAD``, ``N_GOOD``,
+        ``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN`` and ``LIFT``.
+
+    Notes
+    -----
+    - Missing values are filled with ``woe_master.missing_ref_value`` before binning. When ``data`` has missing
+      values, they are reported as a row whose ``BIN_NUM`` and ``BIN_RANGE`` are NaN (and whose ``MIN`` and ``MAX``
+      equal ``missing_ref_value``).
+    - ``BIN_NUM`` is renumbered by the new binning, so it is not guaranteed to match the numbers of the training
+      mapping table, and the rows are not guaranteed to be in bin order. The interval closure (``(a, b]`` or
+      ``[a, b)``) is copied from the first non-missing ``BIN_RANGE`` of the training table.
+    - ``LIFT`` is ``AVG_BAD`` divided by the unweighted mean of ``AVG_BAD`` over the bins, not by the overall bad
+      rate. A bin without bads (or without goods) gets an infinite WOE, because no smoothing is applied.
+    """
     if varlist is None:
         varlist = woe_master.varlist
 
@@ -79,7 +111,49 @@ def get_overall_woe_table(woe_master, data, varlist=None):
 
 
 def get_group_woe_table(woe_master, data, group, varlist=None):
-    """Build the WOE summary, pivot, and detail tables for grouped samples."""
+    """Build the WOE summary, pivot, and detail tables for grouped samples.
+
+    Each variable is re-binned on ``data`` with the bin edges of its fitted mapping table
+    (``woe_master.woe_dict``), and the bin statistics are computed for every value of ``group``.
+
+    Parameters
+    ----------
+    woe_master : WOE_Master
+        Fitted ``WOE_Master``. Its ``woe_dict``, ``varlist``, ``dep`` and ``missing_ref_value`` attributes are used.
+    data : pandas.DataFrame
+        Sample to profile. It must contain ``group``, the target column ``woe_master.dep`` and every variable in
+        ``varlist``.
+    group : str
+        Name of the grouping column (for example a month or a sample tag).
+    varlist : list of str or None, default None
+        Variables to profile. ``None`` uses ``woe_master.varlist``. A variable without an entry in
+        ``woe_master.woe_dict`` raises ``KeyError``.
+
+    Returns
+    -------
+    dict
+        A dictionary with three DataFrames:
+
+        - ``"summary"``: one row per variable and group value, with the columns ``<group>``, ``N``, ``IV``,
+          ``KS_PER_BIN``, ``TOP_LIFT``, ``BTM_LIFT``, ``SLOPE``, ``direction`` and ``VAR``.
+        - ``"pivot"``: the WOE of every bin and group, indexed by (``VAR``, ``BIN_NUM``, ``BIN_RANGE``) with one
+          column per group value.
+        - ``"detail"``: one row per variable, group and bin, with the columns ``<group>``, ``_BIN_NUM``,
+          ``_BIN_RANGE``, ``MIN``, ``MAX``, ``N``, ``AVG_BAD``, ``N_BAD``, ``N_GOOD``, ``BAD_PCT_PER_BIN``,
+          ``GOOD_PCT_PER_BIN``, ``WOE``, ``IV``, ``LIFT`` and ``VAR``.
+
+    Notes
+    -----
+    - Missing values are filled with ``woe_master.missing_ref_value`` before binning.
+    - The bad and good shares (``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN``) use the totals of the whole sample (all
+      groups) as denominators, not the totals of the group, so ``WOE`` and ``IV`` of a group cell are relative to the
+      overall bad and good counts. ``LIFT`` divides ``AVG_BAD`` by its unweighted mean over all group-bin cells of
+      the variable.
+    - In ``summary``, ``IV`` is the sum of the cell IVs of the group, and ``KS_PER_BIN`` repeats ``TOP_LIFT`` (the
+      largest ``LIFT`` of the group); it is not a KS statistic. ``SLOPE`` is the least-squares slope of ``AVG_BAD``
+      over the position of the bin within the group (NaN when it is undefined), and ``direction`` is its sign
+      (1, -1, or 0 when the slope is zero or NaN).
+    """
     if varlist is None:
         varlist = woe_master.varlist
 
@@ -183,26 +257,65 @@ class WOE_Master(object):
     - Updating and adjusting WOE bins
     - Plotting bivariate WOE comparison charts
 
-    Attributes:
-        train_data: pandas.DataFrame, training dataset
-        varlist: list, variable names for WOE transformation
-        dep: str, target variable name
-        graph_save_dir: str, directory for saving graphs
-        woe_suffix: str, suffix for WOE variable names
-        missing_ref_value: int/float, reference value for missing data
-        woe_dict: dict, WOE mapping dictionary
+    The constructor parameters are documented in ``__init__``.
+
+    Attributes
+    ----------
+    train_data : pandas.DataFrame
+        Training dataset.
+    varlist : list of str
+        Variable names for WOE transformation. ``load_mapping_table`` replaces it with the variables of the loaded
+        table; ``update_woe`` does not change it.
+    dep : str or None
+        Target variable name.
+    graph_save_dir : str
+        Base directory for saving graphs.
+    woe_suffix : str
+        Suffix of the WOE column names created by ``transform``.
+    missing_ref_value : int or float
+        Reference value that replaces missing data when ``transform`` bins it.
+    woe_dict : dict
+        WOE mapping dictionary ``{variable: DataFrame}``, filled by ``fit``, ``update_woe`` and
+        ``load_mapping_table``. It is empty until one of them has run.
+
+    Notes
+    -----
+    Only numeric (and boolean) variables can be binned; ``fit`` raises ``TypeError`` for a string column.
     """
 
     def __init__(self, train_data, varlist, dep=None, graph_save_dir="", woe_suffix="_woe", missing_ref_value=SMF_MISSING_BIN, remove_exist_dir = False):
         """Initialize WOE_Master instance.
 
-        Args:
-            train_data: pandas.DataFrame, training dataset with features and target
-            varlist: list, variables to perform WOE transformation
-            dep: str, target variable name
-            graph_save_dir: str, directory to save graphs
-            woe_suffix: str, suffix for WOE variable names
-            missing_ref_value: int/float, reference value for missing values
+        Parameters
+        ----------
+        train_data : pandas.DataFrame
+            Training dataset with the features and the target. It is stored without a copy. ``fit`` and
+            ``update_woe`` bin its columns, and ``transform()`` encodes it when no data is passed.
+        varlist : list of str
+            Variables to perform the WOE transformation on.
+        dep : str or None, default None
+            Target variable name (binary, 1 = bad). Needed by ``fit``, ``update_woe`` and ``plot_bivar_graph``.
+        graph_save_dir : str, default ""
+            Base directory of the images written by ``plot_bivar_graph``.
+        woe_suffix : str, default "_woe"
+            Suffix appended to the variable name to name the WOE columns created by ``transform``.
+        missing_ref_value : int or float, default SMF_MISSING_BIN
+            Value that replaces missing data when ``transform`` bins it. The default ``SMF_MISSING_BIN`` is the
+            smallest float64, which cannot collide with real data.
+        remove_exist_dir : bool, default False
+            If True, ``graph_save_dir`` is deleted recursively when the object is created (errors, for example a
+            missing folder, are ignored silently).
+
+        Raises
+        ------
+        ValueError
+            If ``missing_ref_value`` equals a value found in the columns of ``varlist`` of ``train_data``.
+
+        Warns
+        -----
+        UserWarning
+            If ``missing_ref_value`` is a finite number with an absolute value below 1e10 (it may collide with real
+            data).
         """
         self.train_data = train_data
         self.varlist = varlist
@@ -253,7 +366,7 @@ class WOE_Master(object):
             
         Examples
         --------
-        >>> VarExtractionInsights.remove_folder('/path/to/folder')
+        >>> WOE_Master.remove_folder('/path/to/folder')
         """
         import shutil
         try:
