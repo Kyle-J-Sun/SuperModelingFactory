@@ -18,56 +18,56 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
                          tree_binning = False, random_state=42, ascending = False,
                          withSummary = False, add_func = None):
     """
-    计算指定分数字段的收益表（Gains Table）。
+    Compute the Gains table for the given score column.
     
-    对数据进行分箱处理后，计算每个分箱的统计指标，包括样本数、坏样本率、
-    累计好/坏样本数、WOE、IV等。
+    After binning the data, compute the statistics of each bin, including the number of
+    samples, the bad rate, the cumulative number of good/bad samples, WOE, IV, etc.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     score : str
-        分数字段名
+        Name of the score column.
     dep : str
-        目标变量名（二分类标签，0和1）
+        Name of the target variable (binary label, 0 and 1).
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 2000
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     retSummary : bool, default False
-        是否只返回汇总指标
+        Whether to return only the summary metrics.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     add_func : callable, optional
-        自定义统计函数
+        Custom statistics function.
     
     Returns
     -------
     pandas.DataFrame
-        收益表，包含各分箱统计指标
+        Gains table containing the statistics of each bin.
     """
     
     res, edges = super_binning(data = data, 
@@ -134,8 +134,8 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
     
 
     if add_func is not None:
-        # 显式选中全部列（含分组列）：add_func 照旧能看到 _bin_num / _bin_range，
-        # 也不触发 pandas 对 apply 默认包含分组列的弃用告警
+        # Explicitly select all columns (including the grouping columns): add_func still sees _bin_num / _bin_range,
+        # and the pandas deprecation warning about apply including the grouping columns by default is not triggered
         gains_table_add = res.groupby(["_bin_num", "_bin_range"], dropna=False)[res.columns.unique().tolist()].apply(add_func)
         gains_table = gains_table.merge(gains_table_add, right_index = True, left_index = True, how = 'left')
     
@@ -194,60 +194,61 @@ def _get_gains_table_single(data, dep, nbins = 10, precision = 5, min_bin_prop =
                             tree_binning = False, random_state=42, ascending = False,
                             withSummary = False, add_func = None):
     """
-    计算单个模型的收益表。
+    Compute the Gains table of a single model.
     
-    根据传入的score字段或模型预测结果，计算收益表。
-    优先使用传入的score字段，若无则使用模型预测概率。
+    Compute the Gains table from the given score column or from the model predictions.
+    The given score column takes precedence; if none is given, the predicted probabilities
+    of the model are used.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     score : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型（当score为None时使用）
+        Machine learning model (used when score is None).
     varlist : list, optional
-        模型特征列表
+        List of model features.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     retSummary : bool, default False
-        是否只返回汇总指标
+        Whether to return only the summary metrics.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     add_func : callable, optional
-        自定义统计函数
+        Custom statistics function.
     
     Returns
     -------
     pandas.DataFrame or int
-        收益表；若缺少必要参数返回-1/-2/-3
+        Gains table; -1/-2/-3 is returned if required parameters are missing.
     """
     
     if score is None and model is None and varlist is None:
@@ -310,64 +311,64 @@ def _get_perf_summary_single(train,
                              random_state = 42, 
                              gains_table = False):
     """
-    计算单个模型的性能评估汇总。
+    Compute the performance evaluation summary of a single model.
     
-    对训练集、验证集和oot样本进行模型性能评估，包括AUC、KS、
-    Lift等指标，并可选择生成收益表。
+    Evaluate the model performance on the training, validation and OOT samples, including
+    metrics such as AUC, KS and Lift, and optionally generate the Gains table.
     
     Parameters
     ----------
     train : pandas.DataFrame, optional
-        训练数据集
+        Training dataset.
     validation : pandas.DataFrame, optional
-        验证数据集
+        Validation dataset.
     oot : pandas.DataFrame, optional
-        oot（Out-of-Time）数据集
+        Out-of-time (OOT) dataset.
     tgt_name : str
-        目标变量名
+        Name of the target variable.
     scr_name : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     feature_cols : list, optional
-        模型特征列表
+        List of model features.
     fig_save_path : str, optional
-        图片保存路径
+        Path to save the figure.
     rpt_save_path : str, optional
-        报告保存路径
+        Path to save the report.
     to_show : bool, default False
-        是否显示图形
+        Whether to display the figures.
     display : bool, default True
-        是否打印结果
+        Whether to print the results.
     dist_bins : int, default 20
-        分布分箱数
+        Number of bins for the score distribution.
     pct_bins : int, default 10
-        百分比分箱数
+        Number of percentile bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default False
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     init_equi_bins : int, default 1000
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     chi2_p : float, default 0.9
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     gains_table : bool, default True
-        是否计算收益表
+        Whether to compute the Gains table.
     
     Returns
     -------
     pandas.DataFrame or int
-        性能评估汇总表；若缺少必要参数返回-1/-2/-3
+        Performance evaluation summary table; -1/-2/-3 is returned if required parameters are missing.
     """
     
     if scr_name is None and model is None and feature_cols is None:
@@ -428,16 +429,16 @@ def _get_perf_summary_single(train,
     if btm_cols and top_cols:
         btm_str = btm_cols[0]
         top_str = top_cols[0]
-        # 提取数字
+        # Extract the number
         numbers = re.findall(r'\d+', btm_str)
         if numbers:
             quantile = int(numbers[0])
         else:
-            # 默认值，例如设为 pct_bins 的倒数？
-            quantile = pct_bins  # 或其他合理默认
+            # Default value, e.g. the reciprocal of pct_bins?
+            quantile = pct_bins  # or another reasonable default
     else:
-        # 如果没有这些列，说明数据不足或未生成，跳过后续计算或赋予默认值
-        # 这里可以选择跳过 Lift 列的计算，直接返回 model_eval_result_df
+        # If these columns are missing, the data is insufficient or they were not generated: skip the remaining computation or assign a default value
+        # Here we may skip the computation of the Lift columns and return model_eval_result_df directly
         return model_eval_result_df
             
 #     quantile = int(re.findall(r'\d+', btm_str)[0])
@@ -514,7 +515,7 @@ def _get_perf_summary_single(train,
     oos_gains['index'] = 'oos'
     oot_gains['index'] = 'oot'
     
-    # 缺失样本集的占位空表不参与拼接，否则整数列（N_BUMP / N_BINS）会被它变成 object
+    # Empty placeholder tables for missing sample sets are excluded from the concatenation, otherwise they turn the integer columns (N_BUMP / N_BINS) into object dtype
     gains_summ = concat_non_empty([ins_gains, oos_gains, oot_gains])
     
     model_eval_result_df = model_eval_result_df.merge(gains_summ, on = ['index'], how = 'left')
@@ -535,56 +536,56 @@ def _get_gains_by_custom_metrics_scr(data, score, dep, nbins = 10, precision = 5
                                     eval_metrics = ["age", "monthly_income", "education"], metric_agg_func = "mean", 
                                     ascending = False, withSummary = False):
     """
-    计算指定分数字段的收益表，并包含自定义指标的聚合统计。
+    Compute the Gains table for the given score column, including aggregated statistics of custom metrics.
     
-    对数据进行分箱处理后，计算每个分箱的基础统计指标以及
-    自定义指标的聚合值（如均值等）。
+    After binning the data, compute the basic statistics of each bin as well as
+    the aggregated values of the custom metrics (e.g. the mean).
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     score : str
-        分数字段名
+        Name of the score column.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 2000
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     eval_metrics : list, default ["age", "monthly_income", "education"]
-        需要统计的自定义指标列表
+        List of custom metrics to compute.
     metric_agg_func : str or callable, default "mean"
-        自定义指标的聚合函数
+        Aggregation function for the custom metrics.
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     
     Returns
     -------
     pandas.DataFrame
-        收益表，包含基础统计和自定义指标聚合值
+        Gains table containing the basic statistics and the aggregated values of the custom metrics.
     """
     
     res, edges = super_binning(data = data, 
@@ -607,7 +608,7 @@ def _get_gains_by_custom_metrics_scr(data, score, dep, nbins = 10, precision = 5
                                ascending = ascending)
 
 
-    # 计算每个分箱的统计信息
+    # Compute the statistics of each bin
     gains_table_info = res.groupby(["_bin_num", "_bin_range"], dropna = False)\
                      .agg(MIN = (score, "min"),
                           MAX = (score, "max"),
@@ -645,59 +646,60 @@ def _get_cust_gains_table_single(data, dep, nbins = 10, precision = 5, min_bin_p
                                    eval_metrics = ["age", "monthly_income", "education"], metric_agg_func = "mean",
                                   withSummary = False):
     """
-    计算单个模型的自定义指标收益表。
+    Compute the Gains table with custom metrics of a single model.
     
-    根据传入的score字段或模型预测结果，计算包含自定义指标聚合统计的收益表。
+    Compute the Gains table, including the aggregated statistics of the custom metrics, from the given
+    score column or from the model predictions.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     score : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     varlist : list, optional
-        模型特征列表
+        List of model features.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     eval_metrics : list, default ["age", "monthly_income", "education"]
-        需要统计的自定义指标列表
+        List of custom metrics to compute.
     metric_agg_func : str or callable, default "mean"
-        自定义指标的聚合函数
+        Aggregation function for the custom metrics.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     
     Returns
     -------
     pandas.DataFrame or int
-        收益表；若缺少必要参数返回-1/-2/-3
+        Gains table; -1/-2/-3 is returned if required parameters are missing.
     """
     
     if score is None and model is None and varlist is None:
@@ -745,74 +747,75 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
                     tree_binning = False, random_state=42, ascending = False, withSummary = False, wholeGroup = False, 
                     add_func = None, weight_col = None, weighted_binning = None):
     """
-    计算分组收益表。
+    Compute the grouped Gains table.
     
-    根据分组字段对数据进行分组，分别计算每个分组的收益表。
-    若未指定分组字段，则计算整体收益表。
+    Split the data into groups by the grouping column and compute the Gains table of each group separately.
+    If no grouping column is specified, compute the overall Gains table.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     score : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     varlist : list, optional
-        模型特征列表
+        List of model features.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     grp_name : str, optional
-        分组字段名
+        Name of the grouping column.
     min_data_size : int, default 100
-        每组最小样本数
+        Minimum number of samples per group.
     grp_colname : str, optional
-        分组结果列名
+        Name of the group column in the output.
     sync_range : bool, default True
-        是否同步分箱边界
+        Whether to synchronize the bin boundaries across groups.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     retSummary : bool, default False
-        是否只返回汇总指标
+        Whether to return only the summary metrics.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     wholeGroup : bool, default False
-        是否使用全部数据分组
+        Whether to use all the data for binning.
     add_func : callable, optional
-        自定义统计函数
+        Custom statistics function.
     weight_col : str, optional
-        样本权重列名；提供且无 ``grp_name`` 时按权重聚合 Gains（输出 ``N`` 为权重和、``N_RAW`` 为行数）
+        Name of the sample weight column; when provided and ``grp_name`` is not given, the Gains table is
+        aggregated by weight (``N`` in the output is the sum of the weights and ``N_RAW`` is the number of rows).
     weighted_binning : bool, optional
-        True 时按累计权重等频分箱；False 时按行数（默认）
+        If True, use equal-frequency binning by cumulative weight; if False, bin by the number of rows (default).
 
     Returns
     -------
     pandas.DataFrame
-        分组收益表
+        Grouped Gains table.
     """
     
     if weight_col is not None and grp_name is None:
@@ -1106,72 +1109,72 @@ def get_perf_summary(train, validation, oot, tgt_name,
                      gains_table = False,
                      weight_col = None):
     """
-    计算分组性能评估汇总。
+    Compute the grouped performance evaluation summary.
     
-    对训练集、验证集和oot样本进行分组性能评估，根据oot_grp_name
-    字段分组后分别计算各组的性能指标。
+    Evaluate the performance on the training, validation and OOT samples by group: the data are
+    split by the ``oot_grp_name`` column and the performance metrics of each group are computed separately.
     
     Parameters
     ----------
     train : pandas.DataFrame, optional
-        训练数据集
+        Training dataset.
     validation : pandas.DataFrame, optional
-        验证数据集
+        Validation dataset.
     oot : pandas.DataFrame, optional
-        oot数据集
+        Out-of-time (OOT) dataset.
     tgt_name : str
-        目标变量名
+        Name of the target variable.
     scr_name : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     feature_cols : list, optional
-        模型特征列表
+        List of model features.
     fig_save_path : str, optional
-        图片保存路径
+        Path to save the figure.
     rpt_save_path : str, optional
-        报告保存路径
+        Path to save the report.
     to_show : bool, default False
-        是否显示图形
+        Whether to display the figures.
     display : bool, default True
-        是否打印结果
+        Whether to print the results.
     dist_bins : int, default 20
-        分布分箱数
+        Number of bins for the score distribution.
     pct_bins : int, default 10
-        百分比分箱数
+        Number of percentile bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default False
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     init_equi_bins : int, default 1000
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     chi2_p : float, default 0.9
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     oot_grp_name : str, optional
-        oot分组字段名
+        Name of the grouping column for the OOT data.
     min_data_size : int, default 100
-        每组最小样本数
+        Minimum number of samples per group.
     grp_colname : str, optional
-        分组结果列名
+        Name of the group column in the output.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     gains_table : bool, default True
-        是否计算收益表
+        Whether to compute the Gains table.
     weight_col : str, optional
-        各数据集 DataFrame 中的样本权重列；无分组时用于加权 AUC/KS 等指标
+        Sample weight column in each dataset DataFrame; used for weighted metrics such as AUC/KS when there is no grouping.
 
     Returns
     -------
     pandas.DataFrame
-        分组性能评估汇总表
+        Grouped performance evaluation summary table.
     """
     
     if weight_col is not None and oot_grp_name is None:
@@ -1292,46 +1295,46 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
                chi2_p = 0.95, init_equi_bins = 100, fillna = -999999, spec_values = [], 
                tree_binning = False, random_state = 42, weight_col = None, sample_weight = None, wgt_col = None):
     """
-    创建交叉风险表。
+    Create a cross-risk table.
     
-    对两个分数字段进行分箱后，计算交叉分组的风险聚合值。
-    支持对数值型变量进行自动分箱。
+    After binning the two score columns, compute the aggregated risk value of each cross group.
+    Numeric variables can be binned automatically.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     score_list : list
-        分数字段列表，长度为2
+        List of score columns, of length 2.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int or list
-        分箱数量（整数或长度为2的列表）
+        Number of bins (an integer or a list of length 2).
     agg_col : str, optional
-        聚合列名，默认为dep
+        Name of the column to aggregate; defaults to ``dep``.
     precision : int or list, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float or list, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default False
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     binning_numeric : list, default [True, True]
-        是否对数值型字段分箱
+        Whether to bin numeric columns.
     agg_func : str, callable, tuple or dict, default 'mean'
-        聚合函数。
+        Aggregation function.
         
-        常规用法与 ``pandas.crosstab`` 的 ``aggfunc`` 一致，例如 ``'mean'``、
-        ``'sum'``、``'count'`` 或自定义函数。
+        Regular usage is the same as the ``aggfunc`` of ``pandas.crosstab``, e.g. ``'mean'``,
+        ``'sum'``, ``'count'`` or a custom function.
         
-        也支持直接计算两个字段聚合后的比值：
+        The ratio of two aggregated columns can also be computed directly:
         
-        1. 简写形式：
+        1. Shorthand form:
            ``agg_col=(numerator_col, denominator_col), agg_func='ratio'``
-        2. tuple形式：
+        2. Tuple form:
            ``agg_func=('ratio', numerator_col, denominator_col)``
-        3. dict形式：
+        3. Dict form:
            ``agg_func={
                'func': 'ratio',
                'numerator': numerator_col,
@@ -1346,24 +1349,24 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
                'valid_only': True
            }``
         
-        当 ``return_count=True`` 时，返回结果的 columns 会增加一层指标名，
-        包含 ratio 矩阵和 N 矩阵；当 ``return_count_pct=True`` 时，
-        额外返回每个格子的 N 占比矩阵，计算方式为：
-        当前格子 count / 右下角 Total count。
+        When ``return_count=True``, the columns of the result get an additional level of metric names,
+        containing the ratio matrix and the N matrix; when ``return_count_pct=True``,
+        the matrix of the share of N in each cell is also returned, computed as:
+        count of the current cell / Total count in the bottom-right corner.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     weight_col : str, optional
         Column in ``data`` with per-row sample weights (alias: ``wgt_col``).
     sample_weight : array-like, optional
@@ -1374,7 +1377,7 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     Returns
     -------
     pandas.DataFrame
-        交叉风险表
+        Cross-risk table.
     
     Examples
     --------
@@ -1684,68 +1687,68 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
                                     tree_binning = False, random_state=42, ascending = True,
                                     eval_metrics = ["age", "monthly_income", "education"], metric_agg_func = "mean", withSummary = False):
     """
-    计算分组自定义指标收益表。
+    Compute the grouped Gains table with custom metrics.
     
-    根据分组字段对数据进行分组，分别计算每个分组的自定义指标收益表。
-    收益表包含基础统计指标以及自定义指标的聚合值。
+    Split the data into groups by the grouping column and compute the custom-metric Gains table of each group separately.
+    The Gains table contains the basic statistics as well as the aggregated values of the custom metrics.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     score : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     varlist : list, optional
-        模型特征列表
+        List of model features.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     grp_name : str, optional
-        分组字段名
+        Name of the grouping column.
     min_data_size : int, default 100
-        每组最小样本数
+        Minimum number of samples per group.
     grp_colname : str, optional
-        分组结果列名
+        Name of the group column in the output.
     sync_range : bool, default True
-        是否同步分箱边界
+        Whether to synchronize the bin boundaries across groups.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     eval_metrics : list, default ["age", "monthly_income", "education"]
-        需要统计的自定义指标列表
+        List of custom metrics to compute.
     metric_agg_func : str or callable, default "mean"
-        自定义指标的聚合函数
+        Aggregation function for the custom metrics.
     withSummary : bool, default False
-        是否包含总体汇总行
+        Whether to include an overall summary row.
     
     Returns
     -------
     pandas.DataFrame
-        分组自定义指标收益表
+        Grouped Gains table with custom metrics.
     """
     
     if grp_colname is None:
@@ -1874,26 +1877,26 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
 
 def tie_score_rate(data, score):
     """
-    计算分数重复率。
+    Compute the score tie rate.
     
-    计算分数中非唯一值的比例，即存在重复的样本占比。
+    Compute the proportion of non-unique score values, i.e. the share of samples whose score is duplicated.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     score : str
-        分数字段名
+        Name of the score column.
     
     Returns
     -------
     float
-        分数重复率（0到1之间）
+        Score tie rate (between 0 and 1).
     
     Examples
     --------
     >>> tie_score_rate(data, 'score')
-    0.15  # 表示15%的样本存在分数重复
+    0.15  # means that 15% of the samples have a duplicated score
     """
     
     n_unique_scr = len(data[score].unique())
@@ -1903,26 +1906,26 @@ def tie_score_rate(data, score):
 
 def score_unique_rate(data, score):
     """
-    计算分数唯一率。
+    Compute the score unique rate.
     
-    计算分数中唯一值占总样本数的比例。
+    Compute the proportion of unique score values in the total number of samples.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表（此参数保留但未使用）
+        Input data table (this parameter is retained but not used).
     score : array-like
-        分数字段或数组
+        Score column or array.
     
     Returns
     -------
     float
-        分数唯一率（0到1之间）
+        Score unique rate (between 0 and 1).
     
     Examples
     --------
     >>> score_unique_rate(data, data['score'])
-    0.85  # 表示85%的样本分数是唯一的
+    0.85  # means that the scores of 85% of the samples are unique
     """
     
     return len(np.unique(score)) / len(score)
@@ -1930,49 +1933,49 @@ def score_unique_rate(data, score):
 
 class GainsTableCalculator:
     """
-    收益表计算器。
+    Gains table calculator.
     
-    整合了收益表计算的多种功能，支持基础收益表和自定义指标收益表。
-    提供面向对象的接口进行分组收益表计算。
+    Integrates the various Gains table functions and supports both the basic Gains table and the
+    Gains table with custom metrics. Provides an object-oriented interface for computing grouped Gains tables.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table.
     dep : str
-        目标变量名
+        Name of the target variable.
     nbins : int, default 10
-        分箱数量
+        Number of bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values.
     score : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     varlist : list, optional
-        模型特征列表
+        List of model features.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values.
     spec_values : list, default []
-        特殊值列表
+        List of special values.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending.
     
     Examples
     --------
@@ -1987,50 +1990,50 @@ class GainsTableCalculator:
                  tree_binning = False, random_state = 42, ascending = False,
                  weight_col = None, weighted_binning = None):
         """
-        初始化收益表计算器。
+        Initialize the Gains table calculator.
         
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据表
+            Input data table.
         dep : str
-            目标变量名
+            Name of the target variable.
         nbins : int, default 10
-            分箱数量
+            Number of bins.
         precision : int, default 5
-            边界值精度
+            Precision of the bin boundary values.
         min_bin_prop : float, default 0.05
-            每箱最小样本占比
+            Minimum proportion of samples per bin.
         include_missing : bool, default True
-            是否包含缺失值
+            Whether to include missing values.
         score : str, optional
-            分数字段名
+            Name of the score column.
         model : sklearn-like model, optional
-            机器学习模型
+            Machine learning model.
         varlist : list, optional
-            模型特征列表
+            List of model features.
         equal_freq : bool, default True
-            True为等频分箱
+            True for equal-frequency binning.
         chi2_method : bool, default False
-            是否使用卡方分箱
+            Whether to use chi-square binning.
         chi2_p : float, default 0.95
-            卡方检验显著性水平
+            Significance level of the chi-square test.
         init_equi_bins : int, default 100
-            初始等频分箱数量
+            Initial number of equal-frequency bins.
         fillna : any, default -999999
-            缺失值填充值
+            Fill value for missing values.
         spec_values : list, default []
-            特殊值列表
+            List of special values.
         tree_binning : bool, default False
-            是否使用决策树分箱
+            Whether to use decision-tree binning.
         random_state : int, default 42
-            随机种子
+            Random seed.
         ascending : bool, default False
-            分箱顺序是否升序
+            Whether the bin order is ascending.
         weight_col : str, optional
-            样本权重列名（须在 ``data`` 中）
+            Name of the sample weight column (must be in ``data``).
         weighted_binning : bool, optional
-            True 时按累计权重等频分箱
+            If True, use equal-frequency binning by cumulative weight.
         """
         self.data = data
         self.dep = dep
@@ -2057,31 +2060,31 @@ class GainsTableCalculator:
                   sync_range = True, retSummary = False, withSummary = False,
                   wholeGroup = False, add_func = None, weight_col = None):
         """
-        计算收益表。
+        Compute the Gains table.
         
         Parameters
         ----------
         grp_name : str, optional
-            分组字段名
+            Name of the grouping column.
         min_data_size : int, default 100
-            每组最小样本数
+            Minimum number of samples per group.
         grp_colname : str, optional
-            分组结果列名
+            Name of the group column in the output.
         sync_range : bool, default True
-            是否同步分箱边界
+            Whether to synchronize the bin boundaries across groups.
         retSummary : bool, default False
-            是否只返回汇总指标
+            Whether to return only the summary metrics.
         withSummary : bool, default False
-            是否包含总体汇总行
+            Whether to include an overall summary row.
         wholeGroup : bool, default False
-            是否使用全部数据分组
+            Whether to use all the data for binning.
         add_func : callable, optional
-            自定义统计函数
+            Custom statistics function.
         
         Returns
         -------
         pandas.DataFrame
-            收益表
+            Gains table.
         """
         return get_gains_table(
             data = self.data,
@@ -2117,46 +2120,48 @@ class GainsTableCalculator:
 
 class PerformanceEvaluator:
     """
-    性能评估器。
+    Performance evaluator.
     
-    整合了模型性能评估的多种功能，支持多数据集、多分组的性能评估。
-    提供面向对象的接口进行性能指标计算和汇总。
+    Integrates the various model performance evaluation functions and supports evaluation across
+    multiple datasets and multiple groups. Provides an object-oriented interface for computing and
+    summarizing performance metrics.
     
     Parameters
     ----------
     tgt_name : str or list of str
-        目标变量名。可传入多个 y 标签的 list/tuple → 逐标签评估后纵向拼接 (输出新增 tgt_name 列),
-        并为每个标签各自出图。
+        Name of the target variable. A list/tuple of several y labels can be passed: each label is evaluated
+        separately and the results are stacked vertically (the output gains a ``tgt_name`` column),
+        and a separate figure is drawn for each label.
     scr_name : str, optional
-        分数字段名
+        Name of the score column.
     model : sklearn-like model, optional
-        机器学习模型
+        Machine learning model.
     feature_cols : list, optional
-        模型特征列表
+        List of model features.
     dist_bins : int, default 20
-        分布分箱数
+        Number of bins for the score distribution.
     pct_bins : int, default 10
-        百分比分箱数
+        Number of percentile bins.
     precision : int, default 5
-        边界值精度
+        Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin.
     include_missing : bool, default False
-        是否包含缺失值
+        Whether to include missing values.
     equal_freq : bool, default True
-        True为等频分箱
+        True for equal-frequency binning.
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning.
     init_equi_bins : int, default 1000
-        初始等频分箱数量
+        Initial number of equal-frequency bins.
     chi2_p : float, default 0.9
-        卡方检验显著性水平
+        Significance level of the chi-square test.
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning.
     random_state : int, default 42
-        随机种子
+        Random seed.
     weight_col : str, optional
-        默认权重列；各 ``add_dataset`` 也可单独指定
+        Default weight column; each ``add_dataset`` call can also specify its own.
 
     Examples
     --------
@@ -2166,7 +2171,7 @@ class PerformanceEvaluator:
     >>> evaluator.add_dataset('oot', oot_df)
     >>> result = evaluator.evaluate()
     >>>
-    >>> # 多 y 标签: tgt_name 传 list → 输出含 tgt_name 列的纵向拼接表, 每个标签各自出图
+    >>> # Multiple y labels: pass a list as tgt_name -> a vertically stacked table with a tgt_name column, one figure per label
     >>> evaluator = PerformanceEvaluator(tgt_name=['bad_dpd7', 'bad_dpd30'], model=model, feature_cols=features)
     >>> evaluator.add_dataset('train', train_df).add_dataset('oot', oot_df)
     >>> result = evaluator.evaluate(to_show=True)
@@ -2178,43 +2183,44 @@ class PerformanceEvaluator:
                  init_equi_bins = 1000, chi2_p = 0.9, tree_binning = False, random_state = 42,
                  weight_col = None, spec_values = None, ascending = None):
         """
-        初始化性能评估器。
+        Initialize the performance evaluator.
         
         Parameters
         ----------
         tgt_name : str or list of str
-            目标变量名。可传入多个 y 标签的 list/tuple → 逐标签评估后纵向拼接 (输出新增 tgt_name 列),
-            并为每个标签各自出图。
+            Name of the target variable. A list/tuple of several y labels can be passed: each label is evaluated
+            separately and the results are stacked vertically (the output gains a ``tgt_name`` column),
+            and a separate figure is drawn for each label.
         scr_name : str, optional
-            分数字段名
+            Name of the score column.
         model : sklearn-like model, optional
-            机器学习模型
+            Machine learning model.
         feature_cols : list, optional
-            模型特征列表
+            List of model features.
         dist_bins : int, default 20
-            分布分箱数
+            Number of bins for the score distribution.
         pct_bins : int, default 10
-            百分比分箱数
+            Number of percentile bins.
         precision : int, default 5
-            边界值精度
+            Precision of the bin boundary values.
         min_bin_prop : float, default 0.05
-            每箱最小样本占比
+            Minimum proportion of samples per bin.
         include_missing : bool, default False
-            是否包含缺失值
+            Whether to include missing values.
         equal_freq : bool, default True
-            True为等频分箱
+            True for equal-frequency binning.
         chi2_method : bool, default False
-            是否使用卡方分箱
+            Whether to use chi-square binning.
         init_equi_bins : int, default 1000
-            初始等频分箱数量
+            Initial number of equal-frequency bins.
         chi2_p : float, default 0.9
-            卡方检验显著性水平
+            Significance level of the chi-square test.
         tree_binning : bool, default False
-            是否使用决策树分箱
+            Whether to use decision-tree binning.
         random_state : int, default 42
-            随机种子
+            Random seed.
         weight_col : str, optional
-            默认权重列；各 ``add_dataset`` 也可单独指定
+            Default weight column; each ``add_dataset`` call can also specify its own.
         """
         self.tgt_name = tgt_name
         self.scr_name = scr_name
@@ -2258,19 +2264,19 @@ class PerformanceEvaluator:
     
     def add_dataset(self, name, data, weight_col = None, overwrite = False):
         """
-        添加数据集。
+        Add a dataset.
         
         Parameters
         ----------
         name : str
-            数据集名称（如'train'、'validation'、'oot'）
+            Name of the dataset (e.g. 'train', 'validation', 'oot').
         data : pandas.DataFrame
-            数据集
+            Dataset.
         
         Returns
         -------
         self
-            返回自身以便链式调用
+            The evaluator itself, to allow method chaining.
         """
         if name in self.datasets and not overwrite:
             raise KeyError(
@@ -2292,36 +2298,38 @@ class PerformanceEvaluator:
                  display = True, gains_table = False, benchmark_dataset = None,
                  weight_col = None):
         """
-        执行性能评估。
+        Run the performance evaluation.
         
         Parameters
         ----------
         oot_grp_name : str, optional
-            oot分组字段名
+            Name of the grouping column for the OOT data.
         min_data_size : int, default 100
-            每组最小样本数
+            Minimum number of samples per group.
         grp_colname : str, optional
-            分组结果列名
+            Name of the group column in the output.
         fig_save_path : str, optional
-            图片保存路径
+            Path to save the figure.
         rpt_save_path : str, optional
-            报告保存路径
+            Path to save the report.
         to_show : bool, default False
-            是否显示图形
+            Whether to display the figures.
         display : bool, default True
-            是否打印结果
+            Whether to print the results.
         gains_table : bool, default True
-            是否计算收益表
+            Whether to compute the Gains table.
         benchmark_dataset : str or pandas.DataFrame, optional
-            固定分箱边界的基准数据集。若传入str, 则从add_dataset添加的数据集中按名称获取；
-            若传入DataFrame, 则直接使用该DataFrame。默认None表示各数据集独立分箱。
+            Benchmark dataset used to fix the bin boundaries. If a str is passed, the dataset is looked up by name
+            among the datasets added with ``add_dataset``; if a DataFrame is passed, it is used directly.
+            The default None means that each dataset is binned independently.
         
         Returns
         -------
         pandas.DataFrame
-            性能评估汇总表。若实例的 ``tgt_name`` 为多标签 list/tuple, 则对每个标签分别评估,
-            结果新增 ``tgt_name`` 列后纵向拼接; ``to_show=True`` 时每个标签各出一张图,
-            ``fig_save_path`` 自动按标签加后缀 (如 ``perf.png`` → ``perf_<label>.png``)。
+            Performance evaluation summary table. If ``tgt_name`` of the instance is a list/tuple of several labels,
+            each label is evaluated separately and the results are stacked vertically after a new ``tgt_name`` column
+            is added; when ``to_show=True``, one figure is drawn for each label, and
+            ``fig_save_path`` automatically gets a label suffix (e.g. ``perf.png`` -> ``perf_<label>.png``).
         """
         if len(self.datasets) == 0:
             self.evaluate_status = "no_datasets"
@@ -2434,9 +2442,9 @@ class PerformanceEvaluator:
             self.evaluate_status = "ok" if not fnl_df.empty else "empty_input"
             return fnl_df
 
-        # ── 多 y 标签支持: tgt_name 为 list/tuple 时, 逐标签评估后纵向拼接 ──
-        #    表格: 每个标签结果新增 tgt_name 列后纵向拼接;
-        #    图片: 每个标签各自出图 (to_show=True 时循环显示, fig_save_path 自动按标签加后缀)。
+        # ── Multiple y labels: when tgt_name is a list/tuple, evaluate label by label, then stack the results vertically ──
+        #    Table:   the result of each label gets a new tgt_name column, then they are stacked vertically;
+        #    Figures: each label gets its own figure (shown in a loop when to_show=True; fig_save_path automatically gets a label suffix).
         if isinstance(self.tgt_name, (list, tuple)):
             import os as _os
 
@@ -2456,9 +2464,9 @@ class PerformanceEvaluator:
                         min_data_size = min_data_size,
                         grp_colname = grp_colname,
                         fig_save_path = _suffix_path(fig_save_path, _t),
-                        rpt_save_path = None,        # 拼接后统一保存 (见下)
-                        to_show = to_show,           # 每个标签各自出图
-                        display = False,             # 拼接后统一展示
+                        rpt_save_path = None,        # saved once after stacking (see below)
+                        to_show = to_show,           # each label gets its own figure
+                        display = False,             # displayed once after stacking
                         gains_table = gains_table,
                         benchmark_dataset = benchmark_dataset,
                     )
