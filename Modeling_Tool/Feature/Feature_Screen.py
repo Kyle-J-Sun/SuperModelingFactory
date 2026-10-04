@@ -668,7 +668,7 @@ def _weighted_woe_bins_screen(
                 # already-assigned bins; ``x`` only feeds np.isfinite() inside
                 # _weighted_iv_detail to derive the weighted
                 # missing rate. A hard float cast crashes on string levels
-                # (e.g. '4.高中'), so encode observed -> 1.0 / missing -> NaN,
+                # (e.g. '4.high_school'), so encode observed -> 1.0 / missing -> NaN,
                 # matching the notna semantics of _missing_rate_for_series.
                 x_ins = np.where(x_series.notna().to_numpy(), 1.0, np.nan)
             iv_val, n_b, miss, iv_floored = _weighted_iv_detail(

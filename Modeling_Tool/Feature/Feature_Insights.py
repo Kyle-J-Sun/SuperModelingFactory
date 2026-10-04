@@ -1,6 +1,6 @@
 """
-变量提取与相关性分析工具包
-提供变量分析、IV计算、WOE绑图和相关性过滤功能
+Variable extraction and correlation analysis toolkit.
+Provides variable analysis, IV calculation, WOE plotting, and correlation filtering.
 """
 
 import numpy as np
@@ -14,42 +14,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 class VarExtractionInsights:
-    """变量提取与洞察分析器。
-    用于对数据集进行变量分析，计算IV值、WOE分箱，
-    并支持可视化绑图和变量筛选。
+    """Variable extraction and insight analyzer.
+
+    Analyze the variables of a dataset by computing IV values and WOE bins,
+    with support for plotting and variable screening.
 
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     dep : str
-        目标变量（因变量）列名
+        Column name of the target (dependent) variable.
     plot_path : str
-        绑图保存路径
+        Directory in which the plots are saved.
     nbins : int, optional
-        分箱数量，默认为10
+        Number of bins. Default is 10.
     equal_freq : bool, optional
-        是否使用等频分箱，默认为True
+        Whether to use equal-frequency binning. Default is True.
     min_bin_prop : float, optional
-        每个分箱的最小样本比例，默认为0.05
+        Minimum proportion of samples in each bin. Default is 0.05.
     precision : int, optional
-        WOE和IV计算精度，默认为5
+        Numeric precision of the WOE and IV calculations. Default is 5.
     chi2_method : bool, optional
-        是否使用卡方分箱方法，默认为False
+        Whether to use chi-square binning. Default is False.
     chi2_p : float, optional
-        卡方检验的p值阈值，默认为0.9
+        p-value threshold of the chi-square test. Default is 0.9.
     init_equi_bins : int, optional
-        初始等频分箱数量，默认为5000
+        Number of initial equal-frequency bins. Default is 5000.
     tree_binning : bool, optional
-        是否使用决策树分箱，默认为True
+        Whether to use decision-tree binning. Default is True.
     include_missing : bool, optional
-        是否将缺失值作为单独分箱，默认为True
+        Whether to treat missing values as a separate bin. Default is True.
     seed : int, optional
-        随机种子，默认为3407
+        Random seed. Default is 3407.
     missing_rate_ref : int/float, optional
-        缺失值填充参考值，默认为-999999
+        Reference value used to fill missing values. Default is -999999.
     spec_values : list, optional
-        特殊值列表，默认为空列表
+        List of special values. Default is an empty list.
         
     Examples
     --------
@@ -60,40 +61,40 @@ class VarExtractionInsights:
     def __init__(self, data, dep, plot_path,
                  nbins=10, equal_freq=True, min_bin_prop=0.05, precision=5, chi2_method=False, chi2_p=0.9,
                  init_equi_bins=5000, tree_binning=True, include_missing=True, seed=3407, missing_rate_ref=-999999, spec_values=None):
-        """初始化变量提取与洞察分析器。
+        """Initialize the variable extraction and insight analyzer.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         dep : str
-            目标变量（因变量）列名
+            Column name of the target (dependent) variable.
         plot_path : str
-            绑图保存路径
+            Directory in which the plots are saved.
         nbins : int, optional
-            分箱数量
+            Number of bins.
         equal_freq : bool, optional
-            是否使用等频分箱
+            Whether to use equal-frequency binning.
         min_bin_prop : float, optional
-            每个分箱的最小样本比例
+            Minimum proportion of samples in each bin.
         precision : int, optional
-            WOE和IV计算精度
+            Numeric precision of the WOE and IV calculations.
         chi2_method : bool, optional
-            是否使用卡方分箱方法
+            Whether to use chi-square binning.
         chi2_p : float, optional
-            卡方检验的p值阈值
+            p-value threshold of the chi-square test.
         init_equi_bins : int, optional
-            初始等频分箱数量
+            Number of initial equal-frequency bins.
         tree_binning : bool, optional
-            是否使用决策树分箱
+            Whether to use decision-tree binning.
         include_missing : bool, optional
-            是否将缺失值作为单独分箱
+            Whether to treat missing values as a separate bin.
         seed : int, optional
-            随机种子
+            Random seed.
         missing_rate_ref : int/float, optional
-            缺失值填充参考值
+            Reference value used to fill missing values.
         spec_values : list, optional
-            特殊值列表
+            List of special values.
         """
         self.data = data
         self.dep = dep
@@ -115,15 +116,15 @@ class VarExtractionInsights:
 
     @staticmethod
     def remove_folder(file_path):
-        """删除指定文件夹。
+        """Delete the specified folder.
         
-        递归删除指定路径的文件夹及其所有内容，
-        如果文件夹不存在则静默处理。
+        Recursively delete the folder at the given path together with all of its
+        contents; do nothing (silently) if the folder does not exist.
         
         Parameters
         ----------
         file_path : str
-            要删除的文件夹路径
+            Path of the folder to delete.
             
         Examples
         --------
@@ -136,36 +137,36 @@ class VarExtractionInsights:
             pass
 
     def get_var_analysis_report(self, data, varlist, dep=None, iv_cut=0.01):
-        """生成变量分析报告。
+        """Generate the variable analysis report.
         
-        对指定变量列表计算IV值、KS值、Lift值等指标，
-        并返回满足IV阈值的变量分析汇总结果。
+        Compute the IV, KS, Lift, and other metrics for the given list of variables
+        and return the analysis summary of the variables that meet the IV threshold.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         varlist : list
-            待分析的变量名列表
+            List of variable names to analyze.
         dep : str, optional
-            目标变量列名，默认为None（使用初始化时的dep）
+            Name of the target column. Default is None (use the dep given at initialization).
         iv_cut : float, optional
-            IV值筛选阈值，默认为0.01
+            IV screening threshold. Default is 0.01.
             
         Returns
         -------
         pd.DataFrame
-            包含变量分析结果的汇总表，包括：
-            - var: 变量名
-            - n_all: 总样本数
-            - n: 非缺失样本数
-            - ks_in_gains: KS统计量
-            - lift_in_gains: Lift值
-            - iv: IV值
-            - n_bump: 分箱数量
-            - missing_rate: 缺失率
-            - min, mean, max: 统计量
-            - n_bins: 分箱数
+            Summary table of the variable analysis results, with the columns:
+            - var: variable name
+            - n_all: total number of samples
+            - n: number of non-missing samples
+            - ks_in_gains: KS statistic
+            - lift_in_gains: Lift value
+            - iv: IV value
+            - n_bump: number of bins
+            - missing_rate: missing rate
+            - min, mean, max: descriptive statistics
+            - n_bins: number of bins
             
         Examples
         --------
@@ -250,23 +251,23 @@ class VarExtractionInsights:
         return fnl_summary
 
     def plot_woe(self, data, varlist, plot_group=None, plot_dirname="var_analysis_plot", plot_path=None):
-        """绑制WOE分布图。
+        """Plot the WOE distribution charts.
         
-        对指定变量列表计算WOE值并绑制分布图，
-        保存到指定目录。
+        Compute the WOE values for the given list of variables, plot their
+        distribution charts, and save them to the specified directory.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         varlist : list
-            待绑图的变量名列表
+            List of variable names to plot.
         plot_group : str, optional
-            分组变量名，默认为None
+            Name of the grouping variable. Default is None.
         plot_dirname : str, optional
-            绑图保存子目录名，默认为"var_analysis_plot"
+            Name of the subdirectory in which the plots are saved. Default is "var_analysis_plot".
         plot_path : str, optional
-            绑图保存根路径，默认为None（使用初始化时的plot_path）
+            Root directory in which the plots are saved. Default is None (use the plot_path given at initialization).
             
         Returns
         -------
@@ -312,29 +313,30 @@ class VarExtractionInsights:
         
         
 def var_corr_filter(data, varlist, corr_cutpoint=0.8, method='pearson'):
-    """筛选高相关变量对。
+    """Screen for highly correlated variable pairs.
 
-    计算变量间的相关系数，返回超过阈值的高相关变量对列表。
+    Compute the correlation coefficients between variables and return the list of
+    highly correlated variable pairs whose correlation exceeds the threshold.
 
     Parameters
     ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     varlist : list
-        待筛选的变量名列表
+        List of variable names to screen.
     corr_cutpoint : float, optional
-        相关系数阈值，默认为0.8
+        Correlation coefficient threshold. Default is 0.8.
     method : str, optional
-        相关系数计算方法，可选'pearson'、'spearman'、'kendall'，
-        默认为'pearson'
+        Method used to compute the correlation coefficients; one of 'pearson', 'spearman', 'kendall'.
+        Default is 'pearson'.
 
     Returns
     -------
     pd.DataFrame
-        包含高相关变量对的数据框，包括：
-        - VAR1: 变量1
-        - VAR2: 变量2
-        - CORR: 相关系数
+        DataFrame of the highly correlated variable pairs, with the columns:
+        - VAR1: variable 1
+        - VAR2: variable 2
+        - CORR: correlation coefficient
 
     Examples
     --------
@@ -360,21 +362,21 @@ def var_corr_filter(data, varlist, corr_cutpoint=0.8, method='pearson'):
 
 
 class CorrelationFilter:
-    """相关性过滤分析器。
+    """Correlation filter analyzer.
     
-    提供基于相关性分析的高相关变量筛选和去除功能，
-    支持IV值对比和迭代筛选。
+    Provide screening and removal of highly correlated variables based on
+    correlation analysis, with IV comparison and iterative filtering.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     dep : str
-        目标变量（因变量）列名
+        Column name of the target (dependent) variable.
     corr_cutpoint : float, optional
-        相关系数阈值，超过该值的变量对将被筛选，默认为0.8
+        Correlation coefficient threshold; variable pairs exceeding it are flagged as highly correlated. Default is 0.8.
     method : str, optional
-        相关系数计算方法，可选'pearson'、'spearman'、'kendall'，默认为'pearson'
+        Method used to compute the correlation coefficients; one of 'pearson', 'spearman', 'kendall'. Default is 'pearson'.
 
     Examples
     --------
@@ -384,22 +386,22 @@ class CorrelationFilter:
     
     def __init__(self, data, dep, corr_cutpoint=0.8, method='pearson', tree_binning=False, chi2_method=False, seed = 42, chi2_p =0.999, init_equi_bins = 1000, 
                  missing_rate_ref = -9999999, spec_values = [], base_metric = 'iv'):
-        """初始化相关性过滤分析器。
+        """Initialize the correlation filter analyzer.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         dep : str
-            目标变量（因变量）列名
+            Column name of the target (dependent) variable.
         corr_cutpoint : float, optional
-            相关系数阈值
+            Correlation coefficient threshold.
         method : str, optional
-            相关系数计算方法
+            Method used to compute the correlation coefficients.
         tree_binning_seed : int, optional
-            决策树分箱随机种子
+            Random seed for decision-tree binning.
         chi2_config : tuple, optional
-            卡方分箱配置
+            Chi-square binning configuration.
         """
         self.data = data
         self.dep = dep
@@ -497,19 +499,19 @@ class CorrelationFilter:
         return self._metric_summary_cache
     
     def filter_single_iteration(self, varlist):
-        """单次迭代过滤高相关变量。
+        """Filter highly correlated variables in a single iteration.
         
-        对变量列表执行一次相关性过滤，保留IV值最高的变量。
+        Run one pass of correlation filtering over the variable list, keeping the variable with the highest IV.
         
         Parameters
         ----------
         varlist : list
-            待筛选的变量名列表
+            List of variable names to screen.
             
         Returns
         -------
         list
-            筛选后保留的变量名列表
+            List of variable names retained after screening.
         """
         base_metric = self.base_metric.lower()
         
@@ -585,21 +587,21 @@ class CorrelationFilter:
         return fnl_keep_varlist
     
     def remove_highly_correlated(self, varlist, max_iterations=10):
-        """迭代去除高相关变量。
+        """Iteratively remove highly correlated variables.
         
-        反复执行相关性过滤，直到没有变量被移除或达到最大迭代次数。
+        Run correlation filtering repeatedly until no variable is removed or the maximum number of iterations is reached.
         
         Parameters
         ----------
         varlist : list
-            待筛选的变量名列表
+            List of variable names to screen.
         max_iterations : int, optional
-            最大迭代次数，默认为10
+            Maximum number of iterations. Default is 10.
             
         Returns
         -------
         list
-            最终保留的变量名列表
+            List of variable names finally retained.
             
         Examples
         --------
@@ -628,22 +630,22 @@ class CorrelationFilter:
     
     @staticmethod
     def calculate_vif(df):
-        """计算方差膨胀因子（VIF）。
+        """Compute the variance inflation factor (VIF).
 
-        用于检测多重共线性问题，返回各变量的VIF值。
-        VIF值越大表示共线性越严重，通常VIF > 10表示存在严重共线性。
+        Detect multicollinearity by returning the VIF of each variable.
+        The larger the VIF, the more severe the collinearity; a VIF > 10 usually indicates severe collinearity.
 
         Parameters
         ----------
         df : pd.DataFrame
-            包含自变量的数据框
+            DataFrame containing the independent variables.
 
         Returns
         -------
         pd.DataFrame
-            包含以下列的数据框：
-            - index: 变量名
-            - VIF: 方差膨胀因子值
+            DataFrame with the following columns:
+            - index: variable name
+            - VIF: variance inflation factor value
 
         Examples
         --------
@@ -680,38 +682,39 @@ class CorrelationFilter:
     
 
 # def var_corr_filter(data, varlist, corr_cutpoint=0.8, method='pearson', woe_mapping_table=None, suffix='_woe', ret_winner_var=False):
-#     """筛选高相关变量对。
+#     """Screen for highly correlated variable pairs.
     
-#     计算变量间的相关性矩阵，返回超过指定阈值的高相关变量对。
-#     支持基于IV值确定每对中的优质变量。
+#     Compute the correlation matrix between variables and return the highly correlated
+#     variable pairs above the given threshold.
+#     Support determining the better variable of each pair based on IV.
     
 #     Parameters
 #     ----------
 #     data : pd.DataFrame
-#         输入的原始数据框
+#         Input raw DataFrame.
 #     varlist : list
-#         待分析的变量名列表
+#         List of variable names to analyze.
 #     corr_cutpoint : float, optional
-#         相关系数阈值，默认为0.8
+#         Correlation coefficient threshold. Default is 0.8.
 #     method : str, optional
-#         相关系数计算方法，默认为'pearson'，
-#         可选'pearson'、'spearman'、'kendall'
+#         Method used to compute the correlation coefficients. Default is 'pearson';
+#         one of 'pearson', 'spearman', 'kendall'.
 #     woe_mapping_table : pd.DataFrame, optional
-#         WOE映射表，包含VAR和IV列，默认为None
+#         WOE mapping table containing the VAR and IV columns. Default is None.
 #     suffix : str, optional
-#         WOE变量后缀，默认为'_woe'
+#         Suffix of the WOE variables. Default is '_woe'.
 #     ret_winner_var : bool, optional
-#         是否返回每对中的优质变量，默认为False
+#         Whether to return the better variable of each pair. Default is False.
         
 #     Returns
 #     -------
 #     pd.DataFrame
-#         包含高相关变量对的数据框，列包括：
-#         - VAR1: 变量1
-#         - VAR2: 变量2
-#         - CORR: 相关系数
-#         - var1_iv, var2_iv: 变量IV值（当woe_mapping_table不为None时）
-#         - winner: 优质变量名（当ret_winner_var=True时）
+#         DataFrame of the highly correlated variable pairs, with the columns:
+#         - VAR1: variable 1
+#         - VAR2: variable 2
+#         - CORR: correlation coefficient
+#         - var1_iv, var2_iv: IV values of the variables (when woe_mapping_table is not None)
+#         - winner: name of the better variable (when ret_winner_var=True)
         
 #     Examples
 #     --------
@@ -756,31 +759,31 @@ class CorrelationFilter:
 
 
 # def remove_corr_var(data, varlist, dep, corr_cutpoint=0.8, method='pearson', tree_binning_seed=None, chi2_config=None):
-#     """单次迭代去除高相关变量。
+#     """Remove highly correlated variables in a single iteration.
     
-#     对变量列表执行一次相关性过滤，基于IV值保留最优质的变量。
+#     Run one pass of correlation filtering over the variable list, keeping the best variable based on IV.
     
 #     Parameters
 #     ----------
 #     data : pd.DataFrame
-#         输入的原始数据框
+#         Input raw DataFrame.
 #     varlist : list
-#         待筛选的变量名列表
+#         List of variable names to screen.
 #     dep : str
-#         目标变量（因变量）列名
+#         Column name of the target (dependent) variable.
 #     corr_cutpoint : float, optional
-#         相关系数阈值，默认为0.8
+#         Correlation coefficient threshold. Default is 0.8.
 #     method : str, optional
-#         相关系数计算方法，默认为'pearson'
+#         Method used to compute the correlation coefficients. Default is 'pearson'.
 #     tree_binning_seed : int, optional
-#         决策树分箱随机种子，默认为None
+#         Random seed for decision-tree binning. Default is None.
 #     chi2_config : tuple, optional
-#         卡方分箱配置，(init_bins, p_value)元组，默认为None
+#         Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
         
 #     Returns
 #     -------
 #     list
-#         筛选后保留的变量名列表
+#         List of variable names retained after screening.
         
 #     Examples
 #     --------
@@ -831,32 +834,32 @@ class CorrelationFilter:
 
 
 # def remove_correlated_vars(data, varlist, dep, corr_cutpoint=0.8, method='pearson', tree_binning_seed=None, chi2_config=None):
-#     """迭代去除高相关变量。
+#     """Iteratively remove highly correlated variables.
     
-#     反复执行相关性过滤操作，直到没有变量被移除或达到最大迭代次数。
-#     基于IV值在每组高相关变量中保留最优质的变量。
+#     Run correlation filtering repeatedly until no variable is removed or the maximum number of iterations is reached.
+#     Keep the best variable of each group of highly correlated variables based on IV.
     
 #     Parameters
 #     ----------
 #     data : pd.DataFrame
-#         输入的原始数据框
+#         Input raw DataFrame.
 #     varlist : list
-#         待筛选的变量名列表
+#         List of variable names to screen.
 #     dep : str
-#         目标变量（因变量）列名
+#         Column name of the target (dependent) variable.
 #     corr_cutpoint : float, optional
-#         相关系数阈值，默认为0.8
+#         Correlation coefficient threshold. Default is 0.8.
 #     method : str, optional
-#         相关系数计算方法，默认为'pearson'
+#         Method used to compute the correlation coefficients. Default is 'pearson'.
 #     tree_binning_seed : int, optional
-#         决策树分箱随机种子，默认为None
+#         Random seed for decision-tree binning. Default is None.
 #     chi2_config : tuple, optional
-#         卡方分箱配置，(init_bins, p_value)元组，默认为None
+#         Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
         
 #     Returns
 #     -------
 #     list
-#         最终保留的变量名列表
+#         List of variable names finally retained.
         
 #     Examples
 #     --------

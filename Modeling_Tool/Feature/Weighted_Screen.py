@@ -762,7 +762,8 @@ def _apply_stage_keep(
             f"on_empty_stage='raise'"
         )
     warnings.warn(
-        f"[feature_screen] stage {stage!r} 全军覆没, 按 keep_all_warn 保留全部 {len(current)} 个",
+        f"[feature_screen] stage {stage!r} eliminated all {len(current)} variables; "
+        f"keeping all of them (on_empty_stage='keep_all_warn')",
         stacklevel=3,
     )
     summary_rows.append(

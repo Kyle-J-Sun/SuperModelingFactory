@@ -1316,34 +1316,37 @@ def calculate_multigroup_psi_two_sets(
     Parameters
     ----------
     expected_df : pandas.DataFrame
-        基准/期望分布数据集。
+        Expected/baseline dataset.
     actual_df : pandas.DataFrame
-        实际/对比分布数据集。
+        Actual/comparison dataset.
     varlist : list
-        待计算 PSI 的变量名列表。
+        List of variable names to calculate PSI for.
     group_by : str or list, optional
-        分组列名，对每个分组分别计算 PSI。默认 None。
+        Group column name(s); PSI is computed separately for each group. Default is None.
     buckets : int, optional
-        分箱数，默认 10。
+        Number of bins. Default is 10.
     equal_freq : bool, optional
-        是否等频分箱，默认 True。
+        Whether to use equal-frequency binning. Default is True.
     min_bin_prop : float, optional
-        每箱最小占比，默认 0.05。
+        Minimum proportion for each bin. Default is 0.05.
     content : float, optional
-        防除零小量，默认 1e-6。
+        Small value to avoid division by zero. Default is 1e-6.
     precision : int, optional
-        数值精度，默认 5。
+        Decimal precision. Default is 5.
     group_name : str, optional
-        多分组计算时的分组列名。默认 None。
+        Name of the group column for multi-group calculation. Default is None.
     return_details : bool, optional
-        是否返回详细分箱信息。若为 True，返回字典 {'psi': psi_df, 'details': details_df}，
-        details_df 包含列：['bin', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var']
+        Whether to return detailed bin information. If True, return a dict
+        {'psi': psi_df, 'details': details_df};
+        details_df contains the columns: ['bin', 'expected_percent', 'actual_percent', 'psi_component', group_name, 'var']
     missing_policy : {"drop", "include", "warn_and_drop"}, optional
-        NaN 行处理策略。0.5.0 起默认为 "include"，将 NaN 行汇入独立的
-        "__MISSING__" 桶，使缺失率漂移进入 PSI 计算；这是推荐的生产行为，
-        并在 0.5.0 成为默认值（0.4.2 为 "drop" 以保持数值向后兼容）。
-        传入 "drop" 可复现 0.5.0 之前的数值，或 "warn_and_drop" 保留旧数值
-        同时发出 RuntimeWarning 报告两侧 NaN 数量。
+        How NaN rows are handled. Default in 0.5.0 is "include", which routes
+        NaN rows through a dedicated "__MISSING__" bin so missing-rate drift
+        contributes to the PSI. This is the recommended production behaviour
+        and became the default in 0.5.0 (previously "drop" in 0.4.2 for
+        numeric backward compatibility). Pass "drop" to reproduce pre-0.5.0
+        numbers, or "warn_and_drop" to keep the legacy numbers while emitting
+        a RuntimeWarning that reports the NaN counts on both sides.
     """
     if group_name is not None and group_by is None:
         return _calculate_grouped_psi_fixed_reference(
@@ -1389,13 +1392,13 @@ def calculate_multigroup_psi_two_sets(
                     
                     psi_records.append({group_name: group, 'var': var, 'psi': psi_val})
                     
-                    # ========== 标准化 detail_df（修复后的核心代码） ==========
+                    # ========== Normalize detail_df (core of the fix) ==========
                     detail_df = _coerce_psi_detail_frame(detail_df, group_by=group_by)
                     if detail_df is not None and not detail_df.empty:
                         if 'bin' not in detail_df.columns:
-                            # 重置索引，原索引列可能名为 'index' 或其他
+                            # Reset the index; the original index column may be named 'index' or something else
                             detail_df = detail_df.reset_index()
-                            # reset_index 后第一列就是原来的索引列
+                            # After reset_index, the first column is the original index column
                             index_col = detail_df.columns[0]
                             detail_df = detail_df.rename(columns={index_col: 'bin'})
                         
@@ -1436,9 +1439,9 @@ def calculate_multigroup_psi_two_sets(
         )
         
     else:
-        # 未指定 group_name 时
+        # When group_name is not specified
         if return_details:
-            # 支持多个变量
+            # Supports multiple variables
             psi_records = []
             detail_records = []
             for var in tqdm(varlist, desc="Calculating PSI with details"):
@@ -1458,7 +1461,7 @@ def calculate_multigroup_psi_two_sets(
                 )
                 psi_records.append({'var': var, 'psi': psi_val})
                 
-                # 标准化 detail_df
+                # Normalize detail_df
                 detail_df = _coerce_psi_detail_frame(detail_df, group_by=group_by)
                 if detail_df is not None and not detail_df.empty:
                     if 'bin' not in detail_df.columns:
@@ -1479,7 +1482,7 @@ def calculate_multigroup_psi_two_sets(
         
         else:
             
-            # 不返回详情，使用原有的批量计算函数
+            # Details not requested: use the original batch calculation function
             group_psi = calculate_multivar_psi_two_sets(
                 expected_df=expected_df, 
                 actual_df=actual_df, 

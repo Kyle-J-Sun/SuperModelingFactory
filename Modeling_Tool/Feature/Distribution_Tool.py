@@ -1,6 +1,6 @@
 """
-数据处理与分析工具包
-提供分组统计、分布分析和可视化功能
+Data processing and analysis toolkit.
+Provides grouped statistics, distribution analysis, and visualization.
 """
 
 import numpy as np
@@ -11,18 +11,18 @@ import matplotlib.pyplot as plt
 class proc_means:
     """ Proc Means by Group.
     
-    用于按分组变量计算数值变量的描述性统计量，包括均值、分位数、缺失率等。
+    Compute descriptive statistics of numeric variables by grouping variables, including the mean, quantiles, and missing rate.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     varlist : list
-        需要进行统计的数值变量名列表
+        List of numeric variable names to summarize.
     groupby : list
-        分组变量名列表
+        List of grouping variable names.
     spec_missing_value : any, optional
-        需要被当作缺失值处理的特殊值，默认为None
+        Special value to be treated as missing. Default is None.
         
     Examples
     --------
@@ -38,18 +38,18 @@ class proc_means:
         spec_missing_value=None,
         feature_block_size=128,
     ):
-        """初始化proc_means对象。
+        """Initialize the proc_means object.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         varlist : list
-            需要进行统计的数值变量名列表
+            List of numeric variable names to summarize.
         groupby : list
-            分组变量名列表
+            List of grouping variable names.
         spec_missing_value : any, optional
-            需要被当作缺失值处理的特殊值
+            Special value to be treated as missing.
         """
         self.data = data
         self.varlist = varlist
@@ -60,34 +60,34 @@ class proc_means:
         self.feature_block_size = feature_block_size
 
     def treat_spec_missing(self):
-        """处理特定的缺失值。
+        """Handle the special missing value.
         
-        将self.spec_missing_value指定的值替换为np.nan，以便正确计算统计量。
+        Replace the value given by self.spec_missing_value with np.nan so that the statistics are computed correctly.
         
         Returns
         -------
         pd.DataFrame
-            处理缺失值后的数据框
+            DataFrame after the missing values have been handled.
         """
         if self.spec_missing_value is not None:
             self.data = self.data.replace(self.spec_missing_value, np.nan)
         return self.data
 
     def group_means(self, q=None):
-        """按分组计算描述性统计量。
+        """Compute descriptive statistics by group.
         
-        对指定变量按分组计算描述性统计量，包括计数、均值、标准差、最小值、最大值
-        以及自定义分位数。
+        Compute descriptive statistics of the given variables by group, including the count, mean,
+        standard deviation, minimum, maximum, and custom quantiles.
         
         Parameters
         ----------
         q : list, optional
-            分位数列表，默认为[0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
+            List of quantiles. Default is [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99].
             
         Returns
         -------
         pd.DataFrame
-            包含描述性统计量的数据框
+            DataFrame containing the descriptive statistics.
         """
         if q is None:
             q = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
@@ -134,14 +134,14 @@ class proc_means:
         return pd.concat(frames, axis=0).sort_index()
 
     def group_sum(self):
-        """计算每组的样本数量。
+        """Compute the number of samples in each group.
         
-        统计每个分组组合中的观测数量（样本总数）。
+        Count the observations (total number of samples) in each combination of groups.
         
         Returns
         -------
         pd.DataFrame
-            包含每组样本数量的聚合结果
+            Aggregated result containing the number of samples in each group.
         """
         if not self.groupby:
             index = pd.Index(sorted(self.varlist), name="attribute")
@@ -160,19 +160,19 @@ class proc_means:
         return pd.DataFrame({"sum_all": values}, index=index)
 
     def __call__(self, q=None):
-        """执行完整的分组统计分析。
+        """Run the complete grouped statistical analysis.
         
-        综合计算分组统计量，包括样本数、N_ALL、均值、标准差、分位数和缺失率。
+        Compute the grouped statistics, including the sample count, N_ALL, mean, standard deviation, quantiles, and missing rate.
         
         Parameters
         ----------
         q : list, optional
-            分位数列表，默认为[0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
+            List of quantiles. Default is [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99].
             
         Returns
         -------
         pd.DataFrame
-            完整的分组统计报告，包含N、N_ALL、各分位数和缺失率
+            Complete grouped statistics report, containing N, N_ALL, the quantiles, and the missing rate.
         """
         if q is None:
             q = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
@@ -197,28 +197,29 @@ def proc_means_by_grp(
     q=None,
     feature_block_size=128,
 ):
-    """按分组计算变量统计报告。
+    """Compute the variable statistics report by group.
     
-    对指定变量按分组计算描述性统计量，返回包含样本数、均值、分位数和缺失率的报告。
-    底层调用proc_means类完成计算。
+    Compute descriptive statistics of the given variables by group and return a report containing
+    the sample count, mean, quantiles, and missing rate.
+    The computation is delegated to the proc_means class.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     varlist : list
-        需要进行统计的数值变量名列表
+        List of numeric variable names to summarize.
     groupby : list, optional
-        分组变量名列表，默认为空列表（不分组）
+        List of grouping variable names. Default is an empty list (no grouping).
     spec_missing_value : any, optional
-        需要被当作缺失值处理的特殊值，默认为None
+        Special value to be treated as missing. Default is None.
     q : list, optional
-        分位数列表，默认为[0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
+        List of quantiles. Default is [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99].
         
     Returns
     -------
     pd.DataFrame
-        分组统计报告，包含各变量的描述性统计量
+        Grouped statistics report containing the descriptive statistics of each variable.
         
     Examples
     --------
@@ -297,19 +298,20 @@ def proc_means_for_screening(
 
 
 class DistributionShiftAnalyzer:
-    """分布偏移分析器。
+    """Distribution shift analyzer.
     
-    用于分析不同分组之间变量分布的偏移情况，通过比较各分组超过基准组
-    异常值阈值的观测比例来评估分布差异。
+    Analyze how the distribution of variables shifts between groups, assessing the difference
+    by comparing the proportion of observations in each group that exceed the outlier
+    threshold of the benchmark group.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     grp_name : str
-        分组变量名
+        Name of the grouping variable.
     benchmark_value : any
-        基准组的分组值，用于确定异常值阈值
+        Group value of the benchmark group, used to determine the outlier threshold.
         
     Examples
     --------
@@ -318,37 +320,37 @@ class DistributionShiftAnalyzer:
     """
     
     def __init__(self, data, grp_name, benchmark_value):
-        """初始化分布偏移分析器。
+        """Initialize the distribution shift analyzer.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的原始数据框
+            Input raw DataFrame.
         grp_name : str
-            分组变量名
+            Name of the grouping variable.
         benchmark_value : any
-            基准组的分组值
+            Group value of the benchmark group.
         """
         self.data = data
         self.grp_name = grp_name
         self.benchmark_value = benchmark_value
     
     def analyze_single_var(self, var, outlier_value=0.99):
-        """分析单个变量的分布偏移。
+        """Analyze the distribution shift of a single variable.
         
-        计算各分组中超过基准组指定分位数阈值的观测比例。
+        Compute, for each group, the proportion of observations that exceed the given quantile threshold of the benchmark group.
         
         Parameters
         ----------
         var : str
-            待分析的变量名
+            Name of the variable to analyze.
         outlier_value : float, optional
-            用于确定异常值阈值的分位数，默认为0.99
+            Quantile used to determine the outlier threshold. Default is 0.99.
             
         Returns
         -------
         dict
-            键为分组值，值为超过阈值的观测比例
+            Keys are the group values; values are the proportions of observations exceeding the threshold.
         """
         means_rpt = proc_means_by_grp(
             self.data, [var], [self.grp_name],
@@ -368,22 +370,22 @@ class DistributionShiftAnalyzer:
         return res_dict
     
     def analyze(self, varlist, outlier_value=0.99):
-        """分析多个变量的分布偏移。
+        """Analyze the distribution shift of multiple variables.
         
-        对变量列表中每个变量计算各分组超过基准组阈值的比例，
-        并以数据框形式返回所有结果。
+        For each variable in the list, compute the proportion of observations in each group
+        that exceed the threshold of the benchmark group, and return all results as a DataFrame.
         
         Parameters
         ----------
         varlist : list
-            待分析的变量名列表
+            List of variable names to analyze.
         outlier_value : float, optional
-            用于确定异常值阈值的分位数，默认为0.99
+            Quantile used to determine the outlier threshold. Default is 0.99.
             
         Returns
         -------
         pd.DataFrame
-            行索引为变量名，列为各分组值，内容为超过阈值的观测比例
+            Rows are indexed by variable name and columns are the group values; each cell is the proportion of observations exceeding the threshold.
             
         Examples
         --------
@@ -398,27 +400,27 @@ class DistributionShiftAnalyzer:
 
 
 def get_distribution_shift_single_var(data, var, grp_name, benchmark_value, outlier_value=0.99):
-    """计算单个变量的分布偏移。
+    """Compute the distribution shift of a single variable.
     
-    分析指定变量在各分组中超过基准组异常值阈值的观测比例。
+    Analyze, for the given variable, the proportion of observations in each group that exceed the outlier threshold of the benchmark group.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     var : str
-        待分析的变量名
+        Name of the variable to analyze.
     grp_name : str
-        分组变量名
+        Name of the grouping variable.
     benchmark_value : any
-        基准组的分组值
+        Group value of the benchmark group.
     outlier_value : float, optional
-        用于确定异常值阈值的分位数，默认为0.99
+        Quantile used to determine the outlier threshold. Default is 0.99.
         
     Returns
     -------
     dict
-        键为分组值，值为超过阈值的观测比例
+        Keys are the group values; values are the proportions of observations exceeding the threshold.
         
     Examples
     --------
@@ -429,28 +431,28 @@ def get_distribution_shift_single_var(data, var, grp_name, benchmark_value, outl
 
 
 def get_distribution_shift(data, varlist, grp_name, benchmark_value, outlier_value=0.99):
-    """计算多个变量的分布偏移。
+    """Compute the distribution shift of multiple variables.
     
-    对变量列表中每个变量分析各分组超过基准组异常值阈值的观测比例，
-    返回包含所有结果的转置数据框。
+    For each variable in the list, analyze the proportion of observations in each group that exceed
+    the outlier threshold of the benchmark group, and return the transposed DataFrame containing all results.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的原始数据框
+        Input raw DataFrame.
     varlist : list
-        待分析的变量名列表
+        List of variable names to analyze.
     grp_name : str
-        分组变量名
+        Name of the grouping variable.
     benchmark_value : any
-        基准组的分组值
+        Group value of the benchmark group.
     outlier_value : float, optional
-        用于确定异常值阈值的分位数，默认为0.99
+        Quantile used to determine the outlier threshold. Default is 0.99.
         
     Returns
     -------
     pd.DataFrame
-        行索引为变量名，列为各分组值，内容为超过阈值的观测比例
+        Rows are indexed by variable name and columns are the group values; each cell is the proportion of observations exceeding the threshold.
         
     Examples
     --------
@@ -461,16 +463,16 @@ def get_distribution_shift(data, varlist, grp_name, benchmark_value, outlier_val
 
 
 class DistributionPlotter:
-    """分布图绘制器。
+    """Distribution plotter.
     
-    提供多种方式可视化数值变量的分布情况，支持核密度图、直方图和地毯图。
+    Visualize the distribution of a numeric variable in several ways; supports kernel density plots, histograms, and rug plots.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     score : str
-        用于绑制分布的变量名
+        Name of the variable whose distribution is plotted.
         
     Examples
     --------
@@ -479,30 +481,30 @@ class DistributionPlotter:
     """
     
     def __init__(self, data, score):
-        """初始化分布图绘制器。
+        """Initialize the distribution plotter.
         
         Parameters
         ----------
         data : pd.DataFrame
-            输入的数据框
+            Input DataFrame.
         score : str
-            用于绑制分布的变量名
+            Name of the variable whose distribution is plotted.
         """
         self.data = data
         self.score = score
         self.plot_series = data[score]
     
     def plot_rugplot(self, figsize=(15, 15), title="Distribution Plot"):
-        """绑制地毯图。
+        """Plot a rug plot.
         
-        在核密度估计图上叠加地毯图显示数据分布密度。
+        Overlay a rug plot on a kernel density estimate plot to show the density of the data distribution.
         
         Parameters
         ----------
         figsize : tuple, optional
-            图形尺寸，默认为(15, 15)
+            Figure size. Default is (15, 15).
         title : str, optional
-            图形标题，默认为"Distribution Plot"
+            Figure title. Default is "Distribution Plot".
         """
         plt.figure(figsize=figsize)
         sns.kdeplot(self.plot_series, color='purple')
@@ -512,16 +514,16 @@ class DistributionPlotter:
         plt.ylabel('Density')
     
     def plot_kdeplot(self, figsize=(15, 15), title="Distribution Plot"):
-        """绑制核密度估计图。
+        """Plot a kernel density estimate.
         
-        使用填充的核密度估计图展示数据分布。
+        Show the data distribution with a filled kernel density estimate plot.
         
         Parameters
         ----------
         figsize : tuple, optional
-            图形尺寸，默认为(15, 15)
+            Figure size. Default is (15, 15).
         title : str, optional
-            图形标题，默认为"Distribution Plot"
+            Figure title. Default is "Distribution Plot".
         """
         plt.figure(figsize=figsize)
         sns.kdeplot(self.plot_series, fill=True, color='orange')
@@ -530,18 +532,18 @@ class DistributionPlotter:
         plt.ylabel('Density')
     
     def plot_displot(self, figsize=(15, 15), title="Distribution Plot", nbins=10):
-        """绑制分布直方图。
+        """Plot a distribution histogram.
         
-        绑制带核密度估计的直方图展示数据分布。
+        Plot a histogram with a kernel density estimate to show the data distribution.
         
         Parameters
         ----------
         figsize : tuple, optional
-            图形尺寸，默认为(15, 15)
+            Figure size. Default is (15, 15).
         title : str, optional
-            图形标题，默认为"Distribution Plot"
+            Figure title. Default is "Distribution Plot".
         nbins : int, optional
-            直方图的箱子数量，默认为10
+            Number of histogram bins. Default is 10.
         """
         plt.figure(figsize=figsize)
         sns.displot(self.plot_series, kde=True, bins=nbins)
@@ -550,25 +552,25 @@ class DistributionPlotter:
         plt.ylabel('Density')
     
     def plot(self, method='displot', title="Distribution Plot", figsize=(15, 15), nbins=10):
-        """绑制定分布图。
+        """Plot the distribution chart.
         
-        根据指定的方法绑制变量分布图。
+        Plot the distribution of the variable with the specified method.
         
         Parameters
         ----------
         method : str, optional
-            绑制方法，可选'rugplot'、'kdeplot'或'displot'，默认为'displot'
+            Plotting method; one of 'rugplot', 'kdeplot' or 'displot'. Default is 'displot'.
         title : str, optional
-            图形标题，默认为"Distribution Plot"
+            Figure title. Default is "Distribution Plot".
         figsize : tuple, optional
-            图形尺寸，默认为(15, 15)
+            Figure size. Default is (15, 15).
         nbins : int, optional
-            直方图的箱子数量（仅用于displot方法），默认为10
+            Number of histogram bins (only used by the displot method). Default is 10.
             
         Raises
         ------
         ValueError
-            当指定了不支持的绑制方法时抛出
+            Raised when an unsupported plotting method is specified.
             
         Examples
         --------
@@ -586,29 +588,29 @@ class DistributionPlotter:
 
 
 def plot_distribution(data, score, method='displot', title="Distribution Plot", figsize=(15, 15), nbins=10):
-    """绑制变量分布图。
+    """Plot the distribution chart of a variable.
     
-    根据指定的方法绑制变量的分布图，支持核密度估计、直方图和地毯图。
+    Plot the distribution of the variable with the specified method; supports kernel density estimate, histogram, and rug plots.
     
     Parameters
     ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     score : str
-        用于绑制分布的变量名
+        Name of the variable whose distribution is plotted.
     method : str, optional
-        绑制方法，可选'rugplot'、'kdeplot'或'displot'，默认为'displot'
+        Plotting method; one of 'rugplot', 'kdeplot' or 'displot'. Default is 'displot'.
     title : str, optional
-        图形标题，默认为"Distribution Plot"
+        Figure title. Default is "Distribution Plot".
     figsize : tuple, optional
-        图形尺寸，默认为(15, 15)
+        Figure size. Default is (15, 15).
     nbins : int, optional
-        直方图的箱子数量（仅用于displot方法），默认为10
+        Number of histogram bins (only used by the displot method). Default is 10.
         
     Returns
     -------
     None
-        直接显示绑制图形
+        The plot is displayed directly.
         
     Examples
     --------
