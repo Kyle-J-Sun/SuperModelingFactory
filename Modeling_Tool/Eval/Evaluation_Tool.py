@@ -50,16 +50,18 @@ def _legacy_cross_agg_dict(udf):
 
 class EvaluationPipeline:
     """
-    链式调用的流水线对象，支持 .group_by() 和 .subset_by() 链式添加条件，
-    最后通过 .apply(func) 执行。
-    支持 func 返回 pandas.DataFrame 或 dict（值为 DataFrame）。
+    Chainable pipeline object for slice-by-slice evaluation.
+
+    Conditions are added by chaining ``.group_by()`` and ``.subset_by()``, and the
+    pipeline is executed with ``.apply(func)``.
+    ``func`` may return a ``pandas.DataFrame`` or a ``dict`` whose values are DataFrames.
     """
     def __init__(self, m_eval, data=None):
         self.m_eval = m_eval
         self.original_data = m_eval.data if data is None else data
         self.steps = []
-        self._expected_columns = None   # 用于 DataFrame 返回时的列名缓存
-        self._expected_dict_keys = None # 用于 dict 返回时的键缓存
+        self._expected_columns = None   # column-name cache for DataFrame results
+        self._expected_dict_keys = None # key cache for dict results
 
     def group_by(self, group_name, min_size=100, group_var_name=None):
         if group_var_name is None:
@@ -91,7 +93,7 @@ class EvaluationPipeline:
                 old_data = self.m_eval.data
                 self.m_eval.data = current_data
                 try:
-                    # 自动注入当前数据（如果函数接受 'current_data' 参数）
+                    # Inject the current data automatically (if the function accepts a 'current_data' parameter)
                     if 'current_data' in sig.parameters:
                         kwargs['current_data'] = current_data
                     res = func(**kwargs)
@@ -104,7 +106,7 @@ class EvaluationPipeline:
                 finally:
                     self.m_eval.data = old_data
 
-                # （处理 dict 和 DataFrame 的逻辑）
+                # (handle the dict and DataFrame cases)
                 if isinstance(res, dict):
                     if self._expected_dict_keys is None and res:
                         self._expected_dict_keys = list(res.keys())
@@ -151,7 +153,7 @@ class EvaluationPipeline:
                         return {k: pd.DataFrame() for k in self._expected_dict_keys}
                     else:
                         return pd.DataFrame()
-                # 合并结果
+                # Merge the results
                 if isinstance(results[0], dict):
                     merged = {k: pd.concat([r[k] for r in results], ignore_index=True) for k in results[0].keys()}
                     return merged
@@ -978,7 +980,7 @@ class Model_Evaluation_Tool:
             prepared_data = data.query(score_query)
             
             if prepared_data.empty:
-                return pd.DataFrame()  # 或跳过该组
+                return pd.DataFrame()  # or skip this group
             
             tot_cnt = prepared_data[score_list].shape[0]
             cross_agg_dict_copy = cross_agg_dict.copy()
@@ -1516,12 +1518,12 @@ class Model_Evaluation_Tool:
     
     def pipe(self, data=None):
             """
-            返回一个 EvaluationPipeline 对象，用于链式分组和子集评估。
+            Return an ``EvaluationPipeline`` for chained group and subset evaluation.
 
             Parameters
             ----------
             data : pd.DataFrame, optional
-                指定数据，默认使用 self.data
+                Data to evaluate. Defaults to ``self.data``.
 
             Returns
             -------

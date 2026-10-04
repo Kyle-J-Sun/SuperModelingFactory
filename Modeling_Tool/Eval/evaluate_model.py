@@ -20,42 +20,42 @@ __all__=[
     'summarize_pr',             # PR: P-R BEP
     'plot_pr_curve',            # PR
     'calc_roc',                 # ROC: TPR-FPR
-#     'summary_roc',              # ROC: AUC、KS
+#     'summary_roc',              # ROC: AUC, KS
     'plot_ks_curve',            # ROC: KS-Curve
     'plot_roc_curve',           # ROC: ROC-Curve
     'calc_equid_dist',          # Dist: Stats
     'plot_kde_curve',           # Dist: KDE
     'plot_dist_curve',          # Dist: Count-avgTrue twin
     'calc_equid_pct',           # PCT: Stats
-    'summarize_pct',            # PCT: Top、BTM
+    'summarize_pct',            # PCT: Top, BTM
     'plot_pct_curve',           # PCT: avgTrue
 
-    'evaluate_performance',     # Single(ROC、KDE、PCT、Gain)
-    'evaluate_distribution',    # Single+Group(DIST、CumDist)
-    'comparison_performance',   # Multiple(ROC、PCT、CumPCT、Gain)
+    'evaluate_performance',     # Single(ROC, KDE, PCT, Gain)
+    'evaluate_distribution',    # Single+Group(DIST, CumDist)
+    'comparison_performance',   # Multiple(ROC, PCT, CumPCT, Gain)
     'calc_lift_apt',
 ]
 
 palette = {
     'ClassicBlueRedGrey': [
-        '#0099CC', # 蓝
-        '#FF6666', # 红
-        '#CCCCCC', # 灰
+        '#0099CC', # blue
+        '#FF6666', # red
+        '#CCCCCC', # grey
     ],
     'ClassicGreyRed': [
-        '#333333', # 深灰
-        '#CC0033', # 深红
+        '#333333', # dark grey
+        '#CC0033', # dark red
     ],
     'Colors': [
-        '#0099CC', # 蓝
-        '#FF6666', # 红
-        '#99CC99', # 绿 
-        '#FF9966', # 橙 FF9933
+        '#0099CC', # blue
+        '#FF6666', # red
+        '#99CC99', # green
+        '#FF9966', # orange FF9933
     ],
     'MorandiDark': [
-        '#965454', # 红棕
-        '#656565', # 墨绿
-        '#6b5152', # 深棕        
+        '#965454', # reddish brown
+        '#656565', # dark green
+        '#6b5152', # dark brown
     ],
 }
 
@@ -99,27 +99,27 @@ def timeit_decorator(func):
         result = func(*args, **kwargs)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        # print(f"Function '{func.__name__}' took {elapsed_time:.6f} seconds") #需要每个函数耗时把这个打开
+        # print(f"Function '{func.__name__}' took {elapsed_time:.6f} seconds") # Uncomment this line to print the elapsed time of every function
         return result
     return wrapper
 
 # P-R Curve
 @timeit_decorator
 def calc_pr(y_true, y_score, sample_weight=None):
-    """计算P-R曲线相关统计量.
-    基于sklearn.metrics.precision_recall_curve
+    """Compute the statistics of the P-R curve.
+    Based on sklearn.metrics.precision_recall_curve.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
 
     Returns
     -------
     pr_df: pandas.DataFrame
-        PR相关的Precision、Recall、Thresholds等统计量数据集
+        Dataset of PR statistics such as precision, recall, and thresholds.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_pr(y_true, y_score, sample_weight=sample_weight)
@@ -132,23 +132,25 @@ def calc_pr(y_true, y_score, sample_weight=None):
 
 @timeit_decorator
 def summarize_pr(pr_df):
-    """统计P-R曲线信息.
-    统计量如下:
-    1.平衡点(Break-Even Point, 简称BEP)阈值及对应Precision、Recall等统计量
+    """Summarize the P-R curve.
+
+    The statistics are:
+
+    1. The break-even point (BEP) threshold and the corresponding precision, recall, and other statistics.
 
     Parameters
     ----------
     pr_df: pandas.DataFrame
-        PR相关的Precision、Recall、Thresholds等统计量数据集
+        Dataset of PR statistics such as precision, recall, and thresholds.
 
     Returns
     -------
     pr_info: dict
-        P-R曲线统计信息字典
+        Dictionary of P-R curve summary statistics.
     """
     gap = abs(pr_df['precision'] - pr_df['recall'])
     if not gap.notna().any():
-        # 精确率或召回率全为 NaN（如样本只有一个类别）：平衡点无定义
+        # Precision or recall is all NaN (e.g. the sample has a single class): the break-even point is undefined
         return {'bep_index': np.nan, 'bep_threshold': np.nan, 'bep_precision': np.nan, 'bep_recall': np.nan}
     equalind = np.argmin(gap)
     pr_info = {
@@ -162,18 +164,18 @@ def summarize_pr(pr_df):
 
 @timeit_decorator
 def plot_pr_curve(pr_dfs,  square_figsize=8, to_show=True, save_path=None):
-    """绘制P-R曲线图.
+    """Plot the P-R curve.
 
     Parameters
     ----------
     pr_dfs: Dict
-        单个或多个Score名下的PR数据集. 键值对格式为: {name: pr_df}
+        PR datasets for one or more scores, as key-value pairs in the format {name: pr_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('P-R Curve', fontsize=20, fontweight='bold') #, findfont=zhfont)
@@ -193,14 +195,14 @@ def plot_pr_curve(pr_dfs,  square_figsize=8, to_show=True, save_path=None):
 
 
 def __plot_single_pr_axes(pr_df, ax):
-    """在axes上绘制单个P-R曲线图.
+    """Plot a single P-R curve on the axes.
 
     Parameters
     ----------
     pr_df: pandas.DataFrame
-        PR相关的Precision、Recall、Thresholds等统计量数据集
+        Dataset of PR statistics such as precision, recall, and thresholds.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     ax.set_xlim([0,1])
     ax.set_ylim([0,1])
@@ -221,14 +223,14 @@ def __plot_single_pr_axes(pr_df, ax):
 
 
 def __plot_multi_pr_axes(pr_dfs, ax):
-    """在axes上绘制多个P-R曲线图.
+    """Plot multiple P-R curves on the axes.
 
     Parameters
     ----------
     pr_dfs: Dict
-        单个或多个Score名下的PR数据集. 键值对格式为: {name: pr_df}
+        PR datasets for one or more scores, as key-value pairs in the format {name: pr_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     ax.set_xlim([0,1])
     ax.set_ylim([0,1])
@@ -255,32 +257,32 @@ def __plot_multi_pr_axes(pr_dfs, ax):
 # ROC Curve
 @timeit_decorator
 def calc_roc(y_true, y_score, sample_weight=None):
-    """计算ROC曲线相关统计量.
-    基于sklearn.metrics.roc_curve
+    """Compute the statistics of the ROC curve.
+    Based on sklearn.metrics.roc_curve.
     
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
 
     Returns
     -------
     roc_df: pandas.DataFrame
-        ROC相关的TPR、FPR、Thresholds等统计量数据集
+        Dataset of ROC statistics such as TPR, FPR, and thresholds.
     """
     
     if sample_weight is not None:
         return _weighted_eval.calc_roc(y_true, y_score, sample_weight=sample_weight)
 
-    # 移除无效值
+    # Remove invalid values
     mask = np.isfinite(y_score) & np.isfinite(y_true)
     y_true_clean = np.array(y_true)[mask]
     y_score_clean = np.array(y_score)[mask]
     
     if len(y_true_clean) == 0:
-        # 返回一个空的 ROC DataFrame
+        # Return an empty ROC DataFrame
         return pd.DataFrame(columns=['fpr', 'tpr', 'thresholds', 'thresholds_percentile'])
     
     roc_df = pd.DataFrame(roc_curve(y_true_clean, y_score_clean)).T
@@ -290,20 +292,20 @@ def calc_roc(y_true, y_score, sample_weight=None):
     return roc_df
 
 # def calc_roc(y_true, y_score):
-#     """计算ROC曲线相关统计量.
-#     基于sklearn.metrics.roc_curve
+#     """Compute the statistics of the ROC curve.
+#     Based on sklearn.metrics.roc_curve.
     
 #     Parameters
 #     ----------
 #     y_true: array like
-#         实际样本标签序列, 只接受0-1
+#         Sequence of actual sample labels; only 0/1 values are accepted.
 #     y_score: array like
-#         预测概率值序列
+#         Sequence of predicted probabilities.
 
 #     Returns
 #     -------
 #     roc_df: pandas.DataFrame
-#         ROC相关的TPR、FPR、Thresholds等统计量数据集
+#         Dataset of ROC statistics such as TPR, FPR, and thresholds.
 #     """
 #     y_true = np.array(y_true)
 #     y_score = np.array(y_score)
@@ -315,20 +317,22 @@ def calc_roc(y_true, y_score, sample_weight=None):
 
 @timeit_decorator
 def summarize_roc(roc_df):
-    """统计ROC曲线信息.
-    统计量如下: 
+    """Summarize the ROC curve.
+
+    The statistics are:
+
     1. AUC
-    2. KS及其对应阈值
+    2. KS and its corresponding threshold
 
     Parameters
     ----------
     roc_df: pandas.DataFrame
-        ROC相关的TPR、FPR、Thresholds等统计量数据集
+        Dataset of ROC statistics such as TPR, FPR, and thresholds.
 
     Returns
     -------
     roc_info: dict
-        ROC曲线统计信息字典
+        Dictionary of ROC curve summary statistics.
     """
     
     if roc_df.empty:
@@ -336,8 +340,8 @@ def summarize_roc(roc_df):
     
     f = roc_df['tpr'] - roc_df['fpr']
     if not f.notna().any():
-        # 只有一个类别时 TPR 或 FPR 全为 NaN：AUC、KS 及其阈值都无定义。以前 argmax
-        # 返回 -1 后按标签取 thresholds[-1] 抛 KeyError，整个评估失败
+        # With a single class, TPR or FPR is all NaN: AUC, KS, and their thresholds are undefined. Previously argmax
+        # returned -1, and looking up thresholds[-1] by label raised a KeyError, so the whole evaluation failed
         return {'auc': np.nan, 'ks_index': np.nan, 'ks_threshold': np.nan, 'ks': np.nan}
     roc_info = {
         'auc': auc(roc_df['fpr'], roc_df['tpr']),
@@ -350,19 +354,19 @@ def summarize_roc(roc_df):
 
 @timeit_decorator
 def plot_ks_curve(roc_df, square_figsize=8, to_show=True, save_path=None):
-    """绘制KS曲线图.
-    只能绘制单个Score的KS曲线.
+    """Plot the KS curve.
+    Only the KS curve of a single score can be plotted.
 
     Parameters
     ----------
     roc_df: pandas.DataFrame
-        ROC相关的TPR、FPR、Thresholds等统计量数据集
+        Dataset of ROC statistics such as TPR, FPR, and thresholds.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('KS Curve', fontsize=20, fontweight='bold') #, findfont=zhfont)
@@ -376,16 +380,16 @@ def plot_ks_curve(roc_df, square_figsize=8, to_show=True, save_path=None):
 
 
 def __plot_ks_axes(roc_df, ax):
-    """在axes上绘制单个KS曲线图.
+    """Plot a single KS curve on the axes.
 
     Parameters
     ----------
     roc_df: pandas.DataFrame
-        ROC相关的TPR、FPR、Thresholds等统计量数据集
+        Dataset of ROC statistics such as TPR, FPR, and thresholds.
     roc_summary: dict
-        ROC相关的AUC、KS、TargetRate等统计量字典
+        Dictionary of ROC statistics such as AUC, KS, and TargetRate.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     ax.set_xlim([0,100])
     ax.set_ylim([0,1])
@@ -407,20 +411,20 @@ def __plot_ks_axes(roc_df, ax):
 
 @timeit_decorator
 def plot_roc_curve(roc_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制ROC曲线图.
-    可绘制单个或多个Score的曲线.
+    """Plot the ROC curve.
+    Curves for a single score or for multiple scores can be plotted.
 
     Parameters
     ----------
     roc_dfs: dict
-        单个或多个Score名下的ROC相关统计量字典
-        键值对格式为: {name: roc_df}
+        Dictionary of ROC statistics for one or more scores.
+        Key-value pairs in the format {name: roc_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('ROC Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight'])
@@ -439,14 +443,14 @@ def plot_roc_curve(roc_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_sh
 
 
 def __plot_roc_axes_base(ax, fontdicts):
-    """在axes上绘制roc图基础元素.
+    """Plot the base elements of the ROC chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.plot([0,1], [0,1], color='k', linestyle='--', linewidth=1)
     ax.set_xlim([0,1])
@@ -456,16 +460,16 @@ def __plot_roc_axes_base(ax, fontdicts):
 
 
 def __plot_single_roc_axes(roc_df, ax, fontdicts):
-    """在axes上绘制单个ROC曲线图.
+    """Plot a single ROC curve on the axes.
 
     Parameters
     ----------
     roc_df: pandas.DataFrame
-        ROC相关的TPR、FPR、Thresholds等统计量数据集
+        Dataset of ROC statistics such as TPR, FPR, and thresholds.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_roc_axes_base(ax, fontdicts)
     
@@ -476,7 +480,7 @@ def __plot_single_roc_axes(roc_df, ax, fontdicts):
     ax.plot(roc_df['fpr'], roc_df['tpr'], color=palette['ClassicBlueRedGrey'][0], linewidth=2, label='ROC')
 
     roc_info = summarize_roc(roc_df)
-    if roc_info['ks_index'] >= 0:   # 有效索引
+    if roc_info['ks_index'] >= 0:   # valid index
         ks_vector = [
             [roc_df['fpr'][roc_info['ks_index']], roc_df['fpr'][roc_info['ks_index']]], 
             [roc_df['fpr'][roc_info['ks_index']], roc_df['tpr'][roc_info['ks_index']]]
@@ -486,14 +490,14 @@ def __plot_single_roc_axes(roc_df, ax, fontdicts):
 
 
 def __plot_multi_roc_axes(roc_dfs, ax, fontdicts):
-    """在axes上绘制多个ROC曲线图.
+    """Plot multiple ROC curves on the axes.
 
     Parameters
     ----------
     roc_dfs: dict
-        单个或多个Score名下的ROC相关统计量字典. 键值对格式为: {name: roc_df}
+        Dictionary of ROC statistics for one or more scores, as key-value pairs in the format {name: roc_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_roc_axes_base(ax, fontdicts)
 
@@ -511,24 +515,24 @@ def __plot_multi_roc_axes(roc_dfs, ax, fontdicts):
 # Kde Curve
 @timeit_decorator
 def plot_kde_curve(y_true, y_score_dict, bins=20, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制Score核密度估计(kernel density estimate, 简称KDE)曲线.
+    """Plot the kernel density estimate (KDE) curves of the scores.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score_dict: dict
-        单个或多个Score序列字典. 键值对格式为: {name: Score}
+        Dictionary of one or more score sequences, as key-value pairs in the format {name: Score}.
     bins: int
-        分组数
+        Number of bins.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     y_true = np.array(y_true)
     plt.figure(figsize=(square_figsize, square_figsize))
@@ -549,14 +553,14 @@ def plot_kde_curve(y_true, y_score_dict, bins=20, square_figsize=8, fontdicts=fo
 
 
 def __plot_kde_axes_base(ax, fontdicts):
-    """在axes上绘制kde图基础元素.
+    """Plot the base elements of the KDE chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.set_xlim([0,1])
     ax.set_xlabel('Score', fontdict=fontdicts['axislabel'])
@@ -606,7 +610,7 @@ def _plot_weighted_kde_line(values, weights, ax, color, label):
 
 
 def _non_nan_1d(values):
-    """distplot 的输入处理：转 1 维 float 数组并去掉 NaN（inf 保留）。"""
+    """Input handling for distplot: convert to a 1-D float array and drop NaN (inf is kept)."""
     values = np.asarray(values, dtype=float)
     if values.ndim > 1:
         values = values.squeeze()
@@ -614,42 +618,43 @@ def _non_nan_1d(values):
 
 
 def _anchor_like_distplot(values, ax):
-    """distplot 未指定 color 时先画再删一个 (均值, 0) 点取默认颜色；这个点仍计入坐标轴
-    数据范围，使纵轴包含 0。照做一遍，保证只有 KDE 曲线的图（多模型、近似常数分数）
-    坐标范围不变。"""
+    """When no color is given, distplot first draws and then removes a (mean, 0) point to pick up
+    the default color; this point still counts toward the axes data range, so the y-axis includes 0.
+    Do the same here so that charts with only KDE curves (multiple models, near-constant scores)
+    keep an unchanged axis range."""
     anchor, = ax.plot(values.mean() if values.size else np.nan, 0)
     anchor.remove()
 
 
 def _plot_score_hist(values, bins, ax, **hist_kws):
-    """等价于已弃用的 ``sns.distplot(values, bins=bins, hist=True, kde=False, hist_kws=...)``。"""
+    """Equivalent to the deprecated ``sns.distplot(values, bins=bins, hist=True, kde=False, hist_kws=...)``."""
     values = _non_nan_1d(values)
     _anchor_like_distplot(values, ax)
     ax.hist(values, bins, orientation="vertical", **hist_kws)
 
 
 def _plot_score_kde(values, bw_method, ax, color, label):
-    """等价于已弃用的 ``sns.distplot(values, hist=False, kde=True, kde_kws={'bw': ...})``。"""
+    """Equivalent to the deprecated ``sns.distplot(values, hist=False, kde=True, kde_kws={'bw': ...})``."""
     values = _non_nan_1d(values)
     _anchor_like_distplot(values, ax)
     sns.kdeplot(x=values, ax=ax, color=color, label=label, bw_method=bw_method)
 
 
 def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts, sample_weight=None):
-    """在axes上绘制单个kde图.
+    """Plot a single KDE chart on the axes.
     
     Parameters
     ----------
     y_true: numpy.array
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: numpy.array
-        预测概率值序列
+        Sequence of predicted probabilities.
     bins: int
-        分组数
+        Number of bins.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_kde_axes_base(ax, fontdicts)
 
@@ -707,18 +712,18 @@ def __plot_single_kde_axes(y_true, y_score, bins, ax, fontdicts, sample_weight=N
 
 
 def __plot_multi_kde_axes(y_true, y_score_dict, bins, ax, fontdicts):
-    """在axes上绘制多个kde图.
+    """Plot multiple KDE charts on the axes.
     
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score_dict: dict
-        单个或多个Score序列字典. 键值对格式为: {name: Score}
+        Dictionary of one or more score sequences, as key-value pairs in the format {name: Score}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_kde_axes_base(ax, fontdicts)    
     
@@ -740,17 +745,17 @@ def __plot_multi_kde_axes(y_true, y_score_dict, bins, ax, fontdicts):
 
 # Agg
 def __agg(df):
-    """计算各组统计量.
+    """Compute the statistics of each group.
 
     Parameters
     ----------
     df: pandas.DataFrame
-        包含y_true, y_score, thresholds数据集
+        Dataset containing y_true, y_score, and thresholds.
 
     Returns
     -------
     df_agg: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-group statistics after equal-width binning.
     """
 
     N = len(df['y_true'])
@@ -817,19 +822,19 @@ def __agg(df):
 
 
 def __calc_digit_max(value):
-    """计算数值所在位数的上界限.
-    1.若为正数, 且恰好为10的倍数则为本身, 否则进1位的最小值
-    2.若非正数, 则为0
+    """Compute the upper bound of the order of magnitude that the value falls in.
+    1. If the value is positive: the value itself if it is exactly a power of 10, otherwise the next power of 10 above it
+    2. If the value is not positive: 0
 
     Parameters
     ----------
     value: numerical
-        数值
+        Numeric value.
 
     Returns
     -------
     rst: int
-        上界值
+        Upper bound.
     """
     if value > 0:
         rst = 10 ** np.ceil(np.log10(value))
@@ -840,19 +845,19 @@ def __calc_digit_max(value):
 
 
 def __calc_digit_min(value):
-    """计算数值所在位数的下界限.
-    1.若为负数, 且恰好为10的倍数则为本身, 否则为当前位数的最小值
-    2.若非负数, 则为0
+    """Compute the lower bound of the order of magnitude that the value falls in.
+    1. If the value is negative: the value itself if it is exactly a negative power of 10, otherwise the next lower negative power of 10
+    2. If the value is not negative: 0
 
     Parameters
     ----------
     value: numerical
-        数值
+        Numeric value.
 
     Returns
     -------
     rst: int
-        下界值
+        Lower bound.
     """
     if value >= 0:
         rst = 0
@@ -863,23 +868,23 @@ def __calc_digit_min(value):
 
 @timeit_decorator
 def calc_equid_dist(y_true, y_score, y_group=None, bins=10, sample_weight=None):
-    """将Score等距分组, 计算各组统计量.
+    """Divide the score into equal-width bins and compute the statistics of each bin.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     y_group: array like
-        数据组别序列. 默认为None, 即无组别
+        Sequence of data groups. Defaults to None, i.e. no groups.
     bins: int
-        分组数
+        Number of bins.
 
     Returns
     -------
     dist_df: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-width binning.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_equid_dist(y_true, y_score, bins=bins, sample_weight=sample_weight)
@@ -907,25 +912,25 @@ def calc_equid_dist(y_true, y_score, y_group=None, bins=10, sample_weight=None):
 
 @timeit_decorator
 def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sample_weight=None):
-    """将Score严格的等分分组, 计算各组统计量.
+    """Divide the score into strictly equal-frequency bins and compute the statistics of each bin.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     y_group: array like
-        数据组别序列. 默认为None, 即无组别
+        Sequence of data groups. Defaults to None, i.e. no groups.
     bins: int
-        分组数
+        Number of bins.
     ascending: bool
-        y_score是否按升序排序, 默认为True
+        Whether to sort y_score in ascending order. Defaults to True.
 
     Returns
     -------
     pct_df: pandas.DataFrame
-        等分分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-frequency binning.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_equid_pct(
@@ -939,7 +944,7 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sampl
     y_true = np.array(y_true)
     y_score = np.array(y_score)
     size = len(y_true)
-    binsize = int(size / bins) # 向下取整
+    binsize = int(size / bins) # round down
     indices = np.argsort(y_score) if ascending else np.argsort(y_score)[::-1] 
     
     # Keep the historical integer percentile labels while assigning them in
@@ -971,25 +976,25 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sampl
 
 @timeit_decorator
 def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True, sample_weight=None):
-    """使用固定Score边界分组, 计算各组统计量.
+    """Divide the score by fixed score boundaries and compute the statistics of each bin.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     y_group: array like
-        数据组别序列. 默认为None, 即无组别
+        Sequence of data groups. Defaults to None, i.e. no groups.
     bin_edges: array like
-        固定分箱边界, 通常来自benchmark数据集
+        Fixed bin edges, usually taken from a benchmark dataset.
     ascending: bool
-        y_score是否按升序分箱. 默认为True
+        Whether to bin y_score in ascending order. Defaults to True.
 
     Returns
     -------
     pct_df: pandas.DataFrame
-        固定分箱后各组统计量数据集
+        Dataset of per-bin statistics after fixed binning.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_fixed_pct(
@@ -1026,7 +1031,7 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
     pct_df = __agg(df)
 
     avg_true = np.mean(y_true)
-    # 没有坏样本时 avg_true 为 0，lift 为 NaN / inf（结果照旧），不为此告警
+    # With no bad samples avg_true is 0 and lift is NaN / inf (the result is unchanged); do not warn about it
     with np.errstate(divide="ignore", invalid="ignore"):
         pct_df['lift'] = [x / avg_true for x in pct_df['cumavg_true']]
     pct_df['gain'] = np.cumsum(pct_df['capture_rate'])
@@ -1035,17 +1040,17 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
 
 @timeit_decorator
 def summarize_pct(pct_df, ascending=True):
-    """统计等分分组信息.
+    """Summarize the equal-frequency bins.
 
     Parameters
     ----------
     pct_df: pandas.DataFrame
-        等分分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-frequency binning.
 
     Returns
     -------
     pct_info: dict
-        等分分组统计信息字典
+        Dictionary of equal-frequency binning summary statistics.
     """
     
     if pct_df.empty:
@@ -1087,20 +1092,20 @@ def summarize_pct(pct_df, ascending=True):
 # Dist Curve
 @timeit_decorator
 def plot_dist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制Score分布曲线图.
+    """Plot the score distribution curve.
 
     Parameters
     ----------
     dist_dfs: dict
-        单个或多个Score名下的相同组数, 等距分组后各组统计量数据集. 键值对格式为: {name: dist_df}
+        Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Distribution Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1122,30 +1127,30 @@ def plot_dist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_
 
 
 def __plot_dist_axes_base(ax, fontdicts):
-    """在axes上绘制dist图基础元素.
+    """Plot the base elements of the dist chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.set_xlabel('Score', fontdict=fontdicts['axislabel'])
     ax.set_ylabel('Proportion', fontdict=fontdicts['axislabel'])
 
 
 def __plot_single_dist_axes(dist_df, ax, fontdicts):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-width binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_dist_axes_base(ax, fontdicts)
 
@@ -1166,16 +1171,16 @@ def __plot_single_dist_axes(dist_df, ax, fontdicts):
 
 
 def __plot_single_stack_dist_axes(dist_df, ax, fontdicts):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-width binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_dist_axes_base(ax, fontdicts)
 
@@ -1206,16 +1211,16 @@ def __plot_single_stack_dist_axes(dist_df, ax, fontdicts):
 
 
 def __plot_multi_dist_axes(dist_dfs, ax, fontdicts):
-    """在axes上绘制多个Score分布图.
+    """Plot multiple score distribution charts on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        单个或多个Score名下的相同组数, 等距分组后各组统计量数据集. 键值对格式为: {name: dist_df}
+        Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_dist_axes_base(ax, fontdicts)
 
@@ -1238,20 +1243,20 @@ def __plot_multi_dist_axes(dist_dfs, ax, fontdicts):
 
 @timeit_decorator
 def plot_cumdist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制Score分布曲线图.
+    """Plot the score distribution curve.
 
     Parameters
     ----------
     dist_dfs: dict
-        单个或多个Score名下的相同组数, 等距分组后各组统计量数据集. 键值对格式为: {name: dist_df}
+        Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Cumulative Distribution Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1273,14 +1278,14 @@ def plot_cumdist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], 
 
 
 def __plot_cumdist_axes_base(ax, fontdicts):
-    """在axes上绘制dist图基础元素.
+    """Plot the base elements of the dist chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.set_xlim([0,1])
     ax.set_xlabel('Score', fontdict=fontdicts['axislabel'])
@@ -1288,14 +1293,14 @@ def __plot_cumdist_axes_base(ax, fontdicts):
 
 
 def __plot_single_cumdist_axes(dist_df, ax, fontdicts):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-width binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_cumdist_axes_base(ax, fontdicts)
 
@@ -1316,16 +1321,16 @@ def __plot_single_cumdist_axes(dist_df, ax, fontdicts):
 
 
 def __plot_single_stack_cumdist_axes(dist_df, ax, fontdicts):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        等距分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-width binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_cumdist_axes_base(ax, fontdicts)
 
@@ -1356,14 +1361,14 @@ def __plot_single_stack_cumdist_axes(dist_df, ax, fontdicts):
 
 
 def __plot_multi_cumdist_axes(dist_dfs, ax, fontdicts):
-    """在axes上绘制多个Score分布图.
+    """Plot multiple score distribution charts on the axes.
 
     Parameters
     ----------
     dist_df: pandas.DataFrame
-        单个或多个Score名下的相同组数, 等距分组后各组统计量数据集. 键值对格式为: {name: dist_df}
+        Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_cumdist_axes_base(ax, fontdicts)
 
@@ -1387,18 +1392,18 @@ def __plot_multi_cumdist_axes(dist_dfs, ax, fontdicts):
 # PCT Curve
 @timeit_decorator
 def plot_pct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制Score分布曲线图.
+    """Plot the score distribution curve.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Percentile Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1419,14 +1424,14 @@ def plot_pct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_sh
 
 
 def __plot_pct_axes_base(ax, fontdicts):
-    """在axes上绘制dist图基础元素.
+    """Plot the base elements of the dist chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.set_xlim([0,100])
     ax.set_xlabel('Percentile %', fontdict=fontdicts['axislabel'])
@@ -1434,14 +1439,14 @@ def __plot_pct_axes_base(ax, fontdicts):
 
 
 def __plot_single_pct_axes(pct_df, ax, fontdicts, ascending=True):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     pct_df: pandas.DataFrame
-        等分分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-frequency binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     
     if pct_df.empty:
@@ -1463,14 +1468,14 @@ def __plot_single_pct_axes(pct_df, ax, fontdicts, ascending=True):
 
 
 def __plot_multi_pct_axes(pct_dfs, ax, fontdicts):
-    """在axes上绘制多个Score分布图.
+    """Plot multiple score distribution charts on the axes.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_pct_axes_base(ax, fontdicts)
 
@@ -1488,18 +1493,18 @@ def __plot_multi_pct_axes(pct_dfs, ax, fontdicts):
 
 @timeit_decorator
 def plot_cumpct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """绘制Score分布曲线图.
+    """Plot the score distribution curve.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Percentile Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1520,14 +1525,14 @@ def plot_cumpct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to
 
 
 def __plot_cumpct_axes_base(ax, fontdicts):
-    """在axes上绘制dist图基础元素.
+    """Plot the base elements of the dist chart on the axes.
     
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.set_xlim([0,100])
     ax.set_xlabel('Cumulative Percentile %', fontdict=fontdicts['axislabel'])
@@ -1535,14 +1540,14 @@ def __plot_cumpct_axes_base(ax, fontdicts):
 
 
 def __plot_single_cumpct_axes(pct_df, ax, fontdicts):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     pct_df: pandas.DataFrame
-        等分分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-frequency binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_cumpct_axes_base(ax, fontdicts)
 
@@ -1558,14 +1563,14 @@ def __plot_single_cumpct_axes(pct_df, ax, fontdicts):
 
 
 def __plot_multi_cumpct_axes(pct_dfs, ax, fontdicts):
-    """在axes上绘制多个Score分布图.
+    """Plot multiple score distribution charts on the axes.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     """
     __plot_cumpct_axes_base(ax, fontdicts)
 
@@ -1584,20 +1589,20 @@ def __plot_multi_cumpct_axes(pct_dfs, ax, fontdicts):
 # Gain Curve
 @timeit_decorator
 def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None, ascending=False):
-    """绘制Score分布曲线图.
+    """Plot the score distribution curve.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     ascending: bool, default False
-        Gain 图按分数升序（True）或降序（False）累计。
+        Whether the Gain chart accumulates by ascending score (True) or descending score (False).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Gain Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight'])  #, findfont=zhfont)
@@ -1619,14 +1624,14 @@ def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_s
 
 
 def __plot_gain_axes_base(ax, fontdicts, ascending=False):
-    """在axes上绘制Score分布图基础.
+    """Plot the base elements of the score distribution chart on the axes.
 
     Parameters
     ----------
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     ax.plot([0,100], [0,1], color='k', linestyle='--', linewidth=1)
     ax.set_xlim([0,100])
@@ -1637,16 +1642,16 @@ def __plot_gain_axes_base(ax, fontdicts, ascending=False):
 
     
 def __plot_single_gain_axes(pct_df, ax, fontdicts, ascending=False):
-    """在axes上绘制单个Score分布图.
+    """Plot a single score distribution chart on the axes.
 
     Parameters
     ----------
     pct_df: pandas.DataFrame
-        等分分组后各组统计量数据集
+        Dataset of per-bin statistics after equal-frequency binning.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_gain_axes_base(ax, fontdicts, ascending=ascending)
 
@@ -1671,16 +1676,16 @@ def __plot_single_gain_axes(pct_df, ax, fontdicts, ascending=False):
 
 
 def __plot_multi_gain_axes(pct_dfs, ax, fontdicts, ascending=False):
-    """在axes上绘制多个Score分布图.
+    """Plot multiple score distribution charts on the axes.
 
     Parameters
     ----------
     pct_dfs: dict
-        单个或多个Score名下的等分组后各组统计量数据集. 键值对格式为: {name: pct_df}
+        Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     ax: matplotlib.pyplot.plt.axes
-        绘图axes
+        Axes to draw on.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     __plot_gain_axes_base(ax, fontdicts, ascending=ascending)
 
@@ -1760,40 +1765,40 @@ def _set_weighted_axis_title(ax, fontdicts):
 
 @timeit_decorator
 def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None, ascending=None):
-    """绘制单模型预测效果评价图.
+    """Plot the prediction performance evaluation chart of a single model.
 
     Parameters
     ----------
     datasets: pandas.DataFrame
-        数据集字典. 键值对格式为: {dataname: {'y_true': y_true, 'y_score': y_score}}
+        Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score}}.
     dist_bins: int
-        等距分组数. 默认值为20
+        Number of equal-width bins. Defaults to 20.
     pct_bins: int
-        等分分组数. 默认值为10
+        Number of equal-frequency bins. Defaults to 10.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     fontdicts: dict
-        绘图相关字体字典. 默认值为fontdicts['sub']
+        Dictionary of font settings for the plot. Defaults to fontdicts['sub'].
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     ascending: bool, optional
-        显式值统一控制收益表、百分位图和 Gain 图的分数方向；None 保留
-        历史百分位升序、Gain 降序的行为。
+        An explicit value controls the score direction of the Gains table, the percentile chart, and the
+        Gain chart uniformly; None keeps the historical behavior (percentile ascending, Gain descending).
     
     Returns
     -------
     result_df: pandas.DataFrame
-        模型评价指标汇总数据集
+        Dataset summarizing the model evaluation metrics.
     """
     if pct_bin_edges is not None:
         pct_bin_edges = list(pct_bin_edges)
 
-    # 检查是否有足够数据
+    # Check that there is enough data
     for d, data_dict in datasets.items():
         if len(data_dict['y_true']) < 2:
-            # 返回一个包含默认列的空 DataFrame
+            # Return an empty DataFrame containing the default columns
             return pd.DataFrame()
         
     datas = list(datasets.keys())
@@ -1846,27 +1851,27 @@ def resturct_gains(gains_table):
     return gains_table
 
 def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, fontdicts, gains_table = True, equal_freq = True, pct_bin_edges = None, sample_weight=None, ascending=None):
-    """绘制单模型在单样本集上预测效果评价图.
-    包括: ROC、KDE、PCT、Gain四图.
+    """Plot the prediction performance evaluation chart of a single model on a single dataset.
+    It includes four charts: ROC, KDE, PCT, and Gain.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     nrow: int
-        行数
+        Number of rows.
     ncol: int
-        列数
+        Number of columns.
     i: int
-        行序号
+        Row index.
     dist_bins: int
-        等距分组数
+        Number of equal-width bins.
     pct_bins: int
-        等分分组数
+        Number of equal-frequency bins.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     
 #     from Model_Eval_Tool import get_gains_table
@@ -1879,7 +1884,7 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
     unweighted_gains_ascending = True if ascending is None else bool(ascending)
     weighted_gains_ascending = False if ascending is None else bool(ascending)
 
-    # 清理数据
+    # Clean the data
     mask = np.isfinite(y_score) & np.isfinite(y_true)
     if sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=float)
@@ -1944,8 +1949,8 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
         pct_info = summarize_pct(pct_df, ascending=pct_ascending)
     
     if len(y_true) < 2:
-        # 有效样本不足两行：返回默认性能指标（全部为NaN）。只有一个类别时照常汇总与出图，
-        # N / avgTrue / avgScore / 分位目标率都有定义，只有 KS / AUC 为 NaN
+        # Fewer than two valid samples: return the default performance metrics (all NaN). With only one class, the
+        # summary and charts are produced as usual: N / avgTrue / avgScore / percentile target rates are defined, only KS / AUC are NaN
         return {
             'N': np.nan, 
             'avgTrue': np.nan, 
@@ -2000,27 +2005,27 @@ def __evaluate_performance(y_true, y_score, nrow, ncol, i, dist_bins, pct_bins, 
 
 @timeit_decorator
 def evaluate_distribution(datasets, dist_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], toplot=True, save_path=None):
-    """绘制单模型在多样本集上模型分分布.
+    """Plot the score distribution of a single model on multiple datasets.
 
     Parameters
     ----------
     datasets: pandas.DataFrame
-        数据集字典. 键值对格式为: {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}
+        Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}.
     dist_bins: int
-        等距分组数. 默认值为20
+        Number of equal-width bins. Defaults to 20.
     square_figsize: float
-        正方形图边英寸. 默认值为8
+        Side length of the square figure in inches. Defaults to 8.
     fontdicts: dict
-        绘图相关字体字典. 默认值为fontdicts['sub']
+        Dictionary of font settings for the plot. Defaults to fontdicts['sub'].
     toplot: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     
     Returns
     -------
     result_df: pandas.DataFrame
-        模型评价指标汇总数据集
+        Dataset summarizing the model evaluation metrics.
     """
     datas = list(datasets.keys())
     nrow = len(datas)
@@ -2052,27 +2057,27 @@ def evaluate_distribution(datasets, dist_bins=10, square_figsize=5, fontdicts=fo
 
 
 def __evaluate_distribution(y_true, y_score, y_group, nrow, ncol, i, dist_bins, fontdicts):
-    """绘制单模型在单样本集上模型分分布.
-    包括: ROC、KDE、PCT、Gain四图.
+    """Plot the score distribution of a single model on a single dataset.
+    It includes four charts: ROC, KDE, PCT, and Gain.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     y_group: array like
-        数据组别序列
+        Sequence of data groups.
     nrow: int
-        行数
+        Number of rows.
     ncol: int
-        列数
+        Number of columns.
     i: int
-        行序号
+        Row index.
     dist_bins: int
-        等距分组数
+        Number of equal-width bins.
     fontdicts: dict
-        绘图相关字体字典
+        Dictionary of font settings for the plot.
     """
     dist_df = calc_equid_dist(y_true, y_score, y_group, bins=dist_bins)
     if y_group is not None:
@@ -2084,27 +2089,27 @@ def __evaluate_distribution(y_true, y_score, y_group, nrow, ncol, i, dist_bins, 
 
 @timeit_decorator
 def comparison_performance(datasets, pct_bins=10, square_figsize=5, fontdicts=fontdicts['sub'], to_show=True, save_path=None):
-    """绘制多个模型预测效果对比图.
+    """Plot the prediction performance comparison chart of multiple models.
 
     Parameters
     ----------
     datasets: pandas.DataFrame
-        数据集字典. 键值对格式为: {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}
+        Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}.
     pct_bins: int
-        等分分组数. 默认值为10
+        Number of equal-frequency bins. Defaults to 10.
     square_figsize: float
-        正方形图边英寸. 默认值为5
+        Side length of the square figure in inches. Defaults to 5.
     fontdicts: dict
-        绘图相关字体字典. 默认值为fontdicts['sub']
+        Dictionary of font settings for the plot. Defaults to fontdicts['sub'].
     to_show: bool
-        是否展示图片. 默认为True
+        Whether to display the figure. Defaults to True.
     save_path: str
-        结果图片存放文件地址. 默认值为None, 即不保存
+        File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     
     Returns
     -------
     result_df: pandas.DataFrame
-        模型评价指标汇总数据集
+        Dataset summarizing the model evaluation metrics.
     """
     datas = list(datasets.keys())
     models = list(datasets[datas[0]]['y_score_dict'].keys())
@@ -2179,27 +2184,27 @@ def __comparison_performance(y_true, y_score_dict, nrow, ncol, i, pct_bins, font
 # lift table apt
 @timeit_decorator
 def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, sample_weight=None):
-    """给定Lift取值范围, 求解Lift表.
+    """Compute the Lift table for a given range of Lift values.
 
     Parameters
     ----------
     y_true: array like
-        实际样本标签序列, 只接受0-1
+        Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
-        预测概率值序列
+        Sequence of predicted probabilities.
     start: numerical
-        起始值
+        Start value.
     stop: numerical
-        终止值
+        Stop value.
     step: numerical
-        步长
+        Step size.
     score_ascending: bool
-        y_score为升序序列, 即数值越大y_true=1可能性越大. 默认为True
+        Whether y_score is ascending, i.e. the larger the value, the more likely y_true=1. Defaults to True.
 
     Returns
     -------
     lift_df: pandas.DataFrame
-        Lift表
+        Lift table.
     """
     if sample_weight is not None:
         weight = np.asarray(sample_weight, dtype=float)
@@ -2218,11 +2223,11 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, samp
                 sample_weight=sample_weight,
             )
 
-    # 计算初始等分分组数, 在200组与LiftTable长度中取大
+    # Compute the initial number of equal-frequency bins: the larger of 200 and the length of the Lift table
     init_bins = np.max([200, int((stop - start + step) / step)])
     
-    # 根据start和stop值, 判断lift的升降(lift_ascending)
-    # 升则stop=1, 降则start=1
+    # Determine the direction of lift (lift_ascending) from the start and stop values
+    # If ascending, stop=1; if descending, start=1
     if start < 1:
         stop = 1
     elif start >= 1:
@@ -2230,12 +2235,12 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, samp
     lift_ascending = start < 1
     lift_df = pd.DataFrame({'lift': np.arange(start, stop + step, step)})
     
-    # 根据分数与Y=1的升降关系(score_ascending)与lift的升降(lift_ascending)判断分数分组的升降序
-    # 一致则为升、不一致则为降
+    # Determine the order of the score bins from the relation between score and Y=1 (score_ascending) and the direction of lift (lift_ascending)
+    # Ascending if they agree, descending if they differ
     ascending = score_ascending ==  lift_ascending
     equid_df = calc_equid_pct(y_true=y_true, y_score=y_score, y_group=None, bins=init_bins, ascending=ascending)
 
-    # 根据分数升降序, 修正上下组限值, 遵循上组限不在内原则
+    # Adjust the lower and upper bin limits according to the score order, following the rule that the upper limit is exclusive
     if ascending:
         equid_df['lower_limit'] = [-np.inf, ] + list(equid_df['min_score'][1:])
         equid_df['upper_limit'] = list(equid_df['min_score'][1:]) + [np.inf, ]
@@ -2244,8 +2249,8 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, samp
         equid_df['upper_limit'] = [np.inf, ] + list(equid_df['min_score'][:-1])
     lift_df = pd.merge(lift_df.assign(key=1), equid_df.assign(key=1), how='left', on='key', suffixes=('', '_actual')).drop(columns=['key'])
 
-    # 根据lift的升降(lift_ascending)求解切分数据
-    # 升则取不高于lift的最大值, 降则取不低于lift的最小值
+    # Solve for the cut points according to the direction of lift (lift_ascending)
+    # If ascending, take the largest value not above the lift; if descending, take the smallest value not below the lift
     if lift_ascending:
         cond = lift_df['lift'] >= lift_df['lift_actual'] 
     else:
@@ -2255,7 +2260,7 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, samp
     lift_df = lift_df.groupby(['lift']).first().reset_index()
     lift_df = lift_df.sort_values(by=['lift'], ascending=lift_ascending)
 
-    # 根据分数排序, 升序时取组上限, 降序时取组下限
+    # Depending on the score order, take the upper bin limit when ascending and the lower bin limit when descending
     if ascending:
         cols = ['lift', 'lift_actual', 'upper_limit', 'cumsum_n', 'cumsum_proportion', 'cumsum_true', 'cumavg_true']
     else:
