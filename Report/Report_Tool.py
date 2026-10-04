@@ -264,8 +264,8 @@ def get_multi_model_perf_report(em, ws, eval_img_path, eval_res_path):
     init_format.update({"font_size": 14, "bg_color": "#FFD966"})
     em.add_new_format(format_dict = init_format, format_name="CUS_##")
 
-    em.write_text_content(worksheet=ws, input_text="{CUS_#} 多模型评估（未调参版) \n \n")
-    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} 直接使用三方特征 \n", retCellRange="value")
+    em.write_text_content(worksheet=ws, input_text="{CUS_#} Multi-Model Evaluation (Untuned) \n \n")
+    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} Using Third-Party Features Directly \n", retCellRange="value")
     
     em.set_cell_format(ws, cell_range=[h2_loc[0], h2_loc[1], h2_loc[2] - 2, h2_loc[3] + 5], cformat = "CUS_##")
 
@@ -289,7 +289,7 @@ def get_multi_model_perf_report(em, ws, eval_img_path, eval_res_path):
     ################################## Division Line ###############################
 
     em.reset_curr_loc(loc=(div_line_loc[0] + 2, df_loc1[1]))
-    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} 特征WOE处理后建模 \n", retCellRange="value")
+    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} Modeling on WOE-Transformed Features \n", retCellRange="value")
     em.set_cell_format(ws, cell_range=[h2_loc[0], h2_loc[1], h2_loc[2] - 2, h2_loc[3] + 5], cformat = "CUS_##")
 
     img_loc, df_loc = single_model_perf(em, ws, 
@@ -318,7 +318,7 @@ def get_multi_model_varimp(em, ws, raw_varimp = None, woe_varimp = None):
     """ Varimp for Multi Model Evaluation. """
     
     ################################# Varimp Worksheet ##################################
-    em.write_text_content(worksheet=ws, input_text="{CUS_#} 特征重要性评估 \n \n")
+    em.write_text_content(worksheet=ws, input_text="{CUS_#} Feature Importance Evaluation \n \n")
 
     em.gap_number = 1
     
@@ -352,9 +352,9 @@ def get_fnl_model_report(em, ws, result_dir):
     init_format.update({"font_size": 14, "bg_color": "#FFD966"})
     em.add_new_format(format_dict = init_format, format_name="CUS_##")
 
-    em.write_text_content(worksheet=ws, input_text="{CUS_#} 终版模型评估 \n \n")
+    em.write_text_content(worksheet=ws, input_text="{CUS_#} Final Model Evaluation \n \n")
 
-    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} 原始特征建模 \n", retCellRange="value")
+    h2_loc = em.write_text_content(worksheet=ws, input_text="{CUS_##} Modeling on Original Features \n", retCellRange="value")
     em.set_cell_format(ws, cell_range=[h2_loc[0], h2_loc[1], h2_loc[2] - 2, h2_loc[3] + 5], cformat = "CUS_##")
 
     img_loc, df_loc = single_model_perf(em, ws, 
@@ -371,7 +371,7 @@ def get_model_varimp(em, ws, varimp):
     """ Varimp for Multi Model Evaluation. """
     
     ################################# Varimp Worksheet ##################################
-    em.write_text_content(worksheet=ws, input_text="{CUS_#} 特征重要性评估 \n \n")
+    em.write_text_content(worksheet=ws, input_text="{CUS_#} Feature Importance Evaluation \n \n")
 
     em.gap_number = 1
 

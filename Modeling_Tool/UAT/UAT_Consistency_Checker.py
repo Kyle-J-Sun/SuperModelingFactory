@@ -1,16 +1,16 @@
 """
-uat_consistency_checker.py — 线上-线下一致性 UAT 校验模块
-==========================================================
+uat_consistency_checker.py — Online/offline consistency UAT check module
+========================================================================
 
-将 99_uat_validation.ipynb 的完整逻辑封装为可复用的类，每个 notebook
-章节对应一个方法，由 run() 统一编排。
+Wraps the full logic of the 99_uat_validation.ipynb notebook into reusable classes.
+Each notebook section maps to one method, and run() orchestrates them all.
 
-主要导出:
-    UATConfig               — 全量配置 dataclass
-    UATConsistencyChecker   — 校验器主类
-    safe_diff / safe_eq     — 数值比较工具函数
-    mismatch_mask           — 数值不一致判定（超容差 OR 单侧为空）
-    time_diff_seconds / time_mismatch_mask — 时间字段比较（秒级时间差容差）
+Main exports:
+    UATConfig               — full configuration dataclass
+    UATConsistencyChecker   — main checker class
+    safe_diff / safe_eq     — numeric comparison helpers
+    mismatch_mask           — numeric mismatch test (beyond tolerance OR exactly one side null)
+    time_diff_seconds / time_mismatch_mask — time field comparison (tolerance in seconds)
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def _import_excel_master():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 数值比较工具函数
+# Numeric comparison helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_diff(a: pd.Series, b: pd.Series) -> pd.Series:
@@ -75,16 +75,17 @@ def safe_diff(a: pd.Series, b: pd.Series) -> pd.Series:
 
 
 def _apply_excel_font(em, font_name: str) -> None:
-    """将 ExcelMaster 实例中所有已注册的 xlsxwriter Format 对象的字体统一替换。
+    """Replace the font of every xlsxwriter Format object registered in an ExcelMaster instance.
 
-    xlsxwriter Workbook 的 ``formats`` 列表持有全部 Format 对象的引用，
-    在 ``close_workbook()`` 前直接修改 ``fmt.font_name`` 即可生效。
+    The ``formats`` list of the xlsxwriter Workbook holds references to all Format objects,
+    so setting ``fmt.font_name`` directly before ``close_workbook()`` takes effect.
 
-    ⚠ 必须在所有 ``write_dataframe`` / ``merge_col`` 等写入**完成之后**、
-    ``close_workbook()`` 之前调用：pandas ``df.to_excel`` 会为 header 行、datetime
-    列等**动态新建** Format 对象，部分 ExcelFormatTool 格式（NUM_COMMA 等）也未设
-    font_name。过早调用会漏掉这些后建的 Format，导致 header 行、cdc_inserttime 等
-    datetime 列仍是默认 Calibri 字体。
+    ⚠ Must be called **after** all writes such as ``write_dataframe`` / ``merge_col`` have
+    **completed** and before ``close_workbook()``: pandas ``df.to_excel`` creates Format objects
+    **dynamically** for the header row, datetime columns, etc., and some ExcelFormatTool formats
+    (NUM_COMMA, etc.) do not set font_name either. Calling too early misses these later-created
+    Formats, so the header row and datetime columns such as cdc_inserttime keep the default
+    Calibri font.
     """
     for fmt in em.workbook.formats:
         fmt.font_name = font_name
@@ -143,18 +144,19 @@ def safe_eq(a: pd.Series, b: pd.Series) -> pd.Series:
 
 
 def mismatch_mask(a: pd.Series, b: pd.Series, tol: float) -> pd.Series:
-    """返回 a / b 不一致的布尔掩码。
+    """Return a boolean mask of the positions where a and b are inconsistent.
 
-    判定为不一致（True）的两种情形：
-        * 两侧均为数值且 ``|a - b| > tol``；或
-        * 恰好一侧为空 / 非数值（单侧缺失，XOR）。
+    A position is flagged as inconsistent (True) in two cases:
+        * both sides are numeric and ``|a - b| > tol``; or
+        * exactly one side is null / non-numeric (one-sided missing, XOR).
 
-    两侧皆空视为一致（双方都未取到值，无可比较），返回 False。
+    If both sides are null, they are treated as consistent (neither side has a value, so there is
+    nothing to compare) and False is returned.
     """
     a_num = pd.to_numeric(a, errors="coerce")
     b_num = pd.to_numeric(b, errors="coerce")
-    over_tol      = (a_num - b_num).abs() > tol      # 两侧有值且超容差（NaN 比较结果为 False）
-    one_side_null = a_num.isna() ^ b_num.isna()      # 恰好一侧为空
+    over_tol      = (a_num - b_num).abs() > tol      # both sides present, beyond tolerance (NaN compares as False)
+    one_side_null = a_num.isna() ^ b_num.isna()      # exactly one side null
     return over_tol | one_side_null
 
 
@@ -166,14 +168,15 @@ def time_diff_seconds(a: pd.Series, b: pd.Series) -> pd.Series:
 
 
 def time_mismatch_mask(a: pd.Series, b: pd.Series, tol_seconds: float) -> pd.Series:
-    """时间字段不一致判定（按秒级时间差容差）。
+    """Return a boolean mask of time field mismatches (tolerance on the difference in seconds).
 
-    判定为不一致（True）的两种情形：
-        * 两侧均可解析为时间且 ``|a - b| > tol_seconds`` 秒；或
-        * 恰好一侧无法解析 / 为空（XOR）。
+    A position is flagged as inconsistent (True) in two cases:
+        * both sides parse as times and ``|a - b| > tol_seconds`` seconds; or
+        * exactly one side cannot be parsed / is null (XOR).
 
-    两侧皆无法解析（NaT）视为一致，返回 False。与 ``mismatch_mask`` 语义对齐，
-    区别仅在于用 ``pd.to_datetime`` 解析并以秒为单位比较，适配时间字符串/时间戳。
+    If neither side can be parsed (NaT), they are treated as consistent and False is returned.
+    The semantics match ``mismatch_mask``; the only difference is that values are parsed with
+    ``pd.to_datetime`` and compared in seconds, which suits time strings and timestamps.
     """
     a_dt = pd.to_datetime(a, errors="coerce")
     b_dt = pd.to_datetime(b, errors="coerce")
@@ -184,50 +187,56 @@ def time_mismatch_mask(a: pd.Series, b: pd.Series, tol_seconds: float) -> pd.Ser
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 配置 dataclass
+# Configuration dataclass
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class UATConfig:
-    """UAT 校验所有可调入参集中管理。
+    """Configuration of the UAT consistency check, holding all tunable parameters in one place.
 
     Parameters
     ----------
     main_model_score_col : str
-        主模型分列名（离线/线上 SQL 均以此命名）。
-        Pandas merge 后线上列自动加 ``_online`` 后缀。
+        Name of the main model score column (used by both the offline and the online SQL).
+        After the pandas merge, the online column automatically gets the ``_online`` suffix.
     include_submodel_scores : bool
-        True  → 子模型分已作为特征被 §6 自动检测覆盖，跳过 §5 子模型专项验证。
-        False → 需运行 §5 子模型分专项验证；需同时填写 ``submodel_pairs``。
+        True  → submodel scores are already covered as features by the §6 automatic check, so the
+        §5 dedicated submodel check is skipped.
+        False → run the §5 dedicated submodel score check; ``submodel_pairs`` must also be set.
     excel_output_path : str
-        Excel 报告输出路径（含文件名）。默认含秒级时间戳保证唯一性。
+        Output path of the Excel report (including the file name). The default contains a
+        timestamp with second resolution so that the name is unique.
     sql_dir : str
-        SQL 文件所在目录（绝对路径或相对于 CWD 的路径）。
+        Directory containing the SQL files (absolute path, or path relative to the CWD).
     offline_sql / online_sql / joined_sql : str
-        三个 SQL 文件名。
+        Names of the three SQL files.
     tol_score : float
-        主模型分 / 子模型分比较容差（默认 1e-6）。
+        Comparison tolerance for the main model score / submodel scores (default 1e-6).
     tol_feat : float
-        特征变量比较容差（默认 1e-2）。
+        Comparison tolerance for the feature variables (default 1e-2).
     n_process : int
-        SQL 并发拉取进程数（默认 cpu_count - 1）。
+        Number of concurrent processes used to pull the SQL data (default cpu_count - 1).
     submodel_pairs : dict
-        子模型分列对 ``{offline_col: online_col}``，仅 ``include_submodel_scores=False`` 时使用。
+        Submodel score column pairs ``{offline_col: online_col}``; used only when
+        ``include_submodel_scores=False``.
     excel_font : str
-        Excel 报告全局字体名称（默认 ``"Arial"``）。
-        覆盖 ExcelMaster/ExcelFormatTool 中所有 format 对象的 ``font_name``。
+        Global font name of the Excel report (default ``"Arial"``).
+        Overrides ``font_name`` of every format object in ExcelMaster/ExcelFormatTool.
     info_list : list of str
-        除 flow_id 外需随报告一并输出的辅助信息字段（如 user_id / curp / launch_time）。
-        这些字段会附加在每个逐 flow_id 明细表（主模型分 / 子模型 / Feat_* / Per-Flow）
-        的 flow_id 之后；同时从 §6 特征自动检测中排除（视为标识字段而非待比较特征）。
-        仅保留实际存在于数据中的字段，缺失项忽略并告警。
+        Auxiliary information fields, besides flow_id, to write with the report (e.g. user_id / curp /
+        launch_time). These fields are appended after flow_id in every per-flow_id detail table (main
+        model score / submodel / Feat_* / Per-Flow) and are excluded from the §6 automatic feature check
+        (treated as identifier fields rather than features to compare). Only fields that actually exist
+        in the data are kept; missing ones are ignored with a warning.
     time_featlist : list of str
-        需做时间语义对比的时间字段（原始字段名，线上线下必须同名）。结构与普通入模特征
-        一致：离线列为 ``col``，线上列为 ``col_online``。仅此列表内的时间字段会在 §7 用
-        ``pd.to_datetime`` 解析后按秒级时间差容差比较；配置后这些字段会从 §6 数值特征
-        对比中排除。
+        Time fields that need a time-semantic comparison (original field names; they must have the same
+        name online and offline). The structure is the same as for ordinary model features: the offline
+        column is ``col`` and the online column is ``col_online``. Only the time fields in this list are
+        parsed with ``pd.to_datetime`` in §7 and compared with a tolerance on the time difference in
+        seconds; once configured, these fields are excluded from the §6 numeric feature comparison.
     tol_time_seconds : float
-        时间差容差（秒，默认 60）。``|线上 - 线下| ≤ tol_time_seconds`` 视为一致。
+        Tolerance on the time difference (seconds, default 60). ``|online - offline| ≤ tol_time_seconds``
+        counts as consistent.
     """
 
     main_model_score_col: str = "credit_risk_ltrs_subomdel_score"
@@ -260,30 +269,30 @@ class UATConfig:
 
     info_list: List[str] = field(default_factory=list)
 
-    time_featlist: List[str] = field(default_factory=list)     # 需时间语义对比的字段（线上线下同名）
-    tol_time_seconds: float = 60.0                             # 时间差容差（秒）
-    comparison_block_size: int = 128                           # 宽表逐 flow 比较列块大小
+    time_featlist: List[str] = field(default_factory=list)     # fields to compare as times (same name online/offline)
+    tol_time_seconds: float = 60.0                             # time difference tolerance (seconds)
+    comparison_block_size: int = 128                           # column block size for per-flow comparison (wide tables)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 校验器主类
+# Checker main class
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UATConsistencyChecker:
-    """线上-线下一致性 UAT 校验器。
+    """Online/offline consistency UAT checker.
 
-    将 notebook 99_uat_validation 的完整逻辑封装为可复用的类：
+    Wraps the full logic of the 99_uat_validation notebook into a reusable class:
 
-        §1 数据拉取 → §2 覆盖度检查 → §3 主模型分一致性
-        → §5 子模型专项（可选） → §6 全量特征一致性
-        → §8 Per-Flow 报告 → §9 汇总 → §10 Excel 输出
+        §1 data loading → §2 coverage check → §3 main model score consistency
+        → §5 dedicated submodel check (optional) → §6 full feature consistency
+        → §8 Per-Flow report → §9 summary → §10 Excel output
 
     Parameters
     ----------
     config : UATConfig
-        全量配置参数。
+        Full configuration parameters.
     sqlrunner : object
-        已初始化的 ODPSRunner 实例，需提供 ``run_sql(sql, n_process)`` 方法。
+        An initialized ODPSRunner instance; it must provide a ``run_sql(sql, n_process)`` method.
     """
 
     def __init__(self, config: UATConfig, sqlrunner) -> None:
@@ -292,73 +301,73 @@ class UATConsistencyChecker:
         if int(self.cfg.comparison_block_size) <= 0:
             raise ValueError("comparison_block_size must be a positive integer")
 
-        # ── 数据容器 ──────────────────────────────────────────────────────
+        # ── Data containers ───────────────────────────────────────────────
         self.df_offline:  Optional[pd.DataFrame] = None
         self.df_online:   Optional[pd.DataFrame] = None
         self.df_onoff:    Optional[pd.DataFrame] = None
         self.df_compare:  Optional[pd.DataFrame] = None
-        self.df_both:     Optional[pd.DataFrame] = None   # df_compare 中 _merge=="both" 的子集，一致性对比基准
-        self._info_cols:  List[str] = []                  # info_list 中实际存在的字段（随明细报告输出）
+        self.df_both:     Optional[pd.DataFrame] = None   # _merge=="both" subset of df_compare (comparison base)
+        self._info_cols:  List[str] = []                  # info_list fields present in the data (for detail reports)
 
-        # ── §2 覆盖度检查结果 ─────────────────────────────────────────────
+        # ── §2 Coverage check results ─────────────────────────────────────
         self.offline_fids: set = set()
         self.online_fids:  set = set()
         self.common_fids:  set = set()
         self.only_offline: set = set()
         self.only_online:  set = set()
 
-        # ── §3 主模型分检查结果 ───────────────────────────────────────────
+        # ── §3 Main model score check results ─────────────────────────────
         self.offline_score_col: Optional[str] = None
         self.online_score_col:  Optional[str] = None
         self.main_score_mismatch_df: Optional[pd.DataFrame] = None
 
-        # ── §5 子模型分专项结果 ───────────────────────────────────────────
+        # ── §5 Dedicated submodel score results ───────────────────────────
         self.submodel_summary: List[dict] = []
 
-        # ── §6 特征一致性结果 ─────────────────────────────────────────────
+        # ── §6 Feature consistency results ────────────────────────────────
         self.feature_pairs: Dict[str, str] = {}   # {offline_col: online_col}
         self.diff_summary:  Optional[pd.DataFrame] = None
 
-        # ── §7 时间字段一致性结果 ─────────────────────────────────────────
+        # ── §7 Time field consistency results ─────────────────────────────
         self.time_summary:         Optional[pd.DataFrame] = None
-        self.time_fields_resolved: Dict[str, str] = {}   # 实际存在的时间字段 {off_col: on_col}
+        self.time_fields_resolved: Dict[str, str] = {}   # time fields that actually exist {off_col: on_col}
 
-        # ── §8-§9 汇总报告 ────────────────────────────────────────────────
+        # ── §8-§9 Summary reports ─────────────────────────────────────────
         self.per_flow_df: Optional[pd.DataFrame] = None
         self.summary_df:  Optional[pd.DataFrame] = None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §1  数据拉取
+    # §1  Data loading
     # ─────────────────────────────────────────────────────────────────────────
 
     def load_data(self) -> None:
-        """执行三个 SQL，拉取数据并在 Pandas 侧完成 outer merge。"""
+        """Run the SQL files, pull the data, and complete the outer merge on the pandas side."""
         logger.info("=" * 60)
-        logger.info("§1  数据拉取")
+        logger.info("§1  Data loading")
         logger.info("=" * 60)
 
-        # 1.1 离线回溯表
+        # 1.1 Offline backtest table
         self.df_offline = self.sqlrunner.run_sql(
             self._read_sql(self.cfg.offline_sql), n_process=self.cfg.n_process
         )
         logger.info("Offline: shape=%s | flow_id nunique=%d",
                     self.df_offline.shape, self.df_offline["flow_id"].nunique())
 
-        # 1.2 线上 PATA 表
+        # 1.2 Online PATA table
         self.df_online = self.sqlrunner.run_sql(
             self._read_sql(self.cfg.online_sql), n_process=self.cfg.n_process
         )
         logger.info("Online:  shape=%s | flow_id nunique=%d",
                     self.df_online.shape, self.df_online["flow_id"].nunique())
 
-        # 1.3 SQL 侧联表（备用，当前未参与任何校验逻辑；
-        #     若需在 SQL 侧直接做 diff 而非 Pandas 侧 merge，可在此基础上扩展）
+        # 1.3 SQL-side joined table (spare; currently not used by any check logic;
+        #     extend this if the diff should be computed on the SQL side instead of a pandas-side merge)
 #         self.df_onoff = self.sqlrunner.run_sql(
 #             self._read_sql(self.cfg.joined_sql), n_process=self.cfg.n_process
 #         )
 #         logger.info("Joined:  shape=%s", self.df_onoff.shape)
 
-        # 1.4 Pandas 侧 outer merge（线上列加 _online 后缀）
+        # 1.4 Pandas-side outer merge (online columns get the _online suffix)
         online_extra = [c for c in self.df_online.columns if c != "flow_id"]
         self.df_compare = self.df_offline.merge(
             self.df_online[["flow_id"] + online_extra],
@@ -368,7 +377,7 @@ class UATConsistencyChecker:
             indicator=True,
         )
 
-        # object 列转 numeric（防止后续比较 int/str TypeError）
+        # Convert object columns to numeric (prevents an int/str TypeError in later comparisons)
         converted = 0
         for col in self.df_compare.columns:
             if col in ("flow_id", "_merge"):
@@ -382,31 +391,34 @@ class UATConsistencyChecker:
         logger.info("df_compare: shape=%s | columns=%d | numeric_converted=%d",
                     self.df_compare.shape, len(self.df_compare.columns), converted)
 
-        # 1.5 一致性对比基准：仅保留 flow_id 线上线下均存在的行（_merge=="both"）。
-        #     only_offline / only_online 属覆盖度问题（见 §2），其在另一侧的列天然全 NaN，
-        #     若纳入会被单侧为空判定误判为海量 mismatch，污染 §6 特征排序。故一致性对比统一用 df_both。
+        # 1.5 Base of the consistency comparison: keep only the rows whose flow_id exists both online
+        #     and offline (_merge=="both"). only_offline / only_online are coverage issues (see §2);
+        #     their columns on the other side are naturally all NaN, so including them would make the
+        #     one-side-null rule count a huge number of false mismatches and pollute the §6 feature
+        #     ranking. The consistency comparison therefore uses df_both throughout.
         self.df_both = self.df_compare[self.df_compare["_merge"] == "both"].copy()
-        logger.info("df_both (一致性对比基准, both only): shape=%s", self.df_both.shape)
+        logger.info("df_both (consistency comparison base, both only): shape=%s", self.df_both.shape)
 
-        # 1.6 解析 info_list：仅保留实际存在于数据中的字段（排除 flow_id），随明细报告一并输出
+        # 1.6 Resolve info_list: keep only fields that actually exist in the data (excluding
+        #     flow_id) and write them with the detail reports
         self._info_cols = [c for c in self.cfg.info_list
                            if c != "flow_id" and c in self.df_both.columns]
         _missing = [c for c in self.cfg.info_list
                     if c != "flow_id" and c not in self.df_both.columns]
         if _missing:
-            logger.warning("info_list 中以下字段在数据中不存在，已忽略: %s", _missing)
+            logger.warning("info_list: the following fields do not exist in the data and were ignored: %s", _missing)
         if self._info_cols:
-            logger.info("info_list 字段将随明细报告输出: %s", self._info_cols)
+            logger.info("info_list fields will be written with the detail reports: %s", self._info_cols)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §2  Flow ID 覆盖度检查
+    # §2  Flow ID coverage check
     # ─────────────────────────────────────────────────────────────────────────
 
     def check_coverage(self) -> dict:
-        """检查 flow_id 覆盖与重复情况，返回覆盖度统计字典。"""
+        """Check flow_id coverage and duplicates, and return a dict of coverage statistics."""
         self._assert_loaded()
         logger.info("=" * 60)
-        logger.info("§2  Flow ID 覆盖度检查")
+        logger.info("§2  Flow ID coverage check")
         logger.info("=" * 60)
 
         self.offline_fids = set(self.df_offline["flow_id"].unique())
@@ -438,14 +450,14 @@ class UATConsistencyChecker:
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §3  主模型分一致性检查
+    # §3  Main model score consistency check
     # ─────────────────────────────────────────────────────────────────────────
 
     def check_main_score(self) -> dict:
-        """比较线上/线下主模型分，返回差异统计字典。"""
+        """Compare the online and offline main model scores and return a dict of difference statistics."""
         self._assert_loaded()
         logger.info("=" * 60)
-        logger.info("§3  主模型分一致性检查 — %s", self.cfg.main_model_score_col)
+        logger.info("§3  Main model score consistency check — %s", self.cfg.main_model_score_col)
         logger.info("=" * 60)
 
         off_col = self.cfg.main_model_score_col
@@ -493,7 +505,7 @@ class UATConsistencyChecker:
             ].copy()
             mdf["diff"] = diff[mm_mask]
             self.main_score_mismatch_df = mdf
-            logger.warning("⚠  %d flow_ids 主模型分不一致 (|diff| > %.0e 或单侧为空，其中单侧为空 %d)",
+            logger.warning("⚠  %d flow_ids with main score mismatch (|diff| > %.0e or one side null, %d one side null)",
                            n_mismatch, self.cfg.tol_score, n_one_null)
         else:
             logger.info("✅ All main scores consistent (|diff| <= %.0e)", self.cfg.tol_score)
@@ -501,29 +513,29 @@ class UATConsistencyChecker:
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §5  子模型分专项验证（条件执行）
+    # §5  Dedicated submodel score check (conditional)
     # ─────────────────────────────────────────────────────────────────────────
 
     def check_submodel_features(self) -> List[dict]:
-        """子模型分专项一致性检查。
+        """Run the dedicated submodel score consistency check.
 
-        当 ``config.include_submodel_scores=True`` 时直接返回空列表（跳过）；
-        否则逐一比较 ``config.submodel_pairs`` 中的每对列。
+        When ``config.include_submodel_scores=True``, return an empty list directly (skipped);
+        otherwise compare every column pair in ``config.submodel_pairs`` one by one.
 
         Returns
         -------
         list of dict
-            每个子模型的统计：submodel, n_compared, n_mismatch, n_mismatch_gt_1e6, max_abs_diff。
+            Statistics per submodel: submodel, n_compared, n_mismatch, n_mismatch_gt_1e6, max_abs_diff.
         """
         self._assert_loaded()
 
         if self.cfg.include_submodel_scores:
-            logger.info("§5  跳过：include_submodel_scores=True，子模型分由 §6 特征自动检测覆盖。")
+            logger.info("§5  Skipped: include_submodel_scores=True, submodel scores are covered by the §6 feature check.")
             self.submodel_summary = []
             return []
 
         logger.info("=" * 60)
-        logger.info("§5  子模型分专项验证")
+        logger.info("§5  Dedicated submodel score check")
         logger.info("=" * 60)
 
         self.submodel_summary = []
@@ -552,28 +564,31 @@ class UATConsistencyChecker:
         return self.submodel_summary
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §6  全量特征一致性检查
+    # §6  Full feature consistency check
     # ─────────────────────────────────────────────────────────────────────────
 
     def check_all_features(self) -> pd.DataFrame:
-        """自动发现所有 col / col_online 列对并逐对比较。
+        """Automatically discover all col / col_online column pairs and compare them pair by pair.
 
-        不一致判定：两侧均有值且 |diff| > tol_feat，或恰好单侧为空（XOR）。
-        两侧皆空的行不参与比较（既不计 n_compared 也不计 n_mismatch）。
+        Mismatch rule: both sides have values and |diff| > tol_feat, or exactly one side is null (XOR).
+        Rows where both sides are null are excluded from the comparison (counted in neither
+        n_compared nor n_mismatch).
 
         Returns
         -------
         pd.DataFrame
             feature, n_compared, n_one_side_null, n_mismatch, pct_mismatch, mean_diff, max_abs_diff
-            （pct_mismatch 分母为可比较行数 = n_compared + n_one_side_null）
+            (the denominator of pct_mismatch is the number of comparable rows,
+            n_compared + n_one_side_null)
         """
         self._assert_loaded()
         logger.info("=" * 60)
-        logger.info("§6  全量特征一致性检查 (tol_feat=%.0e)", self.cfg.tol_feat)
+        logger.info("§6  Full feature consistency check (tol_feat=%.0e)", self.cfg.tol_feat)
         logger.info("=" * 60)
 
         all_cols = set(self.df_compare.columns)
-        # info_list 字段（标识）与 time_featlist 字段（§7 用时间语义单独比较）均不作为数值特征
+        # info_list fields (identifiers) and time_featlist fields (compared separately as times in §7)
+        # are not treated as numeric features
         excl = set(self.cfg.info_list)
         excl |= set(self.cfg.time_featlist)
         excl |= {c + "_online" for c in self.cfg.time_featlist}
@@ -583,7 +598,7 @@ class UATConsistencyChecker:
             if col.endswith("_online") and col[:-7] in all_cols
             and col[:-7] not in excl and col not in excl
         }
-        logger.info("Found %d online/offline column pairs (已排除 info_list / time_featlist 字段).",
+        logger.info("Found %d online/offline column pairs (info_list / time_featlist fields excluded).",
                     len(self.feature_pairs))
 
         records = []
@@ -602,11 +617,11 @@ class UATConsistencyChecker:
             diff     = on_num - off_num
             one_null = on_num.isna() ^ off_num.isna()
 
-            n_valid      = int(diff.notna().sum())                       # 两侧均有值
-            n_one_null   = int(one_null.sum())                          # 单侧为空 → 计为不一致
-            n_value_mm   = int((diff.abs() > self.cfg.tol_feat).sum())  # 两侧有值且超容差
+            n_valid      = int(diff.notna().sum())                       # both sides have values
+            n_one_null   = int(one_null.sum())                          # one side null → counted as mismatch
+            n_value_mm   = int((diff.abs() > self.cfg.tol_feat).sum())  # both sides present, beyond tolerance
             n_mismatch   = n_value_mm + n_one_null
-            n_population = n_valid + n_one_null                         # 可比较行数（排除两侧皆空）
+            n_population = n_valid + n_one_null                         # comparable rows (both-null excluded)
             records.append({
                 "feature":         off_col,
                 "n_compared":      n_valid,
@@ -626,41 +641,43 @@ class UATConsistencyChecker:
         return self.diff_summary
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §7  时间字段一致性检查（跨名字段对，按秒级时间差容差）
+    # §7  Time field consistency check (field pairs under different names, tolerance in seconds)
     # ─────────────────────────────────────────────────────────────────────────
 
     def check_time_fields(self) -> pd.DataFrame:
-        """对 ``config.time_featlist`` 中的时间字段，按秒级时间差容差比较。
+        """Compare the time fields in ``config.time_featlist`` using a tolerance in seconds.
 
-        与 §6 不同：时间字段是字符串/时间戳，需用 ``pd.to_datetime`` 解析后比较时间差，
-        而非数值容差。字段结构与普通入模特征一致：离线列 ``col``、线上列 ``col_online``。
-        未配置 ``time_featlist`` 时直接跳过。
+        Unlike §6, time fields are strings/timestamps, so they are parsed with ``pd.to_datetime`` and
+        compared by time difference rather than by numeric tolerance. The field layout is the same as
+        for ordinary model features: offline column ``col``, online column ``col_online``.
+        Skipped directly when ``time_featlist`` is not configured.
 
         Returns
         -------
         pd.DataFrame
             time_field, offline_col, online_col, n_compared, n_one_side_null,
             n_mismatch, pct_mismatch, mean_diff_sec, max_abs_diff_sec
-            （不一致 = ``|时间差| > tol_time_seconds`` 或单侧无法解析；两侧皆空视为一致）
+            (mismatch = ``|time difference| > tol_time_seconds`` or one side cannot be parsed;
+            both sides null counts as consistent)
         """
         self._assert_loaded()
 
         if not self.cfg.time_featlist:
-            logger.info("§7  跳过：未配置 time_featlist。")
+            logger.info("§7  Skipped: time_featlist is not configured.")
             self.time_summary = pd.DataFrame()
             self.time_fields_resolved = {}
             return self.time_summary
 
         logger.info("=" * 60)
-        logger.info("§7  时间字段一致性检查 (tol=%.0fs)", self.cfg.tol_time_seconds)
+        logger.info("§7  Time field consistency check (tol=%.0fs)", self.cfg.tol_time_seconds)
         logger.info("=" * 60)
 
         records = []
         self.time_fields_resolved = {}
         for off_col in self.cfg.time_featlist:
-            on_col = off_col + "_online"      # 线上线下同名，线上列加 _online 后缀（同普通特征）
+            on_col = off_col + "_online"      # online column = offline name + _online (as for ordinary features)
             if off_col not in self.df_both.columns or on_col not in self.df_both.columns:
-                logger.warning("时间字段缺失，跳过: %s / %s", off_col, on_col)
+                logger.warning("Time field missing, skipped: %s / %s", off_col, on_col)
                 continue
             self.time_fields_resolved[off_col] = on_col
 
@@ -669,9 +686,9 @@ class UATConsistencyChecker:
             diff_s   = (a_dt - b_dt).dt.total_seconds()
             one_null = a_dt.isna() ^ b_dt.isna()
 
-            n_valid      = int(diff_s.notna().sum())                              # 两侧均可解析
-            n_one_null   = int(one_null.sum())                                   # 单侧无法解析 → 不一致
-            n_value_mm   = int((diff_s.abs() > self.cfg.tol_time_seconds).sum()) # 两侧可解析且超容差
+            n_valid      = int(diff_s.notna().sum())                              # both sides parseable
+            n_one_null   = int(one_null.sum())                                   # one side unparseable → mismatch
+            n_value_mm   = int((diff_s.abs() > self.cfg.tol_time_seconds).sum()) # both sides parseable, beyond tolerance
             n_mismatch   = n_value_mm + n_one_null
             n_population = n_valid + n_one_null
             records.append({
@@ -686,25 +703,25 @@ class UATConsistencyChecker:
                 "max_abs_diff_sec": float(diff_s.abs().max()) if n_valid > 0 else float("nan"),
             })
             status = "✅" if n_mismatch == 0 else "⚠"
-            logger.info("%s  %s ↔ %s: n_compared=%d | n_mismatch=%d (单侧空 %d) | max|Δ|=%.1fs",
+            logger.info("%s  %s ↔ %s: n_compared=%d | n_mismatch=%d (one side null %d) | max|Δ|=%.1fs",
                         status, off_col, on_col, n_valid, n_mismatch, n_one_null,
                         records[-1]["max_abs_diff_sec"] if n_valid > 0 else 0.0)
 
         self.time_summary = pd.DataFrame(records)
         if len(self.time_summary):
             n_ok = int((self.time_summary["n_mismatch"] == 0).sum())
-            logger.info("✅ 时间字段一致: %d / %d", n_ok, len(self.time_summary))
+            logger.info("✅ Time fields consistent: %d / %d", n_ok, len(self.time_summary))
         return self.time_summary
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §8  Per-Flow_ID 汇总报告
+    # §8  Per-Flow_ID summary report
     # ─────────────────────────────────────────────────────────────────────────
 
     def build_per_flow_report(self) -> pd.DataFrame:
-        """为每个 common flow_id 生成主模型分差异 + 特征不一致计数的汇总行。"""
+        """Build one summary row per common flow_id: main score difference and feature mismatch count."""
         self._assert_loaded()
         logger.info("=" * 60)
-        logger.info("§8  Per-Flow_ID 汇总报告")
+        logger.info("§8  Per-Flow_ID summary report")
         logger.info("=" * 60)
 
         df_idx = self.df_compare.drop_duplicates("flow_id", keep="first").set_index("flow_id")
@@ -796,25 +813,25 @@ class UATConsistencyChecker:
         return self.per_flow_df
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §9  汇总与结论
+    # §9  Summary and conclusions
     # ─────────────────────────────────────────────────────────────────────────
 
     def build_summary(self) -> pd.DataFrame:
-        """生成整体一致性 Summary DataFrame。"""
+        """Build the overall consistency Summary DataFrame."""
         logger.info("=" * 60)
-        logger.info("§9  总结与结论")
+        logger.info("§9  Summary and conclusions")
         logger.info("=" * 60)
 
         rows = []
 
-        # 1. Flow ID 覆盖
+        # 1. Flow ID coverage
         rows.append((
             "Flow ID Coverage",
             f"Offline: {len(self.offline_fids)} | Online: {len(self.online_fids)} | Common: {len(self.common_fids)}",
             "✅",
         ))
 
-        # 2. 主模型分（含单侧为空）
+        # 2. Main model score (including one side null)
         if self.offline_score_col and self.online_score_col:
             n_mm = int(mismatch_mask(
                 self.df_both[self.online_score_col],
@@ -823,11 +840,11 @@ class UATConsistencyChecker:
             ).sum())
             rows.append((
                 "Main Model Score",
-                f"{n_mm} flow_ids mismatch (|diff| > {self.cfg.tol_score:.0e} 或单侧为空)",
+                f"{n_mm} flow_ids mismatch (|diff| > {self.cfg.tol_score:.0e} or one side null)",
                 "✅" if n_mm == 0 else "⚠️",
             ))
 
-        # 3. 子模型分
+        # 3. Submodel scores
         if not self.cfg.include_submodel_scores:
             n_sub_ok    = sum(1 for r in self.submodel_summary if r.get("n_mismatch", 1) == 0)
             n_sub_total = len(self.submodel_summary)
@@ -839,11 +856,11 @@ class UATConsistencyChecker:
         else:
             rows.append((
                 "Submodel Scores",
-                "Skipped (include_submodel_scores=True，子模型分由 §6 覆盖)",
+                "Skipped (include_submodel_scores=True, submodel scores are covered by §6)",
                 "ℹ️",
             ))
 
-        # 4. 全量特征
+        # 4. All features
         if self.diff_summary is not None:
             n_feat_total = len(self.diff_summary)
             n_feat_ok    = int((self.diff_summary["n_mismatch"] == 0).sum())
@@ -853,7 +870,7 @@ class UATConsistencyChecker:
                 "✅" if n_feat_ok == n_feat_total else "⚠️",
             ))
 
-        # 4.5 时间字段（含单侧无法解析）
+        # 4.5 Time fields (including one side unparseable)
         if self.time_summary is not None and len(self.time_summary) > 0:
             n_time_total = len(self.time_summary)
             n_time_ok    = int((self.time_summary["n_mismatch"] == 0).sum())
@@ -863,7 +880,7 @@ class UATConsistencyChecker:
                 "✅" if n_time_ok == n_time_total else "⚠️",
             ))
 
-        # 5. 整体
+        # 5. Overall
         all_ok = all(r[2] in ("✅", "ℹ️") for r in rows)
         rows.append((
             "OVERALL",
@@ -877,38 +894,39 @@ class UATConsistencyChecker:
         return self.summary_df
 
     # ─────────────────────────────────────────────────────────────────────────
-    # §10  Excel 报告输出
+    # §10  Excel report output
     # ─────────────────────────────────────────────────────────────────────────
 
     def export_excel(self) -> str:
-        """将校验结果导出为结构化 Excel 报告。
+        """Export the check results as a structured Excel report.
 
         Returns
         -------
         str
-            实际写入的 Excel 文件路径。
+            Path of the Excel file actually written.
 
         Sheets
         ------
-        1. Executive Summary      — 整体指标 + 子模型分汇总 + Top 20 不一致特征
-        2. Main Score Mismatch    — 主模型分不一致明细
-        3. Submodel Score Detail  — 子模型分不一致明细（或跳过提示）
-        4. Feature Mismatch Summary — 全量特征不一致汇总
-        5-N. Feat_<name>          — Top 10 不一致特征的逐 flow_id 明细
-        N+1. Per Flow-ID Report   — 按 flow_id 汇总的问题报告
+        1. Executive Summary      — overall metrics + submodel score summary + Top 20 mismatched features
+        2. Main Score Mismatch    — detail of the main model score mismatches
+        3. Submodel Score Detail  — detail of the submodel score mismatches (or a skip notice)
+        4. Feature Mismatch Summary — summary of mismatches across all features
+        5-N. Feat_<name>          — per-flow_id detail of the top 10 mismatched features
+        N+1. Per Flow-ID Report   — issue report aggregated by flow_id
         """
         ExcelMaster = _import_excel_master()
 
         logger.info("=" * 60)
-        logger.info("§10  Excel 报告输出 → %s", self.cfg.excel_output_path)
+        logger.info("§10  Excel report output → %s", self.cfg.excel_output_path)
         logger.info("=" * 60)
 
         em        = ExcelMaster(self.cfg.excel_output_path, verbose=False)
-        # 注意：字体覆盖改到所有写入完成后、close 之前执行（见函数末尾 _apply_excel_font 调用），
-        # 否则 pandas to_excel 后建的 header / datetime 列 Format 漏覆盖。
+        # Note: the font override runs after all writes are complete and before close (see the
+        # _apply_excel_font call at the end of this function); otherwise the header / datetime
+        # column Formats created later by pandas to_excel would be missed.
         TOL_SCORE = self.cfg.tol_score
         TOL_FEAT  = self.cfg.tol_feat
-        df_both   = self.df_both   # 一致性对比基准（load_data 中已派生，与 §3/§5/§6/§9 同口径）
+        df_both   = self.df_both   # consistency comparison base (derived in load_data; same basis as §3/§5/§6/§9)
         info_cols = [c for c in self._info_cols if c in df_both.columns]
         used_sheet_names: set[str] = set()
 
@@ -919,7 +937,7 @@ class UATConsistencyChecker:
             return em.add_worksheet(_reserve_sheet_name(raw_name), **kwargs)
 
         def _sel(*value_cols):
-            """逐 flow_id 明细表取列：flow_id + info_list 字段 + 业务列（去重保序）。"""
+            """Columns of a per-flow_id detail table: flow_id + info_list fields + value columns (deduplicated)."""
             return list(dict.fromkeys(["flow_id"] + info_cols + list(value_cols)))
 
         # ── Sheet 1: Executive Summary ─────────────────────────────────────
@@ -1017,7 +1035,7 @@ class UATConsistencyChecker:
                 det = det.sort_values("abs_diff", ascending=False, na_position="last")
                 det.insert(0, "rank", range(1, len(det) + 1))
                 em.write_dataframe(ws1, det,
-                                   title=f"{len(det)} flow_ids 不一致 (|diff| > {TOL_SCORE} 或单侧为空)",
+                                   title=f"{len(det)} flow_ids mismatch (|diff| > {TOL_SCORE} or one side null)",
                                    index=False)
                 em.write_dataframe(ws1, main_diff_all[mask].describe().to_frame().T,
                                    title="Diff Distribution (mismatched subset)", index=False)
@@ -1035,7 +1053,7 @@ class UATConsistencyChecker:
         if self.cfg.include_submodel_scores:
             em.write_text_content(
                 ws2,
-                input_text="ℹ️  Skipped: include_submodel_scores=True，子模型分已由特征检测覆盖。\n",
+                input_text="ℹ️  Skipped: include_submodel_scores=True; submodel scores are covered by the feature check.\n",
             )
         else:
             for off_col, on_col in self.cfg.submodel_pairs.items():
@@ -1136,7 +1154,7 @@ class UATConsistencyChecker:
                 em.write_dataframe(
                     ws_t, det,
                     title=f"{off_col} ↔ {on_col} — {len(det)} mismatches "
-                          f"(|Δ| > {self.cfg.tol_time_seconds:.0f}s 或单侧无法解析)",
+                          f"(|Δ| > {self.cfg.tol_time_seconds:.0f}s or one side cannot be parsed)",
                     index=False,
                 )
             logger.info("  ✅ Time Field Consistency")
@@ -1157,7 +1175,8 @@ class UATConsistencyChecker:
                 em.write_text_content(ws_flow, input_text="✅ No flow_ids with feature mismatches.\n")
 
             if "main_score_ok" in self.per_flow_df.columns:
-                # main_score_ok=False 即不一致（含单侧为空）；两侧皆空已记为 True，自动排除
+                # main_score_ok=False means mismatch (including one side null); both-null is already
+                # recorded as True, so it is excluded automatically
                 main_issues = self.per_flow_df[~self.per_flow_df["main_score_ok"]]
                 if len(main_issues) > 0:
                     em.write_dataframe(
@@ -1177,21 +1196,22 @@ class UATConsistencyChecker:
                                index=False)
             logger.info("  ✅ Per Flow-ID Report")
 
-        # 字体统一：必须在所有写入完成后、close 之前执行，确保 pandas to_excel 动态创建的
-        # header / datetime 列等 Format 也被覆盖（详见 _apply_excel_font 说明）。
+        # Unify the fonts: this must run after all writes are complete and before close, so that the
+        # Formats created dynamically by pandas to_excel (header / datetime columns, etc.) are also
+        # covered (see the _apply_excel_font docstring).
         _apply_excel_font(em, self.cfg.excel_font)
         em.close_workbook()
         logger.info("✅ Excel saved → %s", self.cfg.excel_output_path)
         return self.cfg.excel_output_path
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 主编排入口
+    # Main orchestration entry point
     # ─────────────────────────────────────────────────────────────────────────
 
     def run(self) -> pd.DataFrame:
-        """按顺序执行完整 UAT 校验流程，返回 summary DataFrame。
+        """Run the complete UAT check workflow in order and return the summary DataFrame.
 
-        步骤顺序:
+        Step order:
             load_data → check_coverage → check_main_score
             → check_submodel_features → check_all_features → check_time_fields
             → build_per_flow_report → build_summary → export_excel
@@ -1208,7 +1228,7 @@ class UATConsistencyChecker:
         return self.summary_df
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 内部工具
+    # Internal helpers
     # ─────────────────────────────────────────────────────────────────────────
 
     def _read_sql(self, filename: str) -> str:

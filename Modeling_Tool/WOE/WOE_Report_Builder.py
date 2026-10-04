@@ -28,23 +28,23 @@ def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=N
     varlist = valid_varlist
     image_size = (40, 9)
 
-    # 为解释行预留空间，起始行上移一行
+    # Reserve space for the explanation row: the starting row moves up by one
     em.reset_curr_loc(loc=(2, 1))
 
     info_loc_list = {"train": [], f"train_{grp_name}": []}
     image_loc_list = {"train": [], f"train_{grp_name}": []}
 
-    explanation_format = 'TEXT_NO_FORMAT'  # 可自行修改为其他预定义格式
+    explanation_format = 'TEXT_NO_FORMAT'  # can be changed to another predefined format
 
     for var in varlist:
         explanation = var_dict.get(var, "")
 
         cur_r, cur_c = em.get_curr_loc()
-        # 写入解释行，不移动光标
+        # Write the explanation row without moving the cursor
         em.merge_col(ws, loc=(cur_r, cur_c), ncols=image_size[1],
                      text=explanation, cformat=explanation_format, skipby=None)
 
-        # 图像从解释行的下一行开始
+        # The image starts on the row below the explanation row
         img_start_row = cur_r + 1
         img_start_col = cur_c
         em.reset_curr_loc(loc=(img_start_row, img_start_col))
@@ -52,7 +52,7 @@ def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=N
         train_fig_path = f"{train_image_dir}/{var}.png"
         train_group_fig_path = f"{train_image_dir}/{var}_{grp_name}.png"
 
-        # --- 原有写入逻辑（Column 1 / 2 / 3）保持不变 ---
+        # --- Original writing logic (Column 1 / 2 / 3), unchanged ---
         em._resize_image(imgPath=train_fig_path, resize=image_size, outPath=train_fig_path)
         train_image_loc = em.insert_image(ws, figPath=train_fig_path, retCellRange="value")
         image_loc_list["train"].append(train_image_loc)
@@ -77,16 +77,16 @@ def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt=N
                 em.set_color_scale(ws, cell_range=cell_range, colors=("#FFFFFF", "#F8696B"))
                 em.set_cell_format(ws, cell_range=cell_range, cformat="NUM%.2")
 
-        # 下一个变量块的起始行基于图像结束行 + 间隔
+        # The next variable block starts at the image end row + gap
         start_row = train_image_loc[2] + 3
         start_col = train_image_loc[1]
         em.reset_curr_loc(loc=(start_row, start_col))
 
-    # 补写变量名标签（左侧列），起始行对应第一个解释行，行高增加1
+    # Write the variable-name labels (left column); the start row matches the first explanation row, and the row height grows by 1
     em.reset_curr_loc(loc=(2, 0))
     for i, var in enumerate(varlist):
         em.gap_number = 0
-        repeat_num = image_size[0] + 3 + 1   # 图像高度 + 间隔 + 解释行
+        repeat_num = image_size[0] + 3 + 1   # image height + gap + explanation row
         var_name_df = pd.DataFrame([var] * repeat_num)
         var_df_loc = em.write_dataframe(ws, df=var_name_df, title=None, index=False, header=False, retCellRange="value")
 

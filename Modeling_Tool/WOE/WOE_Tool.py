@@ -1,6 +1,6 @@
 """
-WOE转换与单调性分析工具包
-提供WOE分箱、转换、映射及单调性检验功能
+WOE transformation and monotonicity analysis toolkit.
+Provides WOE binning, transformation, mapping, and monotonicity checking.
 """
 
 import numpy as np
@@ -57,32 +57,32 @@ def _vectorized_group_slopes(data, group_col, value_col):
     return slopes
 
 def is_monotonic(data, column, direction='auto', strict=False, handle_nan='drop'):
-    """检查Pandas Series或DataFrame列是否单调（递增或递减）。
+    """Check whether a pandas Series or DataFrame column is monotone (increasing or decreasing).
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        包含数据的数据框
+        DataFrame containing the data.
     column : str
-        要检查的列名
+        Name of the column to check.
     direction : str, optional
-        检查方向，'auto'（自动检测）、'increasing'（递增）或'decreasing'（递减），
-        默认为'auto'
+        Direction to check: 'auto' (detect automatically), 'increasing', or 'decreasing'.
+        Default is 'auto'.
     strict : bool, optional
-        是否要求严格单调（不允许相等值），默认为False
+        Whether to require strict monotonicity (equal values are not allowed). Default is False.
     handle_nan : str, optional
-        处理NaN值的方法，可选'drop'（忽略）、'forward'（向前填充）、
-        'backward'（向后填充）或'error'（报错），默认为'drop'
+        How to handle NaN values: 'drop' (ignore), 'forward' (forward fill),
+        'backward' (backward fill), or 'error' (raise an error). Default is 'drop'.
 
-    返回:
-    --------
+    Returns
+    -------
     tuple
-        (是否单调, 单调方向) 的元组。
-        是否单调为bool值，方向为1（递增）、-1（递减）或0（非单调）
+        Tuple of (is_monotone, direction).
+        is_monotone is a bool; direction is 1 (increasing), -1 (decreasing), or 0 (not monotone).
     """
     series = data[column]
 
-    # 处理NaN值
+    # Handle NaN values
     if series.isna().any():
         if handle_nan == 'drop':
             series = series.dropna()
@@ -91,30 +91,30 @@ def is_monotonic(data, column, direction='auto', strict=False, handle_nan='drop'
         elif handle_nan == 'backward':
             series = series.bfill()
         elif handle_nan == 'error':
-            raise ValueError("序列包含NaN值")
+            raise ValueError("Series contains NaN values")
         else:
-            raise ValueError("handle_nan参数必须是'drop'、'forward'、'backward'或'error'")
+            raise ValueError("handle_nan must be one of 'drop', 'forward', 'backward' or 'error'")
 
-    # 如果序列为空或只有一个元素，则认为是单调的
+    # A series that is empty or has a single element is considered monotone
     if len(series) <= 1:
         return True, 0 if len(series) == 0 else 0
 
-    # 计算差值
+    # Compute the differences
     diffs = series.diff().iloc[1:]
 
-    # 检查单调性
+    # Check monotonicity
     if direction == 'auto':
         if strict:
-            if (diffs > 0).all():  # 所有差值都为正
+            if (diffs > 0).all():  # all differences are positive
                 return True, 1
-            elif (diffs < 0).all():  # 所有差值都为负
+            elif (diffs < 0).all():  # all differences are negative
                 return True, -1
             else:
                 return False, 0
         else:
-            if (diffs >= 0).all():  # 所有差值都非负
+            if (diffs >= 0).all():  # all differences are non-negative
                 return True, 1
-            elif (diffs <= 0).all():  # 所有差值都非正
+            elif (diffs <= 0).all():  # all differences are non-positive
                 return True, -1
             else:
                 return False, 0
@@ -131,28 +131,28 @@ def is_monotonic(data, column, direction='auto', strict=False, handle_nan='drop'
             is_mono = (diffs <= 0).all()
         return is_mono, -1 if is_mono else 0
     else:
-        raise ValueError("direction参数必须是'auto'、'increasing'或'decreasing'")
+        raise ValueError("direction must be one of 'auto', 'increasing' or 'decreasing'")
 
 
 def check_monotonicity(data, var):
-    """检查WOE值的单调性。
+    """Check the monotonicity of the WOE values.
 
-    对指定变量验证其WOE值是否满足单调性要求，
-    用于评估分箱效果是否符合业务逻辑。
+    Verify whether the WOE values of the given variable satisfy the monotonicity requirement,
+    to assess whether the binning result is consistent with business logic.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        包含分箱信息和WOE值的数据框
+        DataFrame containing the bin information and the WOE values.
     var : str
-        待检查的变量名
+        Name of the variable to check.
 
-    返回:
-    --------
+    Returns
+    -------
     tuple
-        (是否单调, 单调方向) 的元组，格式同 is_monotonic 函数
+        Tuple of (is_monotone, direction), in the same format as returned by the is_monotonic function.
 
-    示例:
+    Examples
     --------
     >>> result = check_monotonicity(woe_df, 'age')
     """
@@ -166,37 +166,38 @@ def check_monotonicity(data, var):
 
 
 class WOETransformer:
-    """WOE转换器。
+    """WOE transformer.
 
-    提供WOE分箱、转换和单调性检验的完整功能，
-    支持单变量和多变量批量处理，支持训练集和验证集的WOE映射。
+    Provide the complete functionality of WOE binning, transformation, and monotonicity checking,
+    supporting single-variable and batch multi-variable processing, as well as WOE mapping of the
+    training set and the validation set.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     nbins : int, optional
-        分箱数量，默认为10
+        Number of bins. Default is 10.
     precision : int, optional
-        WOE和IV计算精度，默认为5
+        Numeric precision of the WOE and IV calculations. Default is 5.
     min_bin_prop : float, optional
-        每个分箱的最小样本比例，默认为0.05
+        Minimum proportion of samples in each bin. Default is 0.05.
     include_missing : bool, optional
-        是否将缺失值作为单独分箱，默认为False
+        Whether to treat missing values as a separate bin. Default is False.
     equal_freq : bool, optional
-        是否使用等频分箱，默认为True
+        Whether to use equal-frequency binning. Default is True.
     fillna : int/float, optional
-        缺失值填充值，默认为-999999
+        Value used to fill missing values. Default is -999999.
     chi2_config : tuple, optional
-        卡方分箱配置，(init_bins, p_value)元组，默认为None
+        Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
     tree_binning_seed : int, optional
-        决策树分箱随机种子，默认为None
+        Random seed for decision-tree binning. Default is None.
     spec_values : list, optional
-        特殊值列表，默认为空列表
+        List of special values. Default is an empty list.
     drop_bin_info : bool, optional
-        是否删除中间分箱信息列，默认为True
+        Whether to drop the intermediate bin information columns. Default is True.
     ret_woe_table : bool, optional
-        是否返回WOE映射表，默认为True
+        Whether to return the WOE mapping table. Default is True.
 
-    示例:
+    Examples
     --------
     >>> transformer = WOETransformer(nbins=10)
     >>> result = transformer.transform(df, ['var1', 'var2'], 'target')
@@ -207,40 +208,40 @@ class WOETransformer:
                  spec_values=None, drop_bin_info=True, ret_woe_table=True,
                  sv_min_bin_size=0.0, sv_small_policy="keep",
                  sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
-        """初始化WOE转换器。
+        """Initialize the WOE transformer.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         nbins : int, optional
-            分箱数量
+            Number of bins.
         precision : int, optional
-            WOE和IV计算精度
+            Numeric precision of the WOE and IV calculations.
         min_bin_prop : float, optional
-            每个分箱的最小样本比例
+            Minimum proportion of samples in each bin.
         include_missing : bool, optional
-            是否将缺失值作为单独分箱
+            Whether to treat missing values as a separate bin.
         equal_freq : bool, optional
-            是否使用等频分箱
+            Whether to use equal-frequency binning.
         fillna : int/float, optional
-            缺失值填充值
+            Value used to fill missing values.
         chi2_config : tuple, optional
-            卡方分箱配置
+            Chi-square binning configuration.
         tree_binning_seed : int, optional
-            决策树分箱随机种子
+            Random seed for decision-tree binning.
         spec_values : list, optional
-            特殊值列表
+            List of special values.
         drop_bin_info : bool, optional
-            是否删除中间分箱信息列
+            Whether to drop the intermediate bin information columns.
         ret_woe_table : bool, optional
-            是否返回WOE映射表
+            Whether to return the WOE mapping table.
         sv_min_bin_size : float, optional
-            低占比特殊值箱兜底阈值（占全量样本比例），0.0 = 关闭（保旧行为）
+            Fallback threshold for low-frequency special-value (SV) bins, as a share of all samples; 0.0 = disabled (legacy behaviour).
         sv_small_policy : str, optional
-            'keep'（默认）/'neutral'/'merge_missing'，低占比 SV 箱的处理方式
+            'keep' (default) / 'neutral' / 'merge_missing': how low-frequency SV bins are handled.
         sv_woe_smoothing : str, optional
-            'none'（默认）/'laplace'，SV 箱 WOE 是否向全局坏率收缩
+            'none' (default) / 'laplace': whether the WOE of SV bins is shrunk toward the global bad rate.
         sv_smoothing_alpha : float, optional
-            拉普拉斯平滑强度 α（伪计数），0.0 = 数值等价旧 WOE
+            Laplace smoothing strength alpha (pseudo-counts); 0.0 = numerically equivalent to the legacy WOE.
         """
         if sv_small_policy not in {"keep", "neutral", "merge_missing"}:
             raise ValueError(
@@ -281,7 +282,7 @@ class WOETransformer:
     _SV_EPS = 1e-6
 
     def _sv_row_mask(self, woe_table):
-        """识别特殊值箱行：MIN == MAX 且该值属于 spec_values（双条件防误识别）。"""
+        """Identify special-value bin rows: MIN == MAX and the value is in spec_values (both conditions guard against false matches)."""
         spec_values = list(self.spec_values or [])
         if not spec_values:
             return pd.Series(False, index=woe_table.index)
@@ -292,10 +293,10 @@ class WOETransformer:
         )
 
     def _missing_row_label(self, woe_table, sv_mask):
-        """识别缺失值箱行标签；无缺失箱返回 None。
+        """Identify the label of the missing-value bin row; return None if there is no missing bin.
 
-        fit 路径下 MIN/MAX 聚合的是**原始**变量列，缺失箱因此整箱为 NaN；
-        若调用方在分箱前已 fillna（哨兵进入数据），则 MIN == MAX == fillna。
+        On the fit path MIN/MAX aggregate the **raw** variable column, so the missing bin is NaN throughout;
+        if the caller has already applied fillna before binning (the sentinel enters the data), then MIN == MAX == fillna.
         """
         nan_bin = woe_table["MIN"].isna() & woe_table["MAX"].isna() & (woe_table["N"] > 0)
         sentinel_bin = (
@@ -308,16 +309,18 @@ class WOETransformer:
         return candidates[0] if len(candidates) else None
 
     def _govern_sv_bins(self, woe_table, var):
-        """对 spec_values 对应的箱行应用 sv_small_policy / sv_woe_smoothing。
+        """Apply sv_small_policy / sv_woe_smoothing to the bin rows that correspond to spec_values.
 
-        口径与 ``MonotoneWOEBinner._compute_sv_table`` 严格一致：方式1 兜底优先，
-        方式2 平滑只作用于占比达标（或 policy='keep'）的 SV 箱。
+        The semantics are strictly identical to ``MonotoneWOEBinner._compute_sv_table``: the
+        low-share fallback (option 1) takes priority, and smoothing (option 2) only applies to SV
+        bins whose share meets the threshold (or when policy='keep').
 
-        缺失箱同样是一个受治理的 SV 箱（MonotoneWOEBinner 的 sv_table 里
-        ``[Missing]`` 与其它 SV 行同权），因此并入治理行集合；它只是**永远不作为
-        merge 来源**（target-only，不能并入自己）。若仅按 ``_sv_row_mask``
-        取行，缺失箱（MIN/MAX 聚合原始列 ⇒ NaN/NaN）会漏出平滑循环，导致同参数
-        下两引擎的 [Missing] WOE 不一致。
+        The missing bin is likewise a governed SV bin (in the sv_table of MonotoneWOEBinner the
+        ``[Missing]`` row carries the same weight as the other SV rows), so it is added to the set of
+        governed rows; it is merely **never a merge source** (target-only: it cannot be merged into
+        itself). If rows were selected by ``_sv_row_mask`` alone, the missing bin (MIN/MAX aggregate the
+        raw column => NaN/NaN) would slip out of the smoothing loop, and the [Missing] WOE of the two
+        engines would differ under the same parameters.
         """
         eps = self._SV_EPS
         total_bad  = float(woe_table["N_BAD"].sum())
@@ -339,7 +342,7 @@ class WOETransformer:
                 and self.sv_min_bin_size > 0.0
                 and n_total > 0
                 and float(woe_table.loc[idx, "N"]) / n_total < self.sv_min_bin_size
-                # 缺失箱是 merge 的目标，永远不做来源。
+                # The missing bin is the merge target and is never a merge source.
                 and not (self.sv_small_policy == "merge_missing"
                          and idx == missing_label)
             )
@@ -349,8 +352,8 @@ class WOETransformer:
             elif is_small:
                 pending_merge.append(idx)
             elif self.sv_woe_smoothing == "laplace" and self.sv_smoothing_alpha > 0.0:
-                # 与 MonotoneWOEBinner._compute_woe_single_bin 同式：先把箱内
-                # bad_rate 向基准率 p 收缩，再换算回等效 bad/good 计数。
+                # Same formula as MonotoneWOEBinner._compute_woe_single_bin: first shrink the in-bin
+                # bad_rate toward the base rate p, then convert back to equivalent bad/good counts.
                 a = self.sv_smoothing_alpha
                 n_bad  = float(woe_table.loc[idx, "N_BAD"])
                 n_good = float(woe_table.loc[idx, "N_GOOD"])
@@ -371,14 +374,14 @@ class WOETransformer:
 
     def _merge_sv_into_missing_master(self, woe_table, pending_merge, missing_label,
                                       total_bad, total_good, var):
-        """把低占比 SV 行的 bad/good 并入缺失箱行并重算 WOE。
+        """Merge the bad/good counts of low-frequency SV rows into the missing-bin row and recompute the WOE.
 
-        与 ``MonotoneWOEBinner._merge_small_into_missing`` 一一对应：被合并行保留
-        自己的行，但存表 WOE 改写为缺失箱重算后的 WOE、IV 置 0，因此 transform
-        侧（``mapping_woe`` / ``convert_single_var_woe``）无需任何改动。
-        无缺失箱时降级为 neutral 并告警。
+        Corresponds one-to-one to ``MonotoneWOEBinner._merge_small_into_missing``: a merged row keeps
+        its own row, but its stored WOE is rewritten to the WOE recomputed for the missing bin and its IV
+        is set to 0, so the transform side (``mapping_woe`` / ``convert_single_var_woe``) needs no change.
+        When there is no missing bin, fall back to neutral and emit a warning.
 
-        N/N_BAD/N_GOOD 是**转移**而非复制（来源行清零），保证 N 列合计不变。
+        N/N_BAD/N_GOOD are **transferred**, not copied (the source rows are zeroed), so the total of the N column is unchanged.
         """
         eps = self._SV_EPS
         if missing_label is None:
@@ -424,26 +427,26 @@ class WOETransformer:
         woe_table.loc[pending_merge, "GOOD_PCT_PER_BIN"] = 0.0
         woe_table.loc[pending_merge, "WOE"] = woe
         woe_table.loc[pending_merge, "IV"] = 0.0
-        # AVG_BAD 已被合并改写，LIFT 依赖其均值，需整表重算。
+        # AVG_BAD has been rewritten by the merge and LIFT depends on its mean, so recompute it over the whole table.
         woe_table["LIFT"] = woe_table["AVG_BAD"] / woe_table["AVG_BAD"].mean()
         return woe_table
 
     def _get_woe_table(self, binning_res, var, dep):
-        """根据分箱结果计算WOE表。
+        """Compute the WOE table from the binning result.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         binning_res : pd.DataFrame
-            分箱结果数据框
+            DataFrame containing the binning result.
         var : str
-            变量名
+            Variable name.
         dep : str
-            目标变量名
+            Name of the target variable.
 
-        返回:
-        --------
+        Returns
+        -------
         tuple
-            (woe_table, woe_mapping_dict) 元组
+            Tuple of (woe_table, woe_mapping_dict).
         """
         working = binning_res.copy()
         target = working[dep]
@@ -475,7 +478,7 @@ class WOETransformer:
 
         woe_table = woe_table.reset_index(drop=False)
 
-        # ── G19：低占比 SV 箱治理（与 MonotoneWOEBinner 口径对齐）──
+        # ── G19: low-frequency SV bin governance (aligned with MonotoneWOEBinner) ──
         if self.sv_small_policy != "keep" or self.sv_woe_smoothing != "none":
             woe_table = self._govern_sv_bins(woe_table, var)
 
@@ -485,25 +488,25 @@ class WOETransformer:
         return woe_table, woe_mapping_dict
 
     def transform_single(self, train_df, var, dep, oot_df=None, check_monotonicity_flag=False):
-        """对单个变量进行WOE转换。
+        """Apply the WOE transformation to a single variable.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         train_df : pd.DataFrame
-            训练数据集
+            Training dataset.
         var : str
-            待转换的变量名
+            Name of the variable to transform.
         dep : str
-            目标变量（因变量）名
+            Name of the target (dependent) variable.
         oot_df : pd.DataFrame, optional
-            验证/测试数据集，默认为None
+            Validation/test dataset. Default is None.
         check_monotonicity_flag : bool, optional
-            是否检查单调性，默认为False
+            Whether to check monotonicity. Default is False.
 
-        返回:
-        --------
+        Returns
+        -------
         tuple/list
-            根据参数返回训练结果、验证结果和WOE映射表
+            The training result, the validation result, and the WOE mapping table, depending on the arguments.
         """
         chi2_method = False
         if self.chi2_config:
@@ -577,28 +580,28 @@ class WOETransformer:
         return train_res
 
     def transform(self, train_df, varlist, dep, oot_df=None, check_monotonicity_flag=False):
-        """对多个变量进行WOE转换。
+        """Apply the WOE transformation to multiple variables.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         train_df : pd.DataFrame
-            训练数据集
+            Training dataset.
         varlist : list
-            待转换的变量名列表
+            List of variable names to transform.
         dep : str
-            目标变量（因变量）名
+            Name of the target (dependent) variable.
         oot_df : pd.DataFrame, optional
-            验证/测试数据集，默认为None
+            Validation/test dataset. Default is None.
         check_monotonicity_flag : bool, optional
-            是否检查单调性，默认为False
+            Whether to check monotonicity. Default is False.
 
-        返回:
-        --------
+        Returns
+        -------
         tuple/list
-            返回结果的字典和WOE映射表。
-            字典键为'TRAIN'和'OOT'（当oot_df不为None时）
+            The result dictionary and the WOE mapping table.
+            The dictionary keys are 'TRAIN' and 'OOT' (the latter when oot_df is not None).
 
-        示例:
+        Examples
         --------
         >>> transformer = WOETransformer(nbins=10)
         >>> result = transformer.transform(df, ['var1', 'var2'], 'target')
@@ -668,30 +671,30 @@ class WOETransformer:
 
 
 def convert_single_var_woe(data, var, woe_mapping_table, missing_ref=None, ret_bin_no=False):
-    """将原始变量值转换为WOE值。
+    """Convert raw variable values to WOE values.
 
-    根据预计算的WOE映射表，对指定变量进行WOE转换。
-    支持缺失值处理和分箱编号返回。
+    Apply the WOE transformation to the given variable using a precomputed WOE mapping table.
+    Supports missing-value handling and returning the bin numbers.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     var : str
-        待转换的变量名
+        Name of the variable to transform.
     woe_mapping_table : pd.DataFrame
-        WOE映射表，包含bin_no、bin_value、woe和n列
+        WOE mapping table, containing the columns bin_no, bin_value, woe, and n.
     missing_ref : any, optional
-        缺失值参考值，默认为None
+        Reference value for missing values. Default is None.
     ret_bin_no : bool, optional
-        是否返回分箱编号而非WOE值，默认为False
+        Whether to return the bin numbers instead of the WOE values. Default is False.
 
-    返回:
-    --------
+    Returns
+    -------
     pd.Series/pd.Categorical
-        转换后的WOE值或分箱编号
+        The transformed WOE values or the bin numbers.
 
-    示例:
+    Examples
     --------
     >>> woe_values = convert_single_var_woe(df, 'age', woe_table)
     """
@@ -723,27 +726,27 @@ def convert_single_var_woe(data, var, woe_mapping_table, missing_ref=None, ret_b
 
 
 class WOEMappingTransformer:
-    """基于WOE映射表的转换器。
+    """Transformer based on a WOE mapping table.
 
-    使用预计算的WOE映射表对新数据进行WOE转换，
-    支持单变量和多变量批量处理。
+    Apply the WOE transformation to new data using a precomputed WOE mapping table;
+    supports single-variable and batch multi-variable processing.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     woe_mapping_table : pd.DataFrame
-        WOE映射表
+        WOE mapping table.
     missing_ref : any, optional
-        缺失值参考值，默认为None
+        Reference value for missing values. Default is None.
     ret_bin_no : bool, optional
-        是否返回分箱编号，默认为False
+        Whether to return the bin numbers. Default is False.
     ret_category : bool, optional
-        是否返回分类类型，默认为False
+        Whether to return a categorical type. Default is False.
     rename_orig_var : bool, optional
-        是否重命名原始变量，默认为False
+        Whether to rename the original variable. Default is False.
     suffix : str, optional
-        变量名后缀，默认为''
+        Suffix appended to the variable names. Default is ''.
 
-    示例:
+    Examples
     --------
     >>> transformer = WOEMappingTransformer(woe_mapping_table)
     >>> result = transformer.transform(df, ['var1', 'var2'])
@@ -751,22 +754,22 @@ class WOEMappingTransformer:
 
     def __init__(self, woe_mapping_table, missing_ref=None, ret_bin_no=False,
                  ret_category=False, rename_orig_var=False, suffix=''):
-        """初始化WOE映射转换器。
+        """Initialize the WOE mapping transformer.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         woe_mapping_table : pd.DataFrame
-            WOE映射表
+            WOE mapping table.
         missing_ref : any, optional
-            缺失值参考值
+            Reference value for missing values.
         ret_bin_no : bool, optional
-            是否返回分箱编号
+            Whether to return the bin numbers.
         ret_category : bool, optional
-            是否返回分类类型
+            Whether to return a categorical type.
         rename_orig_var : bool, optional
-            是否重命名原始变量
+            Whether to rename the original variable.
         suffix : str, optional
-            变量名后缀
+            Suffix appended to the variable names.
         """
         self.woe_mapping_table = woe_mapping_table
         self.missing_ref = missing_ref
@@ -776,19 +779,19 @@ class WOEMappingTransformer:
         self.suffix = suffix
 
     def transform_single(self, data, var):
-        """对单个变量进行WOE转换。
+        """Apply the WOE transformation to a single variable.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         data : pd.DataFrame
-            输入的数据框
+            Input DataFrame.
         var : str
-            待转换的变量名
+            Name of the variable to transform.
 
-        返回:
-        --------
+        Returns
+        -------
         pd.DataFrame
-            转换后的数据框
+            The transformed DataFrame.
         """
         if self.rename_orig_var:
             data = data.rename(columns={var: (var + self.suffix)})
@@ -810,21 +813,21 @@ class WOEMappingTransformer:
         return data
 
     def transform(self, data, varlist):
-        """对多个变量进行WOE转换。
+        """Apply the WOE transformation to multiple variables.
 
-        参数:
-        -----------
+        Parameters
+        ----------
         data : pd.DataFrame
-            输入的数据框
+            Input DataFrame.
         varlist : list
-            待转换的变量名列表
+            List of variable names to transform.
 
-        返回:
-        --------
+        Returns
+        -------
         pd.DataFrame
-            转换后的数据框
+            The transformed DataFrame.
 
-        示例:
+        Examples
         --------
         >>> transformer = WOEMappingTransformer(woe_mapping_table)
         >>> result = transformer.transform(df, ['var1', 'var2'])
@@ -862,36 +865,36 @@ class WOEMappingTransformer:
 
 def woe_transform_cdaml(data, varlist, woe_mapping_path, missing_ref=None,
                         ret_bin_no=False, ret_category=False, rename_orig_var=False, suffix=''):
-    """使用cdaml包进行WOE转换。
+    """Apply the WOE transformation using the cdaml package.
 
-    从文件路径读取WOE映射表或直接使用映射表数据框，
-    对指定变量列表进行WOE转换。
+    Read the WOE mapping table from a file path or use a mapping-table DataFrame directly,
+    and apply the WOE transformation to the given list of variables.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     varlist : list
-        待转换的变量名列表
+        List of variable names to transform.
     woe_mapping_path : str/pd.DataFrame
-        WOE映射表文件路径或数据框
+        Path of the WOE mapping table file, or the mapping table DataFrame itself.
     missing_ref : any, optional
-        缺失值参考值，默认为None
+        Reference value for missing values. Default is None.
     ret_bin_no : bool, optional
-        是否返回分箱编号，默认为False
+        Whether to return the bin numbers. Default is False.
     ret_category : bool, optional
-        是否返回分类类型，默认为False
+        Whether to return a categorical type. Default is False.
     rename_orig_var : bool, optional
-        是否重命名原始变量，默认为False
+        Whether to rename the original variable. Default is False.
     suffix : str, optional
-        变量名后缀，默认为''
+        Suffix appended to the variable names. Default is ''.
 
-    返回:
-    --------
+    Returns
+    -------
     pd.DataFrame
-        转换后的数据框
+        The transformed DataFrame.
 
-    示例:
+    Examples
     --------
     >>> result = woe_transform_cdaml(df, ['var1', 'var2'], 'woe_mapping.csv')
     """
@@ -912,47 +915,47 @@ def woe_transform_cdaml(data, varlist, woe_mapping_path, missing_ref=None,
 def get_woe_table(data, var, dep, grp_name=None, nbins=10, precision=5,
                   min_bin_prop=0.05, include_missing=True, equal_freq=True,
                   fillna=-999999, chi2_config=None, tree_binning_seed=None, spec_values=None):
-    """获取WOE分箱表。
+    """Get the WOE bin table.
 
-    对指定变量进行分箱处理，计算各分箱的WOE值、IV值等统计量。
-    支持分组分析和单调性检验。
+    Bin the given variable and compute the statistics of each bin, such as the WOE and IV values.
+    Supports grouped analysis and monotonicity checking.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     var : str
-        待分析的变量名
+        Name of the variable to analyze.
     dep : str
-        目标变量（因变量）名
+        Name of the target (dependent) variable.
     grp_name : str, optional
-        分组变量名，默认为None
+        Name of the grouping variable. Default is None.
     nbins : int, optional
-        分箱数量，默认为10
+        Number of bins. Default is 10.
     precision : int, optional
-        计算精度，默认为5
+        Numeric precision. Default is 5.
     min_bin_prop : float, optional
-        每个分箱的最小样本比例，默认为0.05
+        Minimum proportion of samples in each bin. Default is 0.05.
     include_missing : bool, optional
-        是否将缺失值作为单独分箱，默认为True
+        Whether to treat missing values as a separate bin. Default is True.
     equal_freq : bool, optional
-        是否使用等频分箱，默认为True
+        Whether to use equal-frequency binning. Default is True.
     fillna : int/float, optional
-        缺失值填充值，默认为-999999
+        Value used to fill missing values. Default is -999999.
     chi2_config : tuple, optional
-        卡方分箱配置，(init_bins, p_value)元组，默认为None
+        Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
     tree_binning_seed : int, optional
-        决策树分箱随机种子，默认为None
+        Random seed for decision-tree binning. Default is None.
     spec_values : list, optional
-        特殊值列表，默认为None
+        List of special values. Default is None.
 
-    返回:
-    --------
+    Returns
+    -------
     tuple/pd.DataFrame
-        当grp_name不为None时返回(woe_table, grp_summary, grp_woe_pvt)元组；
-        当grp_name为None时返回(woe_table, is_monotonic, direction, slope)元组
+        A (woe_table, grp_summary, grp_woe_pvt) tuple when grp_name is not None;
+        a (woe_table, is_monotonic, direction, slope) tuple when grp_name is None.
 
-    示例:
+    Examples
     --------
     >>> woe_table, is_mono, direction, slope = get_woe_table(df, 'age', 'target')
     """
@@ -1035,28 +1038,28 @@ def get_woe_table(data, var, dep, grp_name=None, nbins=10, precision=5,
 
 
 def plot_monotonicity_check(data, column, title=None, include_missing=True):
-    """绘制序列并标注其单调性。
+    """Plot a series and annotate its monotonicity.
 
-    创建折线图可视化指定列的值分布，
-    并在图上标注单调性检验结果。
+    Create a line chart of the values of the given column
+    and annotate the result of the monotonicity check on the chart.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        包含数据的数据框
+        DataFrame containing the data.
     column : str
-        要绑制的列名
+        Name of the column to plot.
     title : str, optional
-        图表标题，默认为None（自动生成）
+        Chart title. Default is None (generated automatically).
     include_missing : bool, optional
-        是否包含缺失值处理，默认为True
+        Whether to include missing-value handling. Default is True.
 
-    返回:
-    --------
+    Returns
+    -------
     None
-        直接显示图表
+        The chart is displayed directly.
 
-    示例:
+    Examples
     --------
     >>> plot_monotonicity_check(df, 'woe_values')
     """
@@ -1064,7 +1067,7 @@ def plot_monotonicity_check(data, column, title=None, include_missing=True):
 
     series = data[column]
 
-    # 检查单调性
+    # Check monotonicity
     if include_missing:
         is_mono, direction = is_monotonic(
             data.iloc[1:, :], "AVG_BAD", strict=True, handle_nan='drop'
@@ -1072,21 +1075,21 @@ def plot_monotonicity_check(data, column, title=None, include_missing=True):
     else:
         is_mono, direction = is_monotonic(data, "AVG_BAD", strict=True, handle_nan='drop')
 
-    # 创建图表
+    # Create the chart
     plt.figure(figsize=(10, 6))
     plt.plot(series.index, series.values, 'bo-', linewidth=2, markersize=6)
 
-    # 添加标题和标签
+    # Add the title and labels
     if title is None:
         title = f"Monotonicity Check: {'Strict' if is_mono else 'Not'} Monotonic {direction if is_mono else ''}"
     plt.title(title, fontsize=14)
     plt.xlabel('Index')
     plt.ylabel('Value')
 
-    # 添加网格
+    # Add the grid
     plt.grid(True, alpha=0.3)
 
-    # 显示单调性信息
+    # Show the monotonicity information
     plt.text(
         0.02, 0.98,
         f"Strict Monotonic: {is_mono}\n Direction: {direction}",
@@ -1105,66 +1108,66 @@ def woe_transform(train_df, var, dep, nbins, oot_df=None, chi2_config=None, tree
                   ret_woe_table=True, check_monotonicity=False,
                   sv_min_bin_size=0.0, sv_small_policy="keep",
                   sv_woe_smoothing="none", sv_smoothing_alpha=0.0):
-    """将变量转换为WOE值。
+    """Convert a variable to WOE values.
 
-    对单个变量进行分箱并计算WOE值，支持训练集和验证集的转换。
-    基于WOETransformer类实现。
+    Bin a single variable and compute its WOE values, supporting the transformation of both the
+    training set and the validation set. Implemented on top of the WOETransformer class.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     train_df : pd.DataFrame
-        训练数据集
+        Training dataset.
     var : str
-        待转换的变量名
+        Name of the variable to transform.
     dep : str
-        目标变量（因变量）名
+        Name of the target (dependent) variable.
     nbins : int
-        分箱数量
+        Number of bins.
     oot_df : pd.DataFrame, optional
-        验证/测试数据集，默认为None
+        Validation/test dataset. Default is None.
     chi2_config : tuple, optional
-        卡方分箱配置，(init_bins, p_value)元组，默认为None
+        Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
     tree_binning_seed : int, optional
-        决策树分箱随机种子，默认为None
+        Random seed for decision-tree binning. Default is None.
     precision : int, optional
-        计算精度，默认为5
+        Numeric precision. Default is 5.
     min_bin_prop : float, optional
-        每个分箱的最小样本比例，默认为0.05
+        Minimum proportion of samples in each bin. Default is 0.05.
     include_missing : bool, optional
-        是否将缺失值作为单独分箱，默认为False
+        Whether to treat missing values as a separate bin. Default is False.
     equal_freq : bool, optional
-        是否使用等频分箱，默认为True
+        Whether to use equal-frequency binning. Default is True.
     ascending : bool, optional
-        是否升序排列，默认为True
+        Whether to sort in ascending order. Default is True.
     fillna : int/float, optional
-        缺失值填充值，默认为-999999
+        Value used to fill missing values. Default is -999999.
     spec_values : list, optional
-        特殊值列表，默认为None
+        List of special values. Default is None.
     drop_bin_info : bool, optional
-        是否删除中间分箱信息列，默认为True
+        Whether to drop the intermediate bin information columns. Default is True.
     ret_woe_table : bool, optional
-        是否返回WOE映射表，默认为True
+        Whether to return the WOE mapping table. Default is True.
     check_monotonicity : bool, optional
-        是否检查单调性，默认为False
+        Whether to check monotonicity. Default is False.
     sv_min_bin_size : float, optional
-        低占比特殊值箱兜底阈值（占全量样本比例），默认0.0（关闭）
+        Fallback threshold for low-frequency special-value (SV) bins, as a share of all samples. Default is 0.0 (disabled).
     sv_small_policy : str, optional
-        'keep'（默认）/'neutral'/'merge_missing'
+        'keep' (default) / 'neutral' / 'merge_missing'.
     sv_woe_smoothing : str, optional
-        'none'（默认）/'laplace'
+        'none' (default) / 'laplace'.
     sv_smoothing_alpha : float, optional
-        拉普拉斯平滑强度α，默认0.0
+        Laplace smoothing strength alpha. Default is 0.0.
 
-    返回:
-    --------
+    Returns
+    -------
     tuple/list/pd.DataFrame
-        根据参数返回不同的组合：
+        Different combinations depending on the arguments:
         - ret_woe_table=True, oot_df=None: (train_res, train_woe_table)
-        - ret_woe_table=True, oot_df不为None: (train_res, oot_res, train_woe_table)
-        - ret_woe_table=False, oot_df不为None: (train_res, oot_res)
+        - ret_woe_table=True, oot_df is not None: (train_res, oot_res, train_woe_table)
+        - ret_woe_table=False, oot_df is not None: (train_res, oot_res)
         - ret_woe_table=False, oot_df=None: train_res
 
-    示例:
+    Examples
     --------
     >>> train_res, woe_table = woe_transform(df, 'age', 'target', nbins=10)
     """
@@ -1201,51 +1204,51 @@ def woe_transformation(train_df, varlist, dep, oot_df=None, nbins=10, chi2_confi
                        tree_binning_seed=None, precision=5, min_bin_prop=0.05,
                        include_missing=False, equal_freq=True, fillna=-999999,
                        spec_values=None, drop_bin_info=True, ret_woe_table=True):
-    """对变量列表进行WOE转换。
+    """Apply the WOE transformation to a list of variables.
 
-    批量对多个变量进行WOE分箱和转换，支持训练集和验证集。
-    基于WOETransformer类实现。
+    Bin and transform multiple variables to WOE in batch, supporting the training set and the validation set.
+    Implemented on top of the WOETransformer class.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     train_df : pd.DataFrame
-        训练数据集
+        Training dataset.
     varlist : list
-        待转换的变量名列表
+        List of variable names to transform.
     dep : str
-        目标变量（因变量）名
+        Name of the target (dependent) variable.
     oot_df : pd.DataFrame, optional
-        验证/测试数据集，默认为None
+        Validation/test dataset. Default is None.
     nbins : int, optional
-        分箱数量，默认为10
+        Number of bins. Default is 10.
     chi2_config : tuple, optional
-        卡方分箱配置，(init_bins, p_value)元组，默认为None
+        Chi-square binning configuration, an (init_bins, p_value) tuple. Default is None.
     tree_binning_seed : int, optional
-        决策树分箱随机种子，默认为None
+        Random seed for decision-tree binning. Default is None.
     precision : int, optional
-        计算精度，默认为5
+        Numeric precision. Default is 5.
     min_bin_prop : float, optional
-        每个分箱的最小样本比例，默认为0.05
+        Minimum proportion of samples in each bin. Default is 0.05.
     include_missing : bool, optional
-        是否将缺失值作为单独分箱，默认为False
+        Whether to treat missing values as a separate bin. Default is False.
     equal_freq : bool, optional
-        是否使用等频分箱，默认为True
+        Whether to use equal-frequency binning. Default is True.
     fillna : int/float, optional
-        缺失值填充值，默认为-999999
+        Value used to fill missing values. Default is -999999.
     spec_values : list, optional
-        特殊值列表，默认为None
+        List of special values. Default is None.
     drop_bin_info : bool, optional
-        是否删除中间分箱信息列，默认为True
+        Whether to drop the intermediate bin information columns. Default is True.
     ret_woe_table : bool, optional
-        是否返回WOE映射表，默认为True
+        Whether to return the WOE mapping table. Default is True.
 
-    返回:
-    --------
+    Returns
+    -------
     tuple
-        (结果字典, train_woe_table) 元组。
-        结果字典包含'TRAIN'键，验证集通过'OOT'键（当oot_df不为None时）
+        Tuple of (result dictionary, train_woe_table).
+        The result dictionary contains the 'TRAIN' key, and the validation set is under the 'OOT' key (when oot_df is not None).
 
-    示例:
+    Examples
     --------
     >>> result, woe_table = woe_transformation(df, ['var1', 'var2'], 'target')
     """
@@ -1320,38 +1323,38 @@ def _mapping_woe_single_var(
     drop_bin_info=True,
     missing_ref_value=-999999,
 ):
-    """基于WOE映射表为单个变量映射WOE值。
+    """Map WOE values for a single variable based on a WOE mapping table.
 
-    使用预计算的WOE映射表对新数据进行转换，
-    验证单调性并检查映射结果。
+    Transform new data using a precomputed WOE mapping table,
+    verifying monotonicity and checking the mapping result.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     var : str
-        待映射的变量名
+        Name of the variable to map.
     woe_mapping_table : pd.DataFrame
-        WOE映射表
+        WOE mapping table.
     suffix : str, optional
-        变量名后缀，默认为'_woe'
+        Suffix appended to the variable names. Default is '_woe'.
     drop_bin_info : bool, optional
-        是否删除中间分箱信息列，默认为True
+        Whether to drop the intermediate bin information columns. Default is True.
     missing_ref_value : scalar, optional
-        转换缺失值时使用的训练期分箱哨兵，默认 -999999。若训练使用了
-        自定义哨兵，转换时必须传入同一个值。
+        Training-time bin sentinel used when transforming missing values. Default is -999999.
+        If a custom sentinel was used in training, the same value must be passed at transform time.
 
-    返回:
-    --------
+    Returns
+    -------
     pd.DataFrame
-        映射后的数据框
+        The DataFrame after mapping.
 
-    注意:
-    --------
-    当映射失败时会输出警告信息
+    Notes
+    -----
+    A warning is emitted when the mapping fails.
     """
 #     from Modeling_Tool.Modeling_Tool.Model_Eval_Tool import run_binning
-#     from 代码优化.Model_Eval_Tool import get_bin_range_list
+#     from code_optimization.Model_Eval_Tool import get_bin_range_list
 
     mapped = _map_woe_arrays(
         data,
@@ -1376,32 +1379,32 @@ def mapping_woe(
     drop_bin_info=True,
     missing_ref_value=-999999,
 ):
-    """基于WOE映射表批量映射WOE值。
+    """Map WOE values in batch based on a WOE mapping table.
 
-    使用预计算的WOE映射表对多个变量进行WOE转换。
+    Apply the WOE transformation to multiple variables using a precomputed WOE mapping table.
 
-    参数:
-    -----------
+    Parameters
+    ----------
     data : pd.DataFrame
-        输入的数据框
+        Input DataFrame.
     varlist : list
-        待映射的变量名列表
+        List of variable names to map.
     woe_mapping_table : pd.DataFrame
-        WOE映射表
+        WOE mapping table.
     suffix : str, optional
-        变量名后缀，默认为'_woe'
+        Suffix appended to the variable names. Default is '_woe'.
     drop_bin_info : bool, optional
-        是否删除中间分箱信息列，默认为True
+        Whether to drop the intermediate bin information columns. Default is True.
     missing_ref_value : scalar, optional
-        转换缺失值时使用的训练期分箱哨兵，默认 -999999。若训练使用了
-        自定义哨兵，转换时必须传入同一个值。
+        Training-time bin sentinel used when transforming missing values. Default is -999999.
+        If a custom sentinel was used in training, the same value must be passed at transform time.
 
-    返回:
-    --------
+    Returns
+    -------
     pd.DataFrame
-        映射后的数据框
+        The DataFrame after mapping.
 
-    示例:
+    Examples
     --------
     >>> result = mapping_woe(df, ['var1', 'var2'], woe_table)
     """

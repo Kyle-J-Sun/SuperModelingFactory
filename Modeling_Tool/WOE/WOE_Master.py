@@ -11,7 +11,7 @@ from Modeling_Tool.Core.utils import _calc_woe_iv_values
 from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 def get_overall_woe_table(woe_master, data, varlist=None):
-    """生成整体样本的WOE统计表，结构对齐训练集映射表。"""
+    """Build the WOE statistics table for the overall sample, with a structure aligned to the training-set mapping table."""
     if varlist is None:
         varlist = woe_master.varlist
 
@@ -19,11 +19,11 @@ def get_overall_woe_table(woe_master, data, varlist=None):
     for var in varlist:
         var_map = woe_master.woe_dict[var]
 
-        # 提取分箱边界并保留 inf
+        # Extract the bin edges and keep inf
         edges = get_bin_range_list(var_map, col="BIN_RANGE")
         custom_edges = sorted(set(list(edges) + [-np.inf, np.inf]))
 
-        # 从训练集 BIN_RANGE 推断闭合方式
+        # Infer the interval closure from the training-set BIN_RANGE
         first_bin = var_map["BIN_RANGE"].dropna().iloc[0]
         include_lowest = first_bin[0] == '['
         right = first_bin[-1] == ']'
@@ -33,7 +33,7 @@ def get_overall_woe_table(woe_master, data, varlist=None):
         data_proc[var] = data_proc[var].fillna(fill_val)
         data_proc["_smf_good_n"] = data_proc[woe_master.dep].eq(0).astype(np.int64)
 
-        # 使用训练集边界分箱
+        # Bin with the training-set edges
         binned, _ = run_binning(
             data=data_proc,
             column=var,
@@ -58,7 +58,7 @@ def get_overall_woe_table(woe_master, data, varlist=None):
             N_GOOD=("_smf_good_n", "sum")
         ).reset_index()
 
-        # 计算 WOE / IV / LIFT
+        # Compute WOE / IV / LIFT
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / stats["N_BAD"].sum()
         stats["GOOD_PCT_PER_BIN"] = stats["N_GOOD"] / stats["N_GOOD"].sum()
         stats["WOE"], stats["IV"] = _calc_woe_iv_values(
@@ -79,7 +79,7 @@ def get_overall_woe_table(woe_master, data, varlist=None):
 
 
 def get_group_woe_table(woe_master, data, group, varlist=None):
-    """生成分组样本的WOE汇总、透视和详细表。"""
+    """Build the WOE summary, pivot, and detail tables for grouped samples."""
     if varlist is None:
         varlist = woe_master.varlist
 
@@ -115,7 +115,7 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         )
 
         dep = woe_master.dep
-        # 按分箱与分组双重聚合
+        # Aggregate by both bin and group
         grp = binned.groupby([group, "_BIN_NUM", "_BIN_RANGE"], dropna=False)
         stats = grp.agg(
             MIN=(var, "min"),
@@ -126,7 +126,7 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
             N_GOOD=("_smf_good_n", "sum")
         ).reset_index()
 
-        # 计算各分箱内 WOE（全局分母）
+        # Compute the WOE within each bin (global denominators)
         total_bad = stats["N_BAD"].sum()
         total_good = stats["N_GOOD"].sum()
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / total_bad
@@ -137,20 +137,20 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         stats["LIFT"] = stats["AVG_BAD"] / stats["AVG_BAD"].mean()
         stats["VAR"] = var
 
-        # 生成透视表：WOE 和 AVG_BAD 在不同分组下的值
+        # Build pivot tables: WOE and AVG_BAD values under each group
         pvt_woe = stats.pivot_table(index=["_BIN_NUM", "_BIN_RANGE"], columns=group, values="WOE")
         pvt_bad = stats.pivot_table(index=["_BIN_NUM", "_BIN_RANGE"], columns=group, values="AVG_BAD")
 
-        # 汇总各分组的总指标
+        # Summarize the overall metrics of each group
         sum_grp = stats.groupby(group).agg(
             N=("N", "sum"),
             IV=("IV", "sum"),
-            KS_PER_BIN=("LIFT", "max"),  # 简化处理，可进一步细算
+            KS_PER_BIN=("LIFT", "max"),  # simplified; can be refined further
             TOP_LIFT=("LIFT", "max"),
             BTM_LIFT=("LIFT", "min")
         ).reset_index()
 
-        # 计算单调性斜率（可选）
+        # Compute the monotonicity slope (optional)
         slopes = _vectorized_group_slopes(stats, group, "AVG_BAD")
         sum_grp["SLOPE"] = sum_grp[group].map(slopes)
         slope_values = sum_grp["SLOPE"].to_numpy()
@@ -165,7 +165,7 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         detail_list.append(stats)
 
     final_pivot = pd.concat(pivots_woe, keys=varlist, names=["VAR", "BIN_NUM", "BIN_RANGE"])
-    # 如需同时返回 AVG_BAD 透视表，可以合并或单独返回
+    # To also return the AVG_BAD pivot table, merge it in or return it separately
     return {
         "summary": pd.concat(summaries, ignore_index=True),
         "pivot": final_pivot,
@@ -241,15 +241,15 @@ class WOE_Master(object):
         
     @staticmethod
     def remove_folder(file_path):
-        """删除指定文件夹。
-        
-        递归删除指定路径的文件夹及其所有内容，
-        如果文件夹不存在则静默处理。
-        
+        """Delete the specified folder.
+
+        Recursively delete the folder at the given path together with all of its
+        contents; do nothing (silently) if the folder does not exist.
+
         Parameters
         ----------
         file_path : str
-            要删除的文件夹路径
+            Path of the folder to delete.
             
         Examples
         --------

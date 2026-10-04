@@ -12,36 +12,36 @@ from Modeling_Tool.Core.utils import mkdir_if_not_exist
 zhfont = FontProperties(fname=os.path.join(os.path.dirname(__file__), "../ref_font/KaiTi.ttf"))
 palette = {
     "single_01": ["#0099CC", "#FF6666", ],
-    "grey": "#000000", # 黑灰色
-    "blue": "#336699", # 蓝色
-    "red_list" : ["#CC0033", "#CC3333", "#FF6666", ], # 红色系由深至浅
+    "grey": "#000000", # black-grey
+    "blue": "#336699", # blue
+    "red_list" : ["#CC0033", "#CC3333", "#FF6666", ], # reds, from dark to light
     }
 
 def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var.png'):
     """
-    绘制变量的WOE图。
+    Plot the WOE chart of a variable.
 
     Parameters
     ----------
     woe_df : pandas.DataFrame
-        WOE表，包含变量、分箱等信息
+        WOE table, containing the variable, bin, and related information.
     var_rename : str, optional
-        变量重命名，用于图表标题显示，默认为None
+        New display name for the variable, used in the chart title. Default is None.
     to_show : bool, optional
-        是否展示图片，默认为True
+        Whether to display the figure. Default is True.
     save_dir : str, optional
-        结果图片存放的文件夹路径，默认为None
+        Directory in which the resulting image is saved. Default is None.
     fig_name : str, optional
-        保存图片的文件名，默认为'var.png'
+        File name of the saved image. Default is 'var.png'.
 
     Returns
     -------
     None
-        函数直接绘制图表并可选保存或展示
+        The function draws the chart and optionally saves or displays it.
 
     Examples
     --------
-    >>> plot_woe(woe_df, var_rename='年龄', save_dir='./output')
+    >>> plot_woe(woe_df, var_rename='Age', save_dir='./output')
     """
     woe_df = woe_df.copy()  # plotting must not rename or rewrite the caller's frame
     woe_df.columns = [x.lower() for x in woe_df.columns]
@@ -59,13 +59,13 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
     X = woe_df["bin_num"]
     xticks_list = [str(x)[:20]+"..." if len(str(x)) > 20 else str(x) for x in woe_df["bin_range"]]
 
-    # 创建画布
+    # Create the canvas
     plt.figure(figsize=(12, 5), dpi=200) # 8,4
     grid = plt.GridSpec(1, 12, wspace=0.5, hspace=0.5)
 
-    # 1.绘制Woe图
+    # 1. Draw the WOE chart
     ax1 = plt.subplot(grid[:, :5])
-    # 绘制主坐标轴
+    # Draw the primary axis
     ax1.bar(X, woe_df["p"], color=palette["single_01"][0], label="0", align="edge", width=0.985, alpha=0.8)
     ax1.bar(X, woe_df["p"] * woe_df["avg_bad"], color=palette["single_01"][1], label="1", align="edge", width=0.985)
 
@@ -75,9 +75,9 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
     ax1.set_ylabel("Proportion", fontsize=6)
     ax1.legend(loc=2, fontsize=6)
 
-    # 绘制次坐标轴
+    # Draw the secondary axis
     ax1_2 = plt.twinx()
-    plt.axis(ymin=np.min([-1, woe_df["woe"].min() * 1.1]), ymax=np.max([1, woe_df["woe"].max() * 1.1])) # 设置次轴区间
+    plt.axis(ymin=np.min([-1, woe_df["woe"].min() * 1.1]), ymax=np.max([1, woe_df["woe"].max() * 1.1])) # set the secondary axis range
     plt.plot(X+0.5, woe_df["woe"], color="black", linewidth=1.5)
     for x, woe, avg_bad in zip(X, woe_df["woe"], woe_df["avg_bad"]):
         ax1_2.annotate(f"{woe:.3f} ({avg_bad:.2%})",
@@ -90,17 +90,17 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
     plt.yticks(fontsize=6)
     ax1_2.set_ylabel("WOE (TargetRate)", fontsize=6)
 
-    # 绘制标题
+    # Draw the title
     if bool(var_rename):
         plt.title(f"{str(var_rename)}: IV={iv:.3f}", fontsize=12, fontproperties=zhfont)
     else:
         plt.title(f"{var_name}: IV={iv:.3f}", fontsize=12, fontproperties=zhfont)
 
-    # 2.绘制Woe表
+    # 2. Draw the WOE table
     ax2 = plt.subplot(grid[:, 7:])
     ax2.set_axis_off()
 
-    # 调整要展示的数据
+    # Prepare the data to display
     tbl = woe_df[["n", "p", "avg_bad", "lift", "woe",]].copy()
     tbl.loc["total"] = [tbl["n"].sum(), tbl["p"].sum(), woe_df["n_bad"].sum()/woe_df["n"].sum(), 1, 0]
     tbl["n"] = [f"{x:,.0f}" for x in tbl["n"]]
@@ -109,7 +109,7 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
     tbl["lift"] = [f"{x:.2}" for x in tbl["lift"]]
     tbl["woe"] = [f"{x:.3f}" for x in tbl["woe"]]
 
-    # 绘制表格
+    # Draw the table
     rowls = xticks_list
     rowls.append("total")
     tbl = ax2.table(
@@ -133,11 +133,11 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
         if row > 0 and col > -1:
             cell.set_text_props(font=zhfont, fontsize=7)
 
-    # 保存结果
+    # Save the result
     if bool(save_dir):
         plt.savefig(os.path.join(save_dir, fig_name), bbox_inches="tight")
 
-    # 展示结果
+    # Show the result
     if to_show:
         plt.show()
     plt.close()
@@ -145,28 +145,28 @@ def plot_woe(woe_df, var_rename=None, to_show=True, save_dir=None, fig_name='var
 
 def get_woe_table(binning_res, var, dep):
     """
-    根据分箱结果计算并返回WOE表和WOE映射字典。
+    Compute and return the WOE table and the WOE mapping dictionary from the binning result.
 
     Parameters
     ----------
     binning_res : pandas.DataFrame
-        包含分箱结果的数据框，应包含 _bin_num_{var} 和 _bin_range_{var} 列
+        DataFrame containing the binning result; it must contain the _bin_num_{var} and _bin_range_{var} columns.
     var : str
-        变量名称，用于标识要分析的特征列
+        Variable name, identifying the feature column to analyze.
     dep : str
-        目标变量名称，用于计算好坏样本统计信息
+        Name of the target variable, used to compute the good/bad sample statistics.
 
     Returns
     -------
     tuple
-        - woe_table (pandas.DataFrame): 包含每个分箱的WOE、IV等统计信息的表格
-        - woe_mapping_dict (dict): 将分箱范围映射到WOE值的字典
+        - woe_table (pandas.DataFrame): table containing the WOE, IV, and other statistics of each bin
+        - woe_mapping_dict (dict): dictionary mapping each bin range to its WOE value
 
     Examples
     --------
     >>> woe_table, woe_dict = get_woe_table(binning_res, 'age', 'target')
     """
-    # 计算每个分箱的统计信息
+    # Compute the statistics of each bin
     woe_table = binning_res.groupby([f"_bin_num_{var}", f"_bin_range_{var}"], dropna = False)\
                          .agg(MIN = (var, "min"),
                               MAX = (var, "max"),
@@ -193,23 +193,23 @@ def get_woe_table(binning_res, var, dep):
 
 def get_mapped_woe_summary_single(data, var, ref_woe_table, tgt_name):
     """
-    根据给定的参考WOE映射表，对单个变量生成WOE汇总表。
+    Generate the WOE summary table of a single variable from the given reference WOE mapping table.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据，包含原始变量值
+        Input data, containing the raw variable values.
     var : str
-        变量名称
+        Variable name.
     ref_woe_table : pandas.DataFrame
-        参考WOE映射表，包含各变量的标准WOE分箱信息
+        Reference WOE mapping table, containing the standard WOE bins of each variable.
     tgt_name : str
-        目标变量名称，用于计算好坏样本比例
+        Name of the target variable, used to compute the good/bad sample proportions.
 
     Returns
     -------
     pandas.DataFrame
-        与参考WOE表格式一致的变量WOE汇总表
+        WOE summary table of the variable, in the same format as the reference WOE table.
 
     Examples
     --------
@@ -241,29 +241,29 @@ def get_mapped_woe_summary_single(data, var, ref_woe_table, tgt_name):
 
 def get_mapped_woe_summary_grp(data, var, ref_woe_table, tgt_name, grp_name=None):
     """
-    获取分组后的单个变量WOE汇总表。
+    Get the WOE summary table of a single variable by group.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据，包含原始变量值和分组信息
+        Input data, containing the raw variable values and the grouping information.
     var : str
-        变量名称
+        Variable name.
     ref_woe_table : pandas.DataFrame
-        参考WOE映射表，包含各变量的标准WOE分箱信息
+        Reference WOE mapping table, containing the standard WOE bins of each variable.
     tgt_name : str
-        目标变量名称，用于计算好坏样本比例
+        Name of the target variable, used to compute the good/bad sample proportions.
     grp_name : str or list, optional
-        分组字段名称，用于按组别分别计算WOE，默认为None
+        Name of the grouping field(s); the WOE is computed separately for each group. Default is None.
 
     Returns
     -------
     pandas.DataFrame
-        分组后的变量WOE汇总表
+        Grouped WOE summary table of the variable.
 
     Notes
     -----
-    如果数据中存在缺失值，会自动删除包含缺失值的记录并记录警告日志
+    If the data contain missing values, the records with missing values are dropped automatically and a warning is logged.
 
     Examples
     --------
@@ -289,25 +289,25 @@ def get_mapped_woe_summary_grp(data, var, ref_woe_table, tgt_name, grp_name=None
 
 def get_mapped_woe_summary(data, ref_woe_table, tgt_name, varlist=None, grp_name=None):
     """
-    获取多个变量的WOE汇总表。
+    Get the WOE summary table of multiple variables.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据，包含原始变量值
+        Input data, containing the raw variable values.
     ref_woe_table : pandas.DataFrame
-        参考WOE映射表，包含各变量的标准WOE分箱信息
+        Reference WOE mapping table, containing the standard WOE bins of each variable.
     tgt_name : str
-        目标变量名称，用于计算好坏样本比例
+        Name of the target variable, used to compute the good/bad sample proportions.
     varlist : list, optional
-        要计算的变量列表，默认为None（使用参考表中的所有变量）
+        List of variables to compute. Default is None (use all variables in the reference table).
     grp_name : str or list, optional
-        分组字段名称，用于按组别分别计算WOE，默认为None
+        Name of the grouping field(s); the WOE is computed separately for each group. Default is None.
 
     Returns
     -------
     pandas.DataFrame
-        包含所有变量WOE信息的汇总表
+        Summary table containing the WOE information of all variables.
 
     Examples
     --------
@@ -327,27 +327,27 @@ def get_mapped_woe_summary(data, ref_woe_table, tgt_name, varlist=None, grp_name
 
 def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, save_dir=None, fig_name="var_group.png"):
     """
-    绘制变量的分组WOE图。
+    Plot the grouped WOE chart of a variable.
 
     Parameters
     ----------
     woe_grp_df : pandas.DataFrame
-        分组WOE表，包含按组别分组后的WOE信息
+        Grouped WOE table, containing the WOE information of each group.
     grp_name : str, optional
-        分组字段名称，用于区分不同组的WOE曲线，默认为None
+        Name of the grouping field, used to distinguish the WOE curves of different groups. Default is None.
     var_rename : str, optional
-        变量重命名，用于图表标题显示，默认为None
+        New display name for the variable, used in the chart title. Default is None.
     to_show : bool, optional
-        是否展示图片，默认为True
+        Whether to display the figure. Default is True.
     save_dir : str, optional
-        结果图片存放的文件夹路径，默认为None
+        Directory in which the resulting image is saved. Default is None.
     fig_name : str, optional
-        保存图片的文件名，默认为'var_group.png'
+        File name of the saved image. Default is 'var_group.png'.
 
     Returns
     -------
     None
-        函数直接绘制图表并可选保存或展示
+        The function draws the chart and optionally saves or displays it.
 
     Examples
     --------
@@ -373,14 +373,14 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
     gs.sort()
     n = len(gs)
 
-    # 构建画布
+    # Create the canvas
     plt.figure(figsize=(12, 5), dpi=200) # 8,4
     grid = plt.GridSpec(1, 12, wspace=0.5, hspace=0.5)
 
-    # 1.绘制Woe图
+    # 1. Draw the WOE chart
     ax1 = plt.subplot(grid[:, :5])
 
-    # 绘制主坐标轴
+    # Draw the primary axis
     width = 0.9 / n
     alpha = 0.5 / n
     for i in range(n):
@@ -397,35 +397,35 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
     plt.ylabel("Proportion", fontsize=6)
     plt.legend(loc=2, fontsize=6)
 
-    # 绘制次坐标轴
+    # Draw the secondary axis
     alpha = 0.8 / n
     ax1_2 = plt.twinx()
     for i in range(n):
         g = gs[i]
         df_plot = woe_grp_df.loc[woe_grp_df[grp_name] == g, ].reset_index(drop=True)
         plt.plot(X+0.5, df_plot["woe"], color=palette["grey"], linewidth=1, label=f"{g} IV={iv_dict[g]:.2f}", alpha=0.2 + alpha*(i+1))
-    plt.axis(ymin=np.min([-1, woe_grp_df["woe"].min() * 1.1]), ymax=np.max([1, woe_grp_df["woe"].max() * 1.1])) # 设置次轴区间
+    plt.axis(ymin=np.min([-1, woe_grp_df["woe"].min() * 1.1]), ymax=np.max([1, woe_grp_df["woe"].max() * 1.1])) # set the secondary axis range
     plt.yticks(fontsize=6)
     plt.ylabel("WOE", fontsize=6)
     plt.legend(loc=1, fontsize=6)
 
-    # 绘制总标题
+    # Draw the overall title
     if bool(var_rename):
         plt.title(f"{str(var_rename)}: IV_range={summary_df.iv.min():.2f}-{summary_df.iv.max():.2f}", fontsize=12, fontproperties=zhfont)
     else:
         plt.title(f"{var_name}: IV_range={summary_df.iv.min():.2f}-{summary_df.iv.max():.2f}", fontsize=12, fontproperties=zhfont)
 
-    # 2.绘制Woe表
+    # 2. Draw the WOE table
     ax2 = plt.subplot(grid[:, 7:])
     ax2.set_axis_off()
 
-    # 调整要展示的数据
+    # Prepare the data to display
     tbl = pd.DataFrame()
     for i in range(n):
         g = gs[i]
         tbl[g] = [f"{x:.3f}" for x in woe_grp_df.loc[woe_grp_df[grp_name] == g, "woe"]]
 
-    # 绘制表格
+    # Draw the table
     rowls = xticks_list
     colls = ["_".join([x, "woe"]) for x in gs]
     tbl = ax2.table(
@@ -448,11 +448,11 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
         if row > 0 and col > -1:
             cell.set_text_props(font=zhfont, fontsize=7)
 
-    # 保存结果
+    # Save the result
     if bool(save_dir):
         plt.savefig(os.path.join(save_dir, fig_name), bbox_inches="tight")
 
-    # 展示结果
+    # Show the result
     if to_show:
         plt.show()
     plt.close()
@@ -460,21 +460,21 @@ def plot_woe_group(woe_grp_df, grp_name=None, var_rename=None, to_show=True, sav
 
 def align_bin_num(woe_table, grp_woe_df, grp_name):
     """
-    对齐分组WOE表与参考WOE表的分箱编号。
+    Align the bin numbers of the grouped WOE table with those of the reference WOE table.
 
     Parameters
     ----------
     woe_table : pandas.DataFrame
-        参考WOE表，包含标准的分箱定义
+        Reference WOE table, containing the standard bin definitions.
     grp_woe_df : pandas.DataFrame
-        分组WOE表，需要与参考表对齐
+        Grouped WOE table, to be aligned with the reference table.
     grp_name : str or list
-        分组字段名称
+        Name of the grouping field(s).
 
     Returns
     -------
     pandas.DataFrame
-        对齐后的分组WOE表，BIN_NUM重新编号以避免空值
+        Aligned grouped WOE table, with BIN_NUM renumbered to avoid null values.
 
     Examples
     --------
@@ -509,29 +509,29 @@ def align_bin_num(woe_table, grp_woe_df, grp_name):
 
 def get_bivar_graph(data, varlist, sep, ref_woe_table, save_dir, group=None, woe_suffix="_woe"):
     """
-    生成双变量分析图表，包括参考WOE图和分组WOE图。
+    Generate bivariate analysis charts, including the reference WOE charts and the grouped WOE charts.
 
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据，包含原始变量值和分组信息
+        Input data, containing the raw variable values and the grouping information.
     varlist : list
-        要分析的变量列表
+        List of variables to analyze.
     sep : str
-        目标变量名称，用于计算好坏样本比例
+        Name of the target variable, used to compute the good/bad sample proportions.
     ref_woe_table : pandas.DataFrame
-        参考WOE映射表，包含各变量的标准WOE分箱信息
+        Reference WOE mapping table, containing the standard WOE bins of each variable.
     save_dir : str
-        图片保存目录路径
+        Directory in which the images are saved.
     group : str, optional
-        分组字段名称，用于生成分组对比图，默认为None
+        Name of the grouping field, used to generate the grouped comparison charts. Default is None.
     woe_suffix : str, optional
-        WOE变量后缀，默认为'_woe'
+        Suffix of the WOE variables. Default is '_woe'.
 
     Returns
     -------
     None
-        函数直接保存图表到指定目录
+        The function saves the charts directly to the specified directory.
 
     Examples
     --------
@@ -579,62 +579,62 @@ def get_bivar_graph(data, varlist, sep, ref_woe_table, save_dir, group=None, woe
 
 
 # =============================================================================
-# 新增类封装
+# Newly added class wrappers
 # =============================================================================
 
 class WOEPlotter:
     """
-    WOE绘图类，封装单个变量和分组变量的WOE图表绘制功能。
+    WOE plotting class, wrapping the WOE chart plotting of a single variable and of grouped variables.
 
     Parameters
     ----------
     var_rename : str, optional
-        变量重命名，用于图表标题显示，默认为None
+        New display name for the variable, used in the chart title. Default is None.
     to_show : bool, optional
-        是否展示图片，默认为True
+        Whether to display the figure. Default is True.
     save_dir : str, optional
-        结果图片存放的文件夹路径，默认为None
+        Directory in which the resulting image is saved. Default is None.
     fig_name : str, optional
-        保存图片的文件名，默认为'var.png'
+        File name of the saved image. Default is 'var.png'.
     grp_name : str, optional
-        分组字段名称，默认为None
+        Name of the grouping field. Default is None.
 
     Attributes
     ----------
     var_rename : str
-        变量重命名
+        New display name for the variable.
     to_show : bool
-        是否展示图片
+        Whether to display the figure.
     save_dir : str
-        图片保存目录
+        Directory in which the images are saved.
     fig_name : str
-        图片文件名
+        Image file name.
     grp_name : str
-        分组字段名称
+        Name of the grouping field.
 
     Examples
     --------
-    >>> plotter = WOEPlotter(save_dir='./output', var_rename='年龄')
+    >>> plotter = WOEPlotter(save_dir='./output', var_rename='Age')
     >>> plotter.plot(woe_df)
-    >>> plotter.plot_group(woe_grp_df, grp_name='城市')
+    >>> plotter.plot_group(woe_grp_df, grp_name='City')
     """
 
     def __init__(self, var_rename=None, to_show=True, save_dir=None, fig_name='var.png', grp_name=None):
         """
-        初始化WOEPlotter实例。
+        Initialize the WOEPlotter instance.
 
         Parameters
         ----------
         var_rename : str, optional
-            变量重命名，用于图表标题显示
+            New display name for the variable, used in the chart title.
         to_show : bool, optional
-            是否展示图片，默认为True
+            Whether to display the figure. Default is True.
         save_dir : str, optional
-            结果图片存放的文件夹路径
+            Directory in which the resulting image is saved.
         fig_name : str, optional
-            保存图片的文件名，默认为'var.png'
+            File name of the saved image. Default is 'var.png'.
         grp_name : str, optional
-            分组字段名称
+            Name of the grouping field.
         """
         self.var_rename = var_rename
         self.to_show = to_show
@@ -644,20 +644,20 @@ class WOEPlotter:
 
     def plot(self, woe_df, var_rename=None, to_show=None, save_dir=None, fig_name=None):
         """
-        绘制单个变量的WOE图。
+        Plot the WOE chart of a single variable.
 
         Parameters
         ----------
         woe_df : pandas.DataFrame
-            WOE表，包含变量、分箱等信息
+            WOE table, containing the variable, bin, and related information.
         var_rename : str, optional
-            变量重命名，会覆盖实例属性
+            New display name for the variable; overrides the instance attribute.
         to_show : bool, optional
-            是否展示图片，会覆盖实例属性
+            Whether to display the figure; overrides the instance attribute.
         save_dir : str, optional
-            图片保存目录，会覆盖实例属性
+            Directory in which the image is saved; overrides the instance attribute.
         fig_name : str, optional
-            图片文件名，会覆盖实例属性
+            Image file name; overrides the instance attribute.
 
         Returns
         -------
@@ -666,9 +666,9 @@ class WOEPlotter:
         Examples
         --------
         >>> plotter = WOEPlotter(save_dir='./output')
-        >>> plotter.plot(woe_df, var_rename='年龄')
+        >>> plotter.plot(woe_df, var_rename='Age')
         """
-        # 使用实例属性作为默认值，允许覆盖
+        # Use the instance attributes as defaults; they can be overridden
         _var_rename = var_rename if var_rename is not None else self.var_rename
         _to_show = to_show if to_show is not None else self.to_show
         _save_dir = save_dir if save_dir is not None else self.save_dir
@@ -678,22 +678,22 @@ class WOEPlotter:
 
     def plot_group(self, woe_grp_df, grp_name=None, var_rename=None, to_show=None, save_dir=None, fig_name=None):
         """
-        绘制分组变量的WOE图。
+        Plot the grouped WOE chart of a variable.
 
         Parameters
         ----------
         woe_grp_df : pandas.DataFrame
-            分组WOE表，包含按组别分组后的WOE信息
+            Grouped WOE table, containing the WOE information of each group.
         grp_name : str, optional
-            分组字段名称，会覆盖实例属性
+            Name of the grouping field; overrides the instance attribute.
         var_rename : str, optional
-            变量重命名，会覆盖实例属性
+            New display name for the variable; overrides the instance attribute.
         to_show : bool, optional
-            是否展示图片，会覆盖实例属性
+            Whether to display the figure; overrides the instance attribute.
         save_dir : str, optional
-            图片保存目录，会覆盖实例属性
+            Directory in which the image is saved; overrides the instance attribute.
         fig_name : str, optional
-            图片文件名，会覆盖实例属性
+            Image file name; overrides the instance attribute.
 
         Returns
         -------
@@ -702,7 +702,7 @@ class WOEPlotter:
         Examples
         --------
         >>> plotter = WOEPlotter(save_dir='./output')
-        >>> plotter.plot_group(woe_grp_df, grp_name='城市')
+        >>> plotter.plot_group(woe_grp_df, grp_name='City')
         """
         _grp_name = grp_name if grp_name is not None else self.grp_name
         _var_rename = var_rename if var_rename is not None else self.var_rename
@@ -715,21 +715,21 @@ class WOEPlotter:
 
 class WOEAnalyzer:
     """
-    WOE分析器类，封装WOE表计算和映射汇总功能。
+    WOE analyzer class, wrapping the WOE table computation and the mapped summary functions.
 
     Parameters
     ----------
     ref_woe_table : pandas.DataFrame, optional
-        参考WOE映射表，包含各变量的标准WOE分箱信息，默认为None
+        Reference WOE mapping table, containing the standard WOE bins of each variable. Default is None.
     tgt_name : str, optional
-        目标变量名称，用于计算好坏样本比例，默认为None
+        Name of the target variable, used to compute the good/bad sample proportions. Default is None.
 
     Attributes
     ----------
     ref_woe_table : pandas.DataFrame
-        参考WOE映射表
+        Reference WOE mapping table.
     tgt_name : str
-        目标变量名称
+        Name of the target variable.
 
     Examples
     --------
@@ -740,36 +740,36 @@ class WOEAnalyzer:
 
     def __init__(self, ref_woe_table=None, tgt_name=None):
         """
-        初始化WOEAnalyzer实例。
+        Initialize the WOEAnalyzer instance.
 
         Parameters
         ----------
         ref_woe_table : pandas.DataFrame, optional
-            参考WOE映射表
+            Reference WOE mapping table.
         tgt_name : str, optional
-            目标变量名称
+            Name of the target variable.
         """
         self.ref_woe_table = ref_woe_table
         self.tgt_name = tgt_name
 
     def get_woe_table(self, binning_res, var, dep=None):
         """
-        根据分箱结果计算并返回WOE表和WOE映射字典。
+        Compute and return the WOE table and the WOE mapping dictionary from the binning result.
 
         Parameters
         ----------
         binning_res : pandas.DataFrame
-            包含分箱结果的数据框
+            DataFrame containing the binning result.
         var : str
-            变量名称
+            Variable name.
         dep : str, optional
-            目标变量名称，会覆盖实例属性tgt_name
+            Name of the target variable; overrides the instance attribute tgt_name.
 
         Returns
         -------
         tuple
-            - woe_table (pandas.DataFrame): WOE表
-            - woe_mapping_dict (dict): WOE映射字典
+            - woe_table (pandas.DataFrame): WOE table
+            - woe_mapping_dict (dict): WOE mapping dictionary
 
         Examples
         --------
@@ -781,23 +781,23 @@ class WOEAnalyzer:
 
     def get_mapped_woe_summary_single(self, data, var, ref_woe_table=None, tgt_name=None):
         """
-        根据参考WOE映射表对单个变量生成WOE汇总表。
+        Generate the WOE summary table of a single variable from the reference WOE mapping table.
 
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据
+            Input data.
         var : str
-            变量名称
+            Variable name.
         ref_woe_table : pandas.DataFrame, optional
-            参考WOE表，会覆盖实例属性
+            Reference WOE table; overrides the instance attribute.
         tgt_name : str, optional
-            目标变量名称，会覆盖实例属性
+            Name of the target variable; overrides the instance attribute.
 
         Returns
         -------
         pandas.DataFrame
-            变量WOE汇总表
+            WOE summary table of the variable.
 
         Examples
         --------
@@ -810,25 +810,25 @@ class WOEAnalyzer:
 
     def get_mapped_woe_summary_grp(self, data, var, ref_woe_table=None, tgt_name=None, grp_name=None):
         """
-        获取分组后的单个变量WOE汇总表。
+        Get the WOE summary table of a single variable by group.
 
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据
+            Input data.
         var : str
-            变量名称
+            Variable name.
         ref_woe_table : pandas.DataFrame, optional
-            参考WOE表，会覆盖实例属性
+            Reference WOE table; overrides the instance attribute.
         tgt_name : str, optional
-            目标变量名称，会覆盖实例属性
+            Name of the target variable; overrides the instance attribute.
         grp_name : str or list, optional
-            分组字段名称
+            Name of the grouping field(s).
 
         Returns
         -------
         pandas.DataFrame
-            分组后的变量WOE汇总表
+            Grouped WOE summary table of the variable.
 
         Examples
         --------
@@ -841,25 +841,25 @@ class WOEAnalyzer:
 
     def get_mapped_woe_summary(self, data, ref_woe_table=None, tgt_name=None, varlist=None, grp_name=None):
         """
-        获取多个变量的WOE汇总表。
+        Get the WOE summary table of multiple variables.
 
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据
+            Input data.
         ref_woe_table : pandas.DataFrame, optional
-            参考WOE表，会覆盖实例属性
+            Reference WOE table; overrides the instance attribute.
         tgt_name : str, optional
-            目标变量名称，会覆盖实例属性
+            Name of the target variable; overrides the instance attribute.
         varlist : list, optional
-            要计算的变量列表
+            List of variables to compute.
         grp_name : str or list, optional
-            分组字段名称
+            Name of the grouping field(s).
 
         Returns
         -------
         pandas.DataFrame
-            包含所有变量WOE信息的汇总表
+            Summary table containing the WOE information of all variables.
 
         Examples
         --------
@@ -872,21 +872,21 @@ class WOEAnalyzer:
 
     def align_bin_num(self, woe_table, grp_woe_df, grp_name):
         """
-        对齐分组WOE表与参考WOE表的分箱编号。
+        Align the bin numbers of the grouped WOE table with those of the reference WOE table.
 
         Parameters
         ----------
         woe_table : pandas.DataFrame
-            参考WOE表
+            Reference WOE table.
         grp_woe_df : pandas.DataFrame
-            分组WOE表
+            Grouped WOE table.
         grp_name : str or list
-            分组字段名称
+            Name of the grouping field(s).
 
         Returns
         -------
         pandas.DataFrame
-            对齐后的分组WOE表
+            Aligned grouped WOE table.
 
         Examples
         --------
@@ -897,24 +897,24 @@ class WOEAnalyzer:
 
     def get_bivar_graph(self, data, varlist, sep=None, ref_woe_table=None, save_dir=None, group=None, woe_suffix="_woe"):
         """
-        生成双变量分析图表。
+        Generate bivariate analysis charts.
 
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据
+            Input data.
         varlist : list
-            要分析的变量列表
+            List of variables to analyze.
         sep : str, optional
-            目标变量名称，会覆盖实例属性tgt_name
+            Name of the target variable; overrides the instance attribute tgt_name.
         ref_woe_table : pandas.DataFrame, optional
-            参考WOE表，会覆盖实例属性
+            Reference WOE table; overrides the instance attribute.
         save_dir : str, optional
-            图片保存目录
+            Directory in which the images are saved.
         group : str, optional
-            分组字段名称
+            Name of the grouping field.
         woe_suffix : str, optional
-            WOE变量后缀，默认为'_woe'
+            Suffix of the WOE variables. Default is '_woe'.
 
         Returns
         -------

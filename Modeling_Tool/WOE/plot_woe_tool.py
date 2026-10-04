@@ -12,20 +12,20 @@ zhfont = FontProperties(fname=os.path.join(os.path.dirname(__file__), "../ref_fo
 
 palette = {
     "single_01": ["#0099CC", "#FF6666", ],
-    "grey": "#000000", # 黑灰色
-    "blue": "#336699", # 蓝色
-    "red_list" : ["#CC0033", "#CC3333", "#FF6666", ], # 红色系由深至浅
+    "grey": "#000000", # black-grey
+    "blue": "#336699", # blue
+    "red_list" : ["#CC0033", "#CC3333", "#FF6666", ], # reds, from dark to light
     }
 
 def extract_group_value(woe_grp_df, value_name="lift"):
-    """获取指标值矩阵.
+    """Return the metric value matrix.
 
     Parameters
     ----------
     woe_grp_df : pandas.DataFrame
-        分组WOE表
+        Grouped WOE table.
     value_name : str, default lift
-        指标名称, 候选值"p", "p1"
+        Metric name; candidate values are "p" and "p1".
 
     Returns
     -------
@@ -37,17 +37,17 @@ def extract_group_value(woe_grp_df, value_name="lift"):
 
 
 def cre_psi_table(woe_grp_df, exp_values, value_name="p"):
-    """计算psi值
+    """Compute the PSI values.
     psi = sum((a - e) * ln(a / e))
 
     Parameters
     ----------
     woe_grp_df : pandas.DataFrame
-        分组WOE表
+        Grouped WOE table.
     exp_values : array like
-        期望值序列
+        Sequence of expected values.
     value_name : str, default p
-        psi计算字段, 候选值"p", "p1"
+        Field used for the PSI calculation; candidate values are "p" and "p1".
 
     Returns
     -------
@@ -64,7 +64,7 @@ def cre_psi_table(woe_grp_df, exp_values, value_name="p"):
             components.append(
                 calc_iv(pair, "actual", "expected").iloc[0]
             )
-        psi_df.update({g: components}) # psi计算函数与iv相同
+        psi_df.update({g: components}) # The PSI formula is the same as the IV formula
     psi_df = pd.DataFrame(psi_df, index=value_df.reset_index()['Bin_Value'])
     psi_df.loc["psi"] = psi_df.apply(sum)
     psi_df.loc[:, "avg_psi"] = psi_df.apply(np.mean, axis=1)
@@ -73,31 +73,31 @@ def cre_psi_table(woe_grp_df, exp_values, value_name="p"):
 
 
 def plot_woe(woe_df, var_rename = None, to_show=True, save_dir=None):
-    """绘制变量的WOE图.
+    """Plot the WOE chart of a variable.
     
     Parameters
     ----------
     woe_df: pandas.DataFrame
-        WOE表
+        WOE table.
     var_rename: str, default Non
-        变量重命名
+        New display name for the variable.
     to_show: bool, default True
-        是否展示图片
+        Whether to display the figure.
     save_dir: str, default None
-        结果图片存放的文件夹
+        Directory in which the resulting image is saved.
     """
     var_name = woe_df["Var_Name"].iloc[0]
     iv = round(sum(woe_df["iv"]), 5)
     X = woe_df["Bin_No"]
     xticks_list = [str(x)[:20]+"..." if len(str(x)) > 20 else str(x) for x in woe_df["Bin_Value"]]
     
-    # 创建画布
+    # Create the canvas
     plt.figure(figsize=(12, 5), dpi=200) # 8,4
     grid = plt.GridSpec(1, 12, wspace=0.5, hspace=0.5)
 
-    # 1.绘制Woe图
+    # 1. Draw the WOE chart
     ax1 = plt.subplot(grid[:, :5])
-    # 绘制主坐标轴
+    # Draw the primary axis
     ax1.bar(X, woe_df["p"], color=palette["single_01"][0], label="0", align="edge", width=0.985, alpha=0.8)
     ax1.bar(X, woe_df["p"] * woe_df["tr"], color=palette["single_01"][1], label="1", align="edge", width=0.985)
     
@@ -107,9 +107,9 @@ def plot_woe(woe_df, var_rename = None, to_show=True, save_dir=None):
     ax1.set_ylabel("Proportion", fontsize=6)
     ax1.legend(loc=2, fontsize=6)
 
-    # 绘制次坐标轴
+    # Draw the secondary axis
     ax1_2 = plt.twinx()
-    plt.axis(ymin=np.min([-1, woe_df["woe"].min() * 1.1]), ymax=np.max([1, woe_df["woe"].max() * 1.1])) # 设置次轴区间
+    plt.axis(ymin=np.min([-1, woe_df["woe"].min() * 1.1]), ymax=np.max([1, woe_df["woe"].max() * 1.1])) # set the secondary axis range
     plt.plot(X+0.5, woe_df["woe"], color="black", linewidth=1.5)
     for x, woe, tr in zip(X, woe_df["woe"], woe_df["tr"]):
         ax1_2.annotate(f"{woe:.3f} ({tr:.2%})",
@@ -122,18 +122,18 @@ def plot_woe(woe_df, var_rename = None, to_show=True, save_dir=None):
     plt.yticks(fontsize=6)
     ax1_2.set_ylabel("Woe (TargetRate)", fontsize=6)
 
-    # 绘制标题
+    # Draw the title
     if bool(var_rename):
         plt.title(f"{str(var_rename)}: IV={iv:.3f}", fontsize=12, fontproperties=zhfont)
     else:
         plt.title(f"{var_name}: IV={iv:.3f}", fontsize=12, fontproperties=zhfont)
 
-    # 2.绘制Woe表
+    # 2. Draw the WOE table
     ax2 = plt.subplot(grid[:, 7:])
     ax2.set_axis_off()
     # plt.subplots_adjust(left=0.2, bottom=0.2)
     
-    # 调整要展示的数据
+    # Prepare the data to display
     tbl = woe_df[["n", "p", "tr", "lift", "woe",]].copy()
     tbl.loc["total"] = [tbl["n"].sum(), tbl["p"].sum(), woe_df["n1"].sum()/woe_df["n"].sum(), 1, 0]
     tbl["n"] = [f"{x:,.0f}" for x in tbl["n"]]
@@ -142,7 +142,7 @@ def plot_woe(woe_df, var_rename = None, to_show=True, save_dir=None):
     tbl["lift"] = [f"{x:.2}" for x in tbl["lift"]]
     tbl["woe"] = [f"{x:.3f}" for x in tbl["woe"]]
 
-    # 绘制表格
+    # Draw the table
     rowls = xticks_list
     rowls.append("total")
     tbl = ax2.table(
@@ -167,29 +167,29 @@ def plot_woe(woe_df, var_rename = None, to_show=True, save_dir=None):
         if row > 0 and col > -1:
             cell.set_text_props(font=zhfont, fontsize=7)
 
-    # 保存结果
+    # Save the result
     if bool(save_dir):
         plt.savefig(os.path.join(save_dir, f"{var_name}.png"), bbox_inches="tight")
     
-    # 展示结果
+    # Show the result
     if to_show:
         plt.show()
     plt.close()
 
 
 def plot_woe_group(woe_grp_df, var_rename = None, to_show=True, save_dir=None):
-    """绘制变量的分组WOE图.
+    """Plot the grouped WOE chart of a variable.
     
     Parameters
     ----------
     woe_grp_df: pandas.DataFrame
-        分组WOE表
+        Grouped WOE table.
     var_rename : str, default None
-        变量重命名
+        New display name for the variable.
     to_show: bool, default True
-        是否展示图片
+        Whether to display the figure.
     save_dir: str, default None
-        结果图片存放的文件夹
+        Directory in which the resulting image is saved.
     """
     var_name = woe_grp_df["Var_Name"].iloc[0]
     summary_df = woe_grp_df.groupby(["Group_Name"]).agg({"iv": "sum", "n": "sum", "n1": "sum"})
@@ -205,14 +205,14 @@ def plot_woe_group(woe_grp_df, var_rename = None, to_show=True, save_dir=None):
     gs.sort()
     n = len(gs)
     
-    # 构建画布
+    # Create the canvas
     plt.figure(figsize=(12, 5), dpi=200) # 8,4
     grid = plt.GridSpec(1, 12, wspace=0.5, hspace=0.5)
 
-    # 1.绘制Woe图
+    # 1. Draw the WOE chart
     ax1 = plt.subplot(grid[:, :5])
     
-    # 绘制主坐标轴
+    # Draw the primary axis
     width = 0.9 / n
     alpha = 0.5 / n
     for i in range(n):
@@ -228,36 +228,36 @@ def plot_woe_group(woe_grp_df, var_rename = None, to_show=True, save_dir=None):
     plt.ylabel("Proportion", fontsize=6)
     plt.legend(loc=2, fontsize=6)
     
-    # 绘制次坐标轴
+    # Draw the secondary axis
     alpha = 0.8 / n
     ax1_2 = plt.twinx()
     for i in range(n):
         g = gs[i]
         df_plot = woe_grp_df.loc[woe_grp_df["Group_Name"] == g, ].reset_index(drop=True)
         plt.plot(X+0.5, df_plot["woe"], color=palette["grey"], linewidth=1, label=f"{g} IV={iv_dict[g]:.2f}", alpha=0.2 + alpha*(i+1))
-    plt.axis(ymin=np.min([-1, woe_grp_df["woe"].min() * 1.1]), ymax=np.max([1, woe_grp_df["woe"].max() * 1.1])) # 设置次轴区间
+    plt.axis(ymin=np.min([-1, woe_grp_df["woe"].min() * 1.1]), ymax=np.max([1, woe_grp_df["woe"].max() * 1.1])) # set the secondary axis range
     plt.yticks(fontsize=6)
     plt.ylabel("Woe", fontsize=6)
     plt.legend(loc=1, fontsize=6)
 
-    # 绘制总标题
+    # Draw the overall title
     if bool(var_rename):
         plt.title(f"{str(var_rename)}: IV_range={summary_df.iv.min():.2f}-{summary_df.iv.max():.2f}", fontsize=12, fontproperties=zhfont)
     else:
         plt.title(f"{var_name}: IV_range={summary_df.iv.min():.2f}-{summary_df.iv.max():.2f}", fontsize=12, fontproperties=zhfont)
 
-    # 2.绘制Woe表
+    # 2. Draw the WOE table
     ax2 = plt.subplot(grid[:, 7:])
     ax2.set_axis_off()
     
-    # 调整要展示的数据
+    # Prepare the data to display
     tbl = pd.DataFrame()
     for i in range(n):
         g = gs[i]
         tbl.loc[:, g] = woe_grp_df.loc[woe_grp_df["Group_Name"] == g, "woe"]
         tbl.loc[:, g] = [f"{x:.3f}" for x in tbl[g]]
 
-    # 绘制表格
+    # Draw the table
     rowls = xticks_list
     colls = ["_".join([x, "woe"]) for x in gs]
     tbl = ax2.table(
@@ -280,11 +280,11 @@ def plot_woe_group(woe_grp_df, var_rename = None, to_show=True, save_dir=None):
         if row > 0 and col > -1: 
             cell.set_text_props(font=zhfont, fontsize=7)
 
-    # 保存结果
+    # Save the result
     if bool(save_dir):
         plt.savefig(os.path.join(save_dir, f"{var_name}_group.png"), bbox_inches="tight")
 
-    # 展示结果
+    # Show the result
     if to_show:
         plt.show()
     plt.close()
