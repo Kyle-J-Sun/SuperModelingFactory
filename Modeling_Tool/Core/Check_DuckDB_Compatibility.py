@@ -33,7 +33,25 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CompatibilityIssue:
-    """A single compatibility issue"""
+    """A single compatibility issue.
+
+    Parameters
+    ----------
+    severity : str
+        ``"error"``, ``"warning"`` or ``"info"``.
+    category : str
+        Issue category (for example ``"file_read"`` for an unreadable file).
+    line : int
+        Line number (1-based); 0 for problems that belong to the whole file.
+    column : int
+        Column of the match; 0 means unknown.
+    pattern : str
+        The matched original text.
+    message : str
+        Description of the issue.
+    suggestion : str
+        DuckDB-compatible suggestion.
+    """
 
     severity: str  # "error" | "warning" | "info"
     category: str  # issue category
@@ -46,7 +64,26 @@ class CompatibilityIssue:
 
 @dataclass
 class FileReport:
-    """Compatibility report for a single file"""
+    """Compatibility report for a single file.
+
+    Parameters
+    ----------
+    file_path : str
+        Path of the scanned SQL file.
+    issues : list of CompatibilityIssue, default empty list
+        The issues found in the file.
+
+    Attributes
+    ----------
+    error_count : int
+        Number of error-level issues.
+    warning_count : int
+        Number of warning-level issues.
+    info_count : int
+        Number of info-level issues.
+    is_compatible : bool
+        True when the file has no error-level issue.
+    """
 
     file_path: str
     issues: List[CompatibilityIssue] = field(default_factory=list)

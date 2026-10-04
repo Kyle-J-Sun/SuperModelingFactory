@@ -524,7 +524,33 @@ def df_to_json_string(
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
 ) -> str:
-    """Convenience wrapper around df_to_json that returns the JSON string directly."""
+    """Convenience wrapper around df_to_json that returns the JSON string directly.
+
+    Parameters
+    ----------
+    drv_df : pd.DataFrame
+        Source DataFrame, one record per row.
+    input_vars : Optional[List[str]], default None
+        List of model input feature column names; None selects the flat mode of ``df_to_json``.
+    metadata_cols : Optional[List[str]], default None
+        Metadata columns to specify explicitly in partitioned mode; ignored in flat mode.
+    indent : Optional[int], default 2
+        Number of spaces used to indent the JSON; None gives compact single-line output.
+    ensure_ascii : bool, default False
+        Whether to escape non-ASCII characters as \\uXXXX.
+
+    Returns
+    -------
+    str
+        The JSON text. NaN and infinite values are written as ``null`` and numpy scalars as plain numbers.
+
+    Raises
+    ------
+    ValueError
+        In partitioned mode, if the metadata column values are inconsistent.
+    KeyError
+        If a column in ``input_vars`` does not exist in the DataFrame.
+    """
     result = df_to_json(drv_df, input_vars, metadata_cols)
     result = _sanitize_for_json(result)
     return json.dumps(result, indent=indent, ensure_ascii=ensure_ascii)
@@ -535,7 +561,22 @@ def json_string_to_df(
     input_vars: Optional[List[str]] = None,
     metadata_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """Convenience wrapper around json_to_df that accepts a JSON string as input."""
+    """Convenience wrapper around json_to_df that accepts a JSON string as input.
+
+    Parameters
+    ----------
+    json_string : str
+        JSON text in one of the formats that ``json_to_df`` recognizes.
+    input_vars : Optional[List[str]], default None
+        Model input feature column names; see ``json_to_df``.
+    metadata_cols : Optional[List[str]], default None
+        Metadata column names; see ``json_to_df``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The restored table.
+    """
     return json_to_df(json_string, input_vars, metadata_cols)
 
 
@@ -553,16 +594,17 @@ def df_to_json_file(
     ----------
     drv_df : pd.DataFrame
         Source DataFrame, one credit bureau account record per row.
-    input_vars : List[str]
-        List of model input feature column names.
     output_path : str
         Path of the output .json file.
-    metadata_cols : Optional[List[str]]
-        Metadata column names to specify explicitly. If None, they are derived automatically.
-    indent : Optional[int]
-        Number of spaces used to indent the JSON. None means compact output (single line); default 2.
-    ensure_ascii : bool
-        Whether to escape non-ASCII characters as \\uXXXX. Default False, which keeps non-ASCII characters (such as CJK text) as they are.
+    input_vars : Optional[List[str]], default None
+        List of model input feature column names. With None the flat mode of ``df_to_json`` is used and every column
+        becomes an array.
+    metadata_cols : Optional[List[str]], default None
+        Metadata column names to specify explicitly (partitioned mode only). If None, they are derived automatically.
+    indent : Optional[int], default 2
+        Number of spaces used to indent the JSON. None means compact output (single line).
+    ensure_ascii : bool, default False
+        Whether to escape non-ASCII characters as \\uXXXX. The default False keeps non-ASCII characters (such as CJK text) as they are.
 
     Returns
     -------

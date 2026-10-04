@@ -377,6 +377,24 @@ class CorrelationFilter:
         Correlation coefficient threshold; variable pairs exceeding it are flagged as highly correlated. Default is 0.8.
     method : str, optional
         Method used to compute the correlation coefficients; one of 'pearson', 'spearman', 'kendall'. Default is 'pearson'.
+    tree_binning : bool, default False
+        Whether the IV / KS that decides between correlated variables is computed on decision-tree bins (passed on to
+        ``VarExtractionInsights``).
+    chi2_method : bool, default False
+        Whether that IV / KS is computed on chi-square merged bins.
+    seed : int, default 42
+        Random seed of the binning behind that IV / KS.
+    chi2_p : float, default 0.999
+        p-value threshold of the chi-square merging.
+    init_equi_bins : int, default 1000
+        Number of initial equal-frequency bins for the chi-square binning.
+    missing_rate_ref : int or float, default -9999999
+        Value that fills missing values before binning.
+    spec_values : list, default []
+        Stored as the attribute ``spec_values``; the filter does not use it.
+    base_metric : {"iv", "ks"}, default "iv"
+        Metric (case-insensitive) compared inside a group of correlated variables: the variable with the highest value
+        is kept and the others are removed.
 
     Examples
     --------
@@ -386,23 +404,7 @@ class CorrelationFilter:
     
     def __init__(self, data, dep, corr_cutpoint=0.8, method='pearson', tree_binning=False, chi2_method=False, seed = 42, chi2_p =0.999, init_equi_bins = 1000, 
                  missing_rate_ref = -9999999, spec_values = [], base_metric = 'iv'):
-        """Initialize the correlation filter analyzer.
-        
-        Parameters
-        ----------
-        data : pd.DataFrame
-            Input raw DataFrame.
-        dep : str
-            Column name of the target (dependent) variable.
-        corr_cutpoint : float, optional
-            Correlation coefficient threshold.
-        method : str, optional
-            Method used to compute the correlation coefficients.
-        tree_binning_seed : int, optional
-            Random seed for decision-tree binning.
-        chi2_config : tuple, optional
-            Chi-square binning configuration.
-        """
+        """Initialize the correlation filter analyzer (the parameters are described in the class docstring)."""
         self.data = data
         self.dep = dep
         self.corr_cutpoint = corr_cutpoint
