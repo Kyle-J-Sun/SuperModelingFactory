@@ -23,6 +23,49 @@ _BUSINESS_TYPES = [
 
 @dataclass
 class MockSamplePipelineConfig:
+    """Configuration of :class:`MockSamplePipeline`.
+
+    Parameters
+    ----------
+    n_samples : int, default 80000
+        Number of full application rows generated before any filtering. Must be positive. With ``applied_sample=0`` the
+        output keeps only the approved rows, so it has about ``n_samples * approve_rate`` rows.
+    applied_sample : int, default 1
+        ``1`` returns all applications; ``0`` returns only approved applications (``is_approved`` is 1 on every
+        row). Any other value raises ``ValueError``.
+    approve_rate : float, default 0.25
+        Share of applications flagged ``is_approved=1``. Must lie strictly between 0 and 1. The number of approved rows
+        is ``round(n_samples * approve_rate)`` (kept between 1 and ``n_samples - 1``) and the lowest noisy-risk
+        applications are approved.
+    num_online_scores : int, default 5
+        Number of simulated online bad-probability columns ``online_model_pb_1 ... online_model_pb_n`` (probabilities
+        rounded to 6 decimals). Must be non-negative; ``0`` adds none.
+    y_flag_candidates : list of int, default [15, 30, 45]
+        Performance windows in days. One label column ``y_flag_dpd7_in_{days}d`` is created per distinct value
+        (sorted ascending). The list must be non-empty and contain positive values. A label is filled only for approved
+        applications that have matured by ``observation_timestamp`` and is NaN otherwise.
+    num_features : int, default 20
+        Number of random feature columns ``feat_{business_type}_{idx}``. Must be non-negative; ``0`` adds none and
+        ``feature_metadata`` is then empty.
+    min_num_feature_business_type : int, default 5
+        Lower bound on the number of distinct business types covered by the features. It must be between 1 and
+        ``min(num_features, 10)``, or exactly 0 when ``num_features`` is 0, otherwise ``ValueError`` is raised. Any
+        valid value gives the same result because the generator always covers ``min(num_features, 10)`` types.
+    random_state : int, default 42
+        Seed of the NumPy random generator; the same configuration gives the same data (for a fixed
+        ``observation_timestamp``).
+    observation_timestamp : str or pandas.Timestamp or None, default None
+        Observation date used to decide which labels have matured. Application times are drawn uniformly between
+        ``application_months`` months before this date and the date itself. ``None`` uses today's date at midnight, so
+        set it explicitly for reproducible output.
+    application_months : int, default 18
+        Length in months of the application window that ends at the observation date. Must be positive.
+    write_csv : bool, default False
+        Whether to write the generated data to ``output_path`` as CSV (without the index).
+    output_path : str, default "output/mock_sample/mock_sample.csv"
+        CSV file path; parent directories are created. Used only when ``write_csv`` is True.
+    """
+
     n_samples: int = 80000
     applied_sample: int = 1
     approve_rate: float = 0.25
@@ -39,6 +82,25 @@ class MockSamplePipelineConfig:
 
 @dataclass
 class MockSamplePipelineResult:
+    """Result returned by :meth:`MockSamplePipeline.run`.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Generated sample. Columns: ``flow_id``, ``apply_timestamp``, ``apply_week``, ``apply_month``,
+        ``apply_quarter``, ``is_approved``, the ``feat_*`` features, the ``online_model_pb_*`` scores and the
+        ``y_flag_dpd7_in_{days}d`` labels (1 = bad, 0 = good, NaN = not matured or not approved). Only approved rows
+        remain when ``applied_sample=0``.
+    summary : pandas.DataFrame
+        Two columns ``metric`` and ``value``: row count, ``applied_sample``, approval rate, number of online scores and
+        features, and per label the observed count, observed rate and bad rate.
+    feature_metadata : pandas.DataFrame
+        One row per generated feature with columns ``feature``, ``business_type`` and ``distribution`` (``normal``,
+        ``count``, ``binary`` or ``ratio``); empty when ``num_features=0``.
+    output_path : str or None
+        Absolute path of the CSV file that was written, or None when ``write_csv`` is False.
+    """
+
     data: pd.DataFrame
     summary: pd.DataFrame
     feature_metadata: pd.DataFrame
@@ -46,12 +108,45 @@ class MockSamplePipelineResult:
 
 
 class MockSamplePipeline:
-    """Generate synthetic application or approved samples for SMF demos."""
+    """Generate synthetic application or approved samples for SMF demos.
+
+    The pipeline only produces data (and optionally a CSV file); it runs no modelling analysis and writes no Excel report.
+
+    Parameters
+    ----------
+    config : MockSamplePipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``MockSamplePipelineConfig()`` with its defaults.
+
+    Attributes
+    ----------
+    config : MockSamplePipelineConfig
+        The configuration in use.
+    """
 
     def __init__(self, config: MockSamplePipelineConfig | None = None):
         self.config = config or MockSamplePipelineConfig()
 
     def run(self) -> MockSamplePipelineResult:
+        """Generate the sample described by the configuration.
+
+        Returns
+        -------
+        MockSamplePipelineResult
+            Generated ``data``, ``summary``, ``feature_metadata`` and the CSV ``output_path`` (None unless
+            ``write_csv`` is True).
+
+        Raises
+        ------
+        ValueError
+            If the configuration is invalid (see :class:`MockSamplePipelineConfig`) or if the numbers of observed labels
+            do not strictly decrease from the shortest to the longest ``y_flag_candidates`` window (for example with very
+            few approved rows).
+
+        Notes
+        -----
+        Labels exist only for approved applications; ``is_approved`` is 1 for them. The ``apply_week`` column uses the ISO
+        week format ``%G-W%V``.
+        """
         cfg = self.config
         self._validate_config()
         rng = np.random.default_rng(cfg.random_state)

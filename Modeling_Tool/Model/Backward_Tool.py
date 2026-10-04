@@ -136,48 +136,67 @@ def backward_lgbm(
     dep : str
         Name of the target column (binary 0/1 variable).
     varreduct_params : dict, optional
-        LightGBM hyperparameter dictionary. Required parameters that are not specified use preset values.
+        LightGBM hyperparameter dictionary. Required parameters that are not specified use preset values (``metric`` from
+        ``stopping_metric``, ``seed`` from ``seed``, ``objective='binary'``, ``boosting_type='gbdt'`` and
+        ``num_threads=8``). The dictionary is completed in place, so the caller's dict is modified.
     stopping_metric : str, default "auc"
-        Evaluation metric for early stopping, e.g. "auc" or "binary_logloss".
+        Evaluation metric for early stopping, e.g. "auc" or "binary_logloss". It is only used when ``varreduct_params``
+        does not already contain ``metric``.
     seed : int, default 42
-        Random seed for reproducibility.
+        Random seed for reproducibility. It is only used when ``varreduct_params`` does not already contain ``seed``.
     num_boost_round : int, default 200
         Maximum number of boosting rounds.
     early_stopping_rounds : int, default 20
         Number of early-stopping rounds; training stops when the validation metric has not improved for this many consecutive rounds.
+        The metric is monitored on ``validation_data``, or on ``train_data`` when no validation data is given.
     importance_type : str, default "gain"
         Feature importance type, "gain" or "split".
     cum_importance_threshold : float, default 0.99
-        Cumulative feature-importance threshold; select the fewest features that cover this proportion of the total importance.
+        Cumulative feature-importance threshold. The features are ranked by importance and kept while their cumulative
+        share of the total importance is at most this value (the feature that would push the share above it is not kept).
     min_vars : int, default 10
-        Minimum number of variables to keep.
+        Minimum number of variables to keep. When fewer variables pass the threshold, the ``min_vars`` most important
+        features are returned instead.
     validation_data : pd.DataFrame, optional
-        Validation dataset, used for early stopping.
+        Validation dataset, used for early stopping. It is also scored in the performance summary under the key ``"hd"``.
     test_data_dict : dict, optional
-        Dictionary of test datasets, in the form ``{name: DataFrame}``.
+        Dictionary of test datasets, in the form ``{name: DataFrame}``. They are only scored for the performance summary,
+        under their names. The training data uses the key ``"mdl"`` and the validation data ``"hd"``, so a test dataset with
+        one of these names replaces that entry.
     ret_perf : bool, default True
         Whether to return model performance metrics.
     nbins : int, default 10
-        Number of bins in the Gains table.
+        Number of bins in the Gains table (passed to ``get_perf_summary`` as ``pct_bins``; performance summary only).
     precision : int, default 5
-        Numeric precision.
+        Numeric precision (performance summary only).
     min_bin_prop : float, default 0.05
-        Minimum bin proportion.
+        Minimum bin proportion (performance summary only).
     include_missing : bool, default True
-        Whether to include a missing-value bin.
+        Whether to include a missing-value bin (performance summary only).
     equal_freq : bool, default True
-        Whether to use equal-frequency binning.
+        Whether to use equal-frequency binning (performance summary only).
     ascending : bool, default True
-        Whether to sort the Gains table in ascending order.
+        Not used: accepted for API compatibility and ignored.
     fillna : float, optional
-        Fill value for missing values.
+        Not used: accepted for API compatibility and ignored.
     spec_values : list, optional
-        List of special values.
+        Not used: accepted for API compatibility and ignored.
+    weight_col : str, optional
+        Name of the sample-weight column. It is used as the training weight (``KeyError`` if ``train_data`` lacks it), as
+        the validation weight unless ``validation_weight_col`` is given, and for the weighted performance summary of every
+        dataset that contains the column (datasets without it are evaluated unweighted).
+    validation_weight_col : str, optional
+        Name of the sample-weight column of ``validation_data``; ``weight_col`` is used when it is None. It is also the
+        weight column of the validation performance summary when ``validation_data`` contains it.
+    wgt_col : str, optional
+        Alias of ``weight_col``, used only when ``weight_col`` is None.
 
     Returns
     -------
     tuple
-        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False.
+        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False. ``selected_vars`` is
+        the list of selected variable names (most important first), ``model`` the trained ``lightgbm.Booster`` and
+        ``perf_dict`` a dict ``{dataset name: performance summary DataFrame}`` (see ``get_perf_summary``).
 
     Raises
     ------
@@ -358,50 +377,73 @@ def backward_xgbm(
     dep : str
         Name of the target column (binary 0/1 variable).
     varreduct_params : dict, optional
-        XGBoost hyperparameter dictionary. Required parameters that are not specified use preset values.
+        XGBoost hyperparameter dictionary. Required parameters that are not specified use preset values (``eval_metric``
+        from ``stopping_metric``, ``tree_method='exact'``, ``booster='gbtree'``, ``seed`` from ``seed`` and
+        ``monotone_constraints`` built from ``monotone_constraints``). The dictionary is completed in place, so the caller's
+        dict is modified. No ``objective`` is preset, so XGBoost's default ``reg:squarederror`` applies and the scores are
+        not probabilities unless the dictionary sets one, such as ``{'objective': 'binary:logistic'}``.
     stopping_metric : str, default "auc"
-        Evaluation metric for early stopping.
+        Evaluation metric for early stopping. It is only used when ``varreduct_params`` does not already contain
+        ``eval_metric``.
     seed : int, default 42
-        Random seed.
+        Random seed. It is only used when ``varreduct_params`` does not already contain ``seed``.
     num_boost_round : int, default 200
         Maximum number of boosting rounds.
     early_stopping_rounds : int, default 20
-        Number of early-stopping rounds.
+        Number of early-stopping rounds. The metric is monitored on ``validation_data``, or on ``train_data`` when no
+        validation data is given.
     importance_type : str, default "gain"
-        Feature importance type.
+        Feature importance type passed to ``Booster.get_score``: "weight", "gain", "cover", "total_gain" or "total_cover".
     cum_importance_threshold : float, default 0.99
-        Cumulative feature-importance threshold.
+        Cumulative feature-importance threshold. The features are ranked by importance and kept while their cumulative
+        share of the total importance is at most this value (the feature that would push the share above it is not kept).
+        Features that XGBoost never used get an importance of 0.
     min_vars : int, default 10
-        Minimum number of variables to keep.
+        Minimum number of variables to keep. When fewer variables pass the threshold, the ``min_vars`` most important
+        features are returned instead.
     validation_data : pd.DataFrame, optional
-        Validation dataset.
+        Validation dataset, used for early stopping. It is also scored in the performance summary under the key ``"hd"``.
     test_data_dict : dict, optional
-        Dictionary of test datasets.
+        Dictionary of test datasets, in the form ``{name: DataFrame}``. They are only scored for the performance summary,
+        under their names. The training data uses the key ``"mdl"`` and the validation data ``"hd"``, so a test dataset with
+        one of these names replaces that entry.
     ret_perf : bool, default True
         Whether to return performance metrics.
     nbins : int, default 10
-        Number of bins in the Gains table.
+        Number of bins in the Gains table (passed to ``get_perf_summary`` as ``pct_bins``; performance summary only).
     precision : int, default 5
-        Numeric precision.
+        Numeric precision (performance summary only).
     min_bin_prop : float, default 0.05
-        Minimum bin proportion.
+        Minimum bin proportion (performance summary only).
     include_missing : bool, default True
-        Whether to include a missing-value bin.
+        Whether to include a missing-value bin (performance summary only).
     equal_freq : bool, default True
-        Whether to use equal-frequency binning.
+        Whether to use equal-frequency binning (performance summary only).
     ascending : bool, default True
-        Whether to sort the Gains table in ascending order.
+        Not used: accepted for API compatibility and ignored.
     fillna : float, optional
-        Fill value for missing values.
+        Not used: accepted for API compatibility and ignored.
     spec_values : list, optional
-        List of special values.
+        Not used: accepted for API compatibility and ignored.
     monotone_constraints : dict, optional
-        Dictionary of monotone constraints, in the form ``{feature_name: 1 or -1}``.
+        Dictionary of monotone constraints, in the form ``{feature_name: 1 or -1}``. Features that are not listed get 0 (no
+        constraint). It is only used when ``varreduct_params`` does not already contain ``monotone_constraints``.
+    weight_col : str, optional
+        Name of the sample-weight column. It is used as the training weight (``KeyError`` if ``train_data`` lacks it), as
+        the validation weight unless ``validation_weight_col`` is given, and for the weighted performance summary of every
+        dataset that contains the column (datasets without it are evaluated unweighted).
+    validation_weight_col : str, optional
+        Name of the sample-weight column of ``validation_data``; ``weight_col`` is used when it is None. It is also the
+        weight column of the validation performance summary when ``validation_data`` contains it.
+    wgt_col : str, optional
+        Alias of ``weight_col``, used only when ``weight_col`` is None.
 
     Returns
     -------
     tuple
-        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False.
+        ``(selected_vars, model, perf_dict)``, or ``(selected_vars, model)`` when ``ret_perf`` is False. ``selected_vars`` is
+        the list of selected variable names (most important first), ``model`` the trained ``xgboost.Booster`` and
+        ``perf_dict`` a dict ``{dataset name: performance summary DataFrame}`` (see ``get_perf_summary``).
 
     Raises
     ------
@@ -560,11 +602,38 @@ class BackwardVariableEliminator:
     dep : str
         Name of the target column.
     model_type : str, default "lgbm"
-        Model type, either "lgbm" or "xgbm".
+        Model type, either "lgbm" (LightGBM) or "xgbm" (XGBoost), compared case-insensitively. Any other value is not
+        rejected: it silently runs XGBoost.
     validation_data : pd.DataFrame, optional
         Validation dataset.
     test_data_dict : dict, optional
         Dictionary of test datasets.
+    weight_col : str, optional
+        Name of the sample-weight column, used for training and for the weighted performance summaries (see
+        ``backward_lgbm``).
+    validation_weight_col : str, optional
+        Name of the sample-weight column of ``validation_data``; ``weight_col`` is used when it is None.
+    wgt_col : str, optional
+        Alias of ``weight_col``, used only when ``weight_col`` is None.
+
+    Attributes
+    ----------
+    train_data : pd.DataFrame
+        The training dataset.
+    varlist : list of str
+        The initial list of feature variables.
+    dep : str
+        Name of the target column.
+    model_type : str
+        The model type, converted to lower case.
+    validation_data : pd.DataFrame or None
+        The validation dataset.
+    test_data_dict : dict
+        The test datasets (an empty dict when none were given).
+    weight_col : str or None
+        The sample-weight column (``weight_col``, or ``wgt_col`` when ``weight_col`` is None).
+    validation_weight_col : str or None
+        The sample-weight column of the validation dataset.
 
     Examples
     --------
@@ -618,12 +687,16 @@ class BackwardVariableEliminator:
         """
         Run multiple rounds of backward variable elimination.
 
+        Every round trains a model on the variables that survived the previous round (the first round uses ``varlist``) with
+        ``backward_lgbm`` or ``backward_xgbm`` and keeps the selected variables. The run stops after ``n_rounds`` rounds, or
+        earlier once at most ``min_vars`` variables are left. Calling ``run`` again discards the previous results.
+
         Parameters
         ----------
         n_rounds : int, default 5
             Number of elimination rounds.
         varreduct_params : dict, optional
-            Model hyperparameters.
+            Model hyperparameters. Every round works on a deep copy, so the caller's dict is not modified.
         stopping_metric : str, default "auc"
             Early-stopping metric.
         seed : int, default 42
@@ -639,14 +712,20 @@ class BackwardVariableEliminator:
         min_vars : int, default 10
             Minimum number of variables to keep.
         ret_perf : bool, default True
-            Whether to return performance metrics.
+            Whether to return performance metrics. When False the ``"perf"`` entry of every round is an empty dict.
         nbins : int, default 10
             Number of bins.
+        **kwargs
+            Further keyword arguments forwarded to ``backward_lgbm`` / ``backward_xgbm`` (for example ``precision``,
+            ``min_bin_prop``, ``include_missing``, ``equal_freq`` or, for XGBoost only, ``monotone_constraints``).
+            ``weight_col`` and ``validation_weight_col`` are set by the constructor: passing them here raises ``TypeError``.
 
         Returns
         -------
         list of dict
-            Results of each elimination round.
+            Results of each elimination round, also kept by the eliminator. Every dict has the keys ``"round"`` (1-based round
+            number), ``"n_vars_in"``, ``"n_vars_out"``, ``"selected_vars"`` (list of the variables kept), ``"model"`` (the
+            trained booster) and ``"perf"`` (dict of performance summaries by dataset name).
         """
         current_vars = self.varlist.copy()
         self._results = []
@@ -701,13 +780,28 @@ class BackwardVariableEliminator:
         return self._results
 
     def get_final_vars(self) -> List[str]:
-        """Return the final list of variables after elimination."""
+        """
+        Return the final list of variables after elimination.
+
+        Returns
+        -------
+        list of str
+            The variables selected by the last round, or ``varlist`` itself when ``run`` has not produced results yet.
+        """
         if not self._results:
             return self.varlist
         return self._results[-1]["selected_vars"]
 
     def get_summary(self) -> pd.DataFrame:
-        """Return the summary table of each elimination round."""
+        """
+        Return the summary table of each elimination round.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per round with the columns ``round``, ``n_vars_in``, ``n_vars_out`` and ``vars_removed``. An empty
+            DataFrame (without columns) when ``run`` has not produced results yet.
+        """
         rows = []
         for r in self._results:
             rows.append({
@@ -730,6 +824,11 @@ class BackwardEliminationAnalyzer:
     results : list of dict
         Return value of ``BackwardVariableEliminator.run()``.
 
+    Attributes
+    ----------
+    results : list of dict
+        The results given to the constructor.
+
     Examples
     --------
     >>> analyzer = BackwardEliminationAnalyzer(results)
@@ -747,11 +846,13 @@ class BackwardEliminationAnalyzer:
         Parameters
         ----------
         top_n : int, optional
-            Number of stable variables to return (the first N); None returns all of them.
+            Number of stable variables to return (the first N in alphabetical order); None returns all of them.
 
         Returns
         -------
         list of str
+            The variables present in the ``"selected_vars"`` of every round, sorted alphabetically (an empty list when there
+            are no results).
         """
         if not self.results:
             return []
@@ -778,7 +879,12 @@ class BackwardEliminationAnalyzer:
         figsize : tuple, default (8, 4)
             Figure size.
         save_path : str, optional
-            File path for saving the figure; if None, the figure is displayed directly.
+            File path for saving the figure (written with ``dpi=150`` and the figure is then closed); if None, the figure is
+            displayed directly with ``plt.show()``.
+
+        Returns
+        -------
+        None
         """
         rounds = [r["round"] for r in self.results]
         n_vars = [r["n_vars_out"] for r in self.results]
@@ -804,13 +910,17 @@ class BackwardEliminationAnalyzer:
         Parameters
         ----------
         dataset : str, default "mdl"
-            Dataset name, e.g. "mdl", "hd", "oot".
+            Dataset name, e.g. "mdl", "hd", "oot": "mdl" is the training data, "hd" the validation data and any other name is
+            a key of ``test_data_dict``.
         metric : str, default "IV"
-            Name of the performance metric column.
+            Name of the performance metric column of the performance summary (for example "IV", "AUC" or "KS").
 
         Returns
         -------
         pd.DataFrame
+            One row per round that has a performance summary for the dataset, with the columns ``round`` and the metric (the
+            first row of the summary is used; the value is ``None`` when the summary has no such column). Rounds without a
+            summary for the dataset, for example after a run with ``ret_perf=False``, are skipped.
         """
         rows = []
         for r in self.results:

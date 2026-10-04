@@ -31,6 +31,207 @@ from ._common import (
 
 @dataclass
 class FeatureValidationPipelineConfig:
+    """Configuration of :class:`FeatureValidationPipeline`.
+
+    Parameters
+    ----------
+    output_dir : str, default 'output/feature_validation'
+        Output directory. CSV tables and the Excel report are written directly into it, WOE plots to
+        ``figs/woe/<target>`` and batch results to ``<batch_output_subdir>/batch_NNN``.
+    id_col : str, default 'flow_id'
+        Unique row identifier column. It must exist in the data (``KeyError``) and is never treated as a feature.
+    apply_time_col : str, default 'apply_time'
+        Application time column; it must exist in the data. When ``time_dims`` contains ``apply_week``, ``apply_month``
+        or ``apply_quarter`` and that column is absent, it is derived from this column (as period strings).
+    target_cols : list of str or None, default None
+        Target columns (1 = bad). Names that are not columns of the data are ignored silently. WOE, IV/KS, correlation
+        detail and selection need at least one target; the first target drives the stratified INS/OOS split and the
+        selection.
+    new_feature_cols : list of str or None, default None
+        Features to validate. ``None`` uses every numeric column except the id, application time, ``sample_col``,
+        ``split_col``, ``oot_col``, target and incumbent columns. The list must not be empty (``ValueError``) and every
+        name must exist in the data (``KeyError``).
+    incumbent_feature_cols : list of str or None, default None
+        Existing features to compare with the new ones in the correlation analysis. Names that are also new features are
+        ignored. They must exist in the data.
+    input_type : {'auto', 'dataframe', 'csv'}, default 'auto'
+        How ``run`` interprets its argument. ``'auto'`` treats a DataFrame as data and anything else as a CSV path;
+        ``'dataframe'`` requires a DataFrame (``TypeError`` otherwise); ``'csv'`` reads a file path. Any other value
+        raises ``ValueError``.
+    csv_read_kwargs : dict, default {}
+        Extra keyword arguments for ``pandas.read_csv`` in CSV mode. ``usecols`` and ``chunksize`` are controlled by the
+        pipeline and raise ``ValueError``.
+    enable_batch : bool, default False
+        Process a CSV in batches of feature columns to limit memory. It requires CSV input, and ``feature_batch_size`` or
+        ``feature_batches`` (``ValueError`` otherwise). If batch settings are given while this is False, the CSV is read
+        in full and a ``RuntimeWarning`` is issued.
+    feature_batch_size : int or None, default None
+        Number of new features per batch; must be positive.
+    feature_batches : list of list of str or None, default None
+        Explicit feature batches; they take precedence over ``feature_batch_size``. Unknown features raise
+        ``ValueError`` and features that are not listed are collected in an extra last batch.
+    batch_base_cols : list of str or None, default None
+        Extra columns read with every batch. The id, application time, split, sample, OOT, target, time, population,
+        categorical, WOE-plot-group and incumbent columns that exist in the CSV are always read.
+    batch_output_subdir : str, default 'feature_batches'
+        Sub-directory of ``output_dir`` for the per-batch outputs (``batch_000``, ``batch_001``, ...).
+    batch_keep_intermediate : bool, default True
+        Whether each batch writes its own CSV tables and plots (subject to ``write_outputs``). The merged report is not
+        affected, and batches never write an Excel report.
+    batch_corr_mode : {'within_batch', 'block_pairwise', 'off'}, default 'within_batch'
+        Correlation in batch mode. ``'within_batch'`` correlates features only inside each batch, ``'block_pairwise'``
+        also reads pairs of batches to find cross-batch pairs above ``corr_params['corr_cutpoint']`` (Pearson or
+        Spearman only), ``'off'`` skips correlation. Other values raise ``ValueError``.
+    batch_corr_pair_chunk_size : int or None, default None
+        With ``'block_pairwise'``, maximum number of feature columns per chunk when pairs of batches are read, to cap
+        memory; must be positive. ``None`` reads a whole batch at once.
+    split_col : str or None, default None
+        Column with sample labels (case and surrounding spaces ignored). It must contain non-empty ``ins`` and ``oos``
+        values (``ValueError``); ``oot`` is optional and any other label becomes an additional named split. It takes
+        precedence over ``sample_col``.
+    sample_col : str, default 'sample_ind'
+        Legacy label column, used when ``split_col`` is None and the column exists with non-empty ``ins`` and ``oos``
+        values; otherwise the data are split with ``oot_col`` and ``split_config``. Never treated as a feature.
+    oot_col : str or None, default 'oot_flag'
+        Numeric OOT flag column of the fallback split: rows with 0 or a missing value are INS/OOS candidates and non-zero
+        rows are OOT. A non-numeric flag raises ``TypeError``. Not used when labels define the splits.
+    split_config : dict, default {'test_size': 0.3, 'stratify': True}
+        Settings of the random INS/OOS split: ``test_size`` (OOS share), ``stratify`` (stratify on the first target;
+        rows with a missing target then go to INS) and ``random_state`` (defaults to ``random_state``).
+    random_state : int, default 42
+        Seed of the random INS/OOS split unless ``split_config`` contains its own ``random_state``.
+    time_dims : list of str, default ['apply_month']
+        Time columns for the grouped analyses (distribution, PSI, IV/KS). ``apply_week``, ``apply_month`` and
+        ``apply_quarter`` are derived from ``apply_time_col`` when missing; columns that are still absent are skipped.
+    population_dims : list of str, default []
+        Population columns (for example channel) for the grouped analyses; columns absent from the data are skipped.
+    group_specs : dict or list or None, default None
+        Custom groups for the distribution tables only: ``{name: [columns]}`` or a list of column lists or dicts with
+        ``columns`` and ``name``. ``None`` uses global, time, population and time x population groups. PSI and IV/KS use
+        ``psi_group_dims`` and ``ivks_group_dims`` instead.
+    min_group_size : int, default 100
+        Minimum row count. A target needs at least ``max(10, min_group_size)`` INS rows for the WOE fit and at least
+        ``min_group_size`` observed rows for IV/KS and the correlation detail, and smaller IV/KS groups are skipped. It
+        is also the default ``min_group_n`` of the selection gates.
+    distribution_enabled : bool, default True
+        Whether to build ``distribution_summary``.
+    distribution_params : dict, default {'q': [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]}
+        Keys: ``q`` (quantiles of the numeric summary), ``spec_missing_value`` (value counted as missing, default None)
+        and ``feature_block_size`` (columns per block, default 128).
+    woe_enabled : bool, default True
+        Whether to fit WOE binning per target on the INS rows with an observed target. It needs a target. Without it
+        PSI, IV/KS and correlation use their own binning.
+    woe_fit_query : str or None, default None
+        pandas ``query`` expression that selects the INS rows used to fit the WOE bins; PSI, IV/KS and the transforms
+        still use the full splits. It is validated up front (``KeyError`` for unknown columns, ``ValueError`` for invalid
+        syntax) and the filtering is recorded in ``woe_artifacts['refine_summary']``.
+    woe_engine : str, default 'monotone'
+        ``'monotone'`` (``MonotoneWOEBinner``) or ``'equal_freq'`` (``WOE_Master``), case-insensitive. Anything else
+        raises ``ValueError``.
+    woe_params : dict, default {'nbins': 10, 'equal_freq': True, 'min_bin_prop': 0.05, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0}
+        Used with ``woe_engine='equal_freq'``: ``woe_suffix`` ('_woe') and ``missing_ref_value`` (-999999) configure
+        ``WOE_Master`` and every other key is passed to ``WOE_Master.fit``. ``missing_ref_value`` is also read as the
+        missing-value sentinel of the missing-rate gate and the selection stage, and the whole dict is forwarded to the
+        selection stage.
+    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'normal_bin'}
+        Used with ``woe_engine='monotone'``: constructor keys of ``MonotoneWOEBinner`` and the ``fit`` keys
+        ``chi2_binning``, ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Keys outside the built-in allowlist are dropped
+        silently.
+    categorical_features : list of str or None, default None
+        Features binned as categorical by the monotone engine (``cate_feats``); also passed to the selection stage.
+    monotone_refine_cate_enabled : bool, default False
+        Whether to call ``refine_cate`` on the fitted monotone binner (monotone engine only).
+    monotone_refine_cate_params : dict, default {}
+        Keyword arguments of ``refine_cate``; ``features`` defaults to the categorical features.
+    monotone_refine_dtree_enabled : bool, default False
+        Whether to call ``refine_dtree`` on the fitted monotone binner (monotone engine only).
+    monotone_refine_dtree_params : dict, default {}
+        Keyword arguments of ``refine_dtree``; ``features`` defaults to the numeric features.
+    monotone_refine_chi2_enabled : bool, default False
+        Whether to call ``refine_chi2`` on the fitted monotone binner (monotone engine only).
+    monotone_refine_chi2_params : dict, default {}
+        Keyword arguments of ``refine_chi2``; ``features`` defaults to the numeric features.
+    woe_plot_groups : list of str, default []
+        Group columns for extra WOE plots by group (``figs/woe/<target>/by_<group>``). Plots are written only while
+        ``write_outputs`` and ``plot_outputs`` are both True.
+    psi_enabled : bool, default True
+        Whether to compute ``psi_summary`` and ``psi_details``.
+    psi_reference_dataset : str, default 'ins'
+        Reference sample of the PSI: ``'ins'``, ``'oos'``, ``'oot'`` or ``'external'`` (``ValueError`` otherwise). The PSI
+        compares all splits combined with it.
+    psi_reference_data : pandas.DataFrame or None, default None
+        Reference data for ``psi_reference_dataset='external'`` (required then, otherwise ``ValueError``).
+    psi_group_dims : list of str, default ['sample', 'time', 'population']
+        Grouping of the PSI: ``'sample'`` is the split, ``'time'`` and ``'population'`` expand to ``time_dims`` and
+        ``population_dims``, other names are column names. An overall PSI is computed only when no group column remains
+        (``'global'`` adds nothing by itself).
+    psi_use_woe_bins : bool, default True
+        Whether to bin with the WOE engine of each target when available. Otherwise ``PSICalculator`` bins the data with
+        ``psi_params``.
+    psi_params : dict, default {'buckets': 10, 'equal_freq': True, 'min_bin_prop': 0.05}
+        Keyword arguments of ``PSICalculator``.
+    ivks_enabled : bool, default True
+        Whether to compute ``ivks_summary``. It needs a target.
+    ivks_group_dims : list of str, default ['global', 'time', 'population']
+        Groupings of the IV/KS report: ``'global'`` for all rows, ``'time'`` and ``'population'`` for each column of
+        ``time_dims`` and ``population_dims``, other names as single group columns.
+    ivks_use_woe_bins : bool, default True
+        Whether to compute IV/KS on the bins of the WOE engine of each target when available.
+    ivks_params : dict, default {'iv_cut': 0.0}
+        ``iv_cut`` (minimum IV of the reported features), ``feature_block_size`` (columns per block with WOE bins,
+        default 64) and, without WOE bins, other keyword arguments of ``VarExtractionInsights``.
+    corr_enabled : bool, default True
+        Whether to compute ``corr_matrix``, ``high_corr_pairs`` and ``correlated_detail``.
+    corr_include_incumbent : bool, default True
+        Whether incumbent features are included in the correlation analysis (and, with ``corr_use_woe_bins``, in the WOE
+        fit).
+    corr_use_woe_bins : bool, default True
+        Whether ``CorrelationFilter`` ranks correlated features with IV from the WOE bins of the target.
+    corr_params : dict, default {'corr_cutpoint': 0.75, 'method': 'pearson', 'max_iterations': 10, 'base_metric': 'iv'}
+        ``corr_cutpoint`` (pairs with a larger absolute correlation are flagged), ``method`` (``'pearson'``,
+        ``'spearman'`` or ``'kendall'``), ``max_iterations`` of the removal loop and other ``CorrelationFilter``
+        arguments such as ``base_metric``.
+    missing_rate_threshold : float or None, default None
+        Maximum missing rate of a feature on INS (NaN or the ``missing_ref_value`` sentinel). With
+        ``woe_fit_scope='post_missing_gate'`` features above it are removed before the WOE fit and from all later stages
+        (they are listed in ``woe_artifacts['missing_gate_dropped']``). It is also the default threshold of the
+        selection stage. ``None`` disables the gate.
+    selection_enabled : bool, default False
+        Whether to run the feature screening (missing rate, PSI, IV and correlation stages and optional gates) on the
+        first target. It fills ``selected_features``, ``selection_summary`` and ``screening_artifact`` and needs a
+        target.
+    selection_params : dict, default {}
+        Screening settings read by the pipeline; other keys are ignored. Thresholds: ``psi_threshold`` (0.2),
+        ``psi_compare_splits`` (['oos']), ``iv_threshold`` (0.02), ``iv_upper_threshold``, ``corr_threshold`` (or
+        ``corr_cutpoint``), ``missing_rate_threshold``, ``max_selected_features``, ``min_selected_features``. Stability
+        gates: ``monthly_iv_min``, ``monthly_iv_cv_max``, ``direction_consistency_min``, ``min_group_n``,
+        ``insufficient_group_policy``, ``target_rules``, ``min_pass_count``, ``per_target_iv_range``,
+        ``direction_reference_target``. VIF: ``vif_enabled``, ``vif_threshold``, ``vif_min_features``,
+        ``vif_tie_break_metric``, ``vif_use_woe_bins``. Others: ``ranking_metric``, ``tie_breaker``,
+        ``missing_rate_ref`` and the stage switches and binning options derived from the other config fields (for example
+        ``psi_enabled``, ``iv_nbins``, ``corr_max_iterations``).
+    selection_group_dims : list of str or None, default None
+        Columns of the group-stability gates (``monthly_iv_min``, ``monthly_iv_cv_max``,
+        ``direction_consistency_min``). They are required when one of those gates is set (``ValueError``) and must exist
+        in the INS split (``KeyError``).
+    weight_col : str or None, default None
+        Sample-weight column of the weighted selection and its IV/direction evidence; it must exist in the data. The WOE
+        bins are still fitted without weights.
+    synthesize_missing_oot : bool or None, default False
+        When no OOT rows exist, True copies the OOS rows in as a stand-in OOT (with a ``UserWarning``); False keeps OOT
+        empty. ``None`` counts as False.
+    woe_fit_scope : {'all', 'post_missing_gate'}, default 'post_missing_gate'
+        ``'all'`` fits the WOE on every new feature. ``'post_missing_gate'`` first drops the features above
+        ``missing_rate_threshold`` (a no-op when it is None or there is no target) and continues with the remaining ones.
+    write_outputs : bool, default True
+        Whether to write the result tables as CSV files in ``output_dir``; it is also the master switch for the WOE
+        plots.
+    write_excel : bool, default True
+        Whether to write ``Feature_Validation_Report.xlsx`` with the non-empty tables.
+    plot_outputs : bool, default True
+        Whether to write the WOE plots to ``figs/woe``; they are written only when ``write_outputs`` is True as well.
+    """
+
     output_dir: str = "output/feature_validation"
     id_col: str = "flow_id"
     apply_time_col: str = "apply_time"
@@ -156,6 +357,62 @@ class FeatureValidationPipelineConfig:
 
 @dataclass
 class FeatureValidationPipelineResult:
+    """Result returned by :meth:`FeatureValidationPipeline.run`.
+
+    Parameters
+    ----------
+    splits : dict of str to pandas.DataFrame
+        Sample splits: ``ins``, ``oos`` and ``oot`` (an empty frame when there is no OOT) plus any extra label of
+        ``split_col``. In CSV batch mode only the base columns are held, without the batch features.
+    distribution_summary : dict of str to pandas.DataFrame
+        Distribution tables keyed ``numeric_<group>`` and ``categorical_<group>``; empty when ``distribution_enabled`` is
+        False.
+    woe_artifacts : dict
+        WOE results: ``by_target`` (per target the fitted ``engine``, its ``adapter``, ``woe_splits`` and the fitted
+        ``features``; empty in batch mode), ``woe_table``, ``refine_summary``, the ``*_stats_by_target`` audit entries and,
+        when the missing gate dropped features, ``missing_gate_dropped``. Empty when WOE is disabled or there is no
+        target.
+    psi_summary : pandas.DataFrame
+        PSI of each feature against the reference sample by group, with the columns ``target``, ``group_col`` and
+        ``group_value``; groups that failed carry an ``error`` message. Empty when PSI is disabled.
+    psi_details : dict
+        Detailed PSI tables keyed ``<target>:<group_col>`` (prefixed ``batch_NNN:`` in batch mode).
+    ivks_summary : pandas.DataFrame
+        IV, KS and lift of each feature per target and group (``target``, ``group_spec``, ``var``, ``n``, ``iv``,
+        ``ks_in_gains``, ``lift_in_gains``, ``missing_rate``, ``n_bins``, ...), limited to ``iv >= iv_cut``.
+    corr_matrix : pandas.DataFrame
+        Correlation matrix of the numeric features (and incumbents when included); empty with fewer than two features or
+        when correlation is disabled.
+    high_corr_pairs : pandas.DataFrame
+        Feature pairs whose absolute correlation exceeds ``corr_cutpoint``: ``var1``, ``var2``, ``corr``, ``abs_corr`` and
+        ``pair_type`` (``new_new``, ``new_incumbent``, ``incumbent_incumbent`` or ``new_new_cross_batch``).
+    correlated_detail : pandas.DataFrame
+        Per correlated pair and target the metrics of both features (``iv``, ``ks_in_gains``, ``lift_in_gains``) and a
+        ``recommended_action`` (``keep`` or ``remove``) from ``CorrelationFilter``.
+    validation_summary : pandas.DataFrame
+        Two columns ``metric`` and ``value`` with row, feature and target counts, table sizes and, with selection, the
+        number of selected features.
+    output_paths : dict of str to str, default {}
+        Absolute paths of the files written: one CSV per table name plus ``excel_report``. Empty when nothing was written.
+    report_path : str or None, default None
+        Absolute path of the Excel report; None when ``write_excel`` is False.
+    batch_metadata : pandas.DataFrame or None, default None
+        CSV batch mode only: one row per batch (``batch_id``, ``features``, ``n_features``, ``read_cols``, ``output_dir``,
+        ``status`` and ``error`` for failed batches). None otherwise.
+    batch_results : dict, default {}
+        CSV batch mode only: ``{"batch_NNN": {"output_paths": ..., "report_path": ...}}``.
+    selected_features : list of str, default []
+        Features kept by the selection stage; empty when ``selection_enabled`` is False.
+    selection_summary : dict, default {}
+        Selection audit: ``initial_features``, ``final_features``, ``target_col``, ``config_snapshot`` and the stage
+        tables of the screening (for example ``missing_rate``, ``psi``, ``iv``, ``corr_dropped``, ``screen_summary``).
+    screening_artifact : FeatureScreeningArtifact or None, default None
+        Artifact for ``CreditModelPipeline`` (selected features, summary and WOE artifacts). None unless the selection
+        stage ran; in CSV batch mode it is also None when no feature was selected.
+    config_snapshot : dict, default {}
+        Effective settings of the run (targets, features, selection, WOE and batch-mode flags).
+    """
+
     splits: dict[str, pd.DataFrame]
     distribution_summary: dict[str, pd.DataFrame]
     woe_artifacts: dict[str, Any]
@@ -177,7 +434,23 @@ class FeatureValidationPipelineResult:
 
 
 class FeatureValidationPipeline:
-    """Feature validation workflow for new wide-table feature feeds."""
+    """Feature validation workflow for new wide-table feature feeds.
+
+    The pipeline splits the data into INS/OOS/OOT, then builds distribution tables, fits WOE bins per target and
+    computes PSI, IV/KS and correlation reports (optionally feature selection). It can read a CSV file directly and
+    process very wide files in batches of feature columns.
+
+    Parameters
+    ----------
+    config : FeatureValidationPipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``FeatureValidationPipelineConfig()`` with its
+        defaults.
+
+    Attributes
+    ----------
+    config : FeatureValidationPipelineConfig
+        The configuration in use.
+    """
 
     _MONOTONE_INIT_KEYS = {
         "n_init_bins",
@@ -207,6 +480,38 @@ class FeatureValidationPipeline:
         self.config = config or FeatureValidationPipelineConfig()
 
     def run(self, data: pd.DataFrame | str | Path) -> FeatureValidationPipelineResult:
+        """Validate the new features in ``data`` and write the configured reports.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame or str or pathlib.Path
+            The feature table, or the path of a CSV file (see ``input_type``). It must contain ``id_col``,
+            ``apply_time_col``, the new and incumbent feature columns, ``weight_col`` and ``split_col`` when configured.
+            A DataFrame is not modified.
+
+        Returns
+        -------
+        FeatureValidationPipelineResult
+            Splits, distribution, WOE, PSI, IV/KS, correlation and selection results, and the paths of the files written.
+
+        Raises
+        ------
+        KeyError
+            If a required column is missing from the data.
+        ValueError
+            If a configuration value is invalid (``input_type``, ``woe_engine``, ``psi_reference_dataset``, batch
+            settings, ``woe_fit_query``), if there are no new features, if ``split_col`` lacks ``ins`` or ``oos`` rows, or
+            if every batch fails.
+        TypeError
+            If ``input_type='dataframe'`` and ``data`` is not a DataFrame, or ``oot_col`` is not numeric.
+        FileNotFoundError
+            If a CSV path does not exist.
+
+        Notes
+        -----
+        In CSV batch mode a failing batch is recorded in ``batch_metadata`` (``status='error'``) and the run continues
+        with the remaining batches.
+        """
         input_type = self._resolve_input_type(data)
         if self.config.enable_batch and input_type != "csv":
             raise ValueError("enable_batch=True currently requires CSV input.")

@@ -70,7 +70,28 @@ def _import_excel_master():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_diff(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Return a - b after coercing both to numeric (errors → NaN)."""
+    """Return a - b after coercing both to numeric (errors → NaN).
+
+    Parameters
+    ----------
+    a : pandas.Series
+        Minuend values. Anything that ``pd.to_numeric(errors="coerce")`` cannot convert
+        becomes NaN.
+    b : pandas.Series
+        Subtrahend values, coerced in the same way.
+
+    Returns
+    -------
+    pandas.Series
+        Element-wise ``a - b`` as floats; NaN wherever either side is missing or
+        non-numeric.
+
+    Notes
+    -----
+    The subtraction aligns the two Series on their index, so labels present in only one
+    of them give NaN. The checker calls it as ``safe_diff(online, offline)`` to report
+    ``online - offline``.
+    """
     return pd.to_numeric(a, errors="coerce") - pd.to_numeric(b, errors="coerce")
 
 
@@ -139,7 +160,28 @@ def _make_unique_excel_sheet_name(raw_name: str, used_sheet_names: set[str]) -> 
 
 
 def safe_eq(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Return a == b after coercing both to numeric (errors → NaN)."""
+    """Return a == b after coercing both to numeric (errors → NaN).
+
+    Parameters
+    ----------
+    a : pandas.Series
+        First series; values that cannot be converted to numbers become NaN.
+    b : pandas.Series
+        Second series, coerced in the same way.
+
+    Returns
+    -------
+    pandas.Series of bool
+        True where both values are numeric and equal (exact comparison, no tolerance).
+        False where they differ, and also False where both sides are NaN (NaN never
+        equals NaN).
+
+    Raises
+    ------
+    ValueError
+        If ``a`` and ``b`` do not have identical indexes (pandas refuses to compare
+        differently labelled Series).
+    """
     return pd.to_numeric(a, errors="coerce") == pd.to_numeric(b, errors="coerce")
 
 
@@ -152,6 +194,21 @@ def mismatch_mask(a: pd.Series, b: pd.Series, tol: float) -> pd.Series:
 
     If both sides are null, they are treated as consistent (neither side has a value, so there is
     nothing to compare) and False is returned.
+
+    Parameters
+    ----------
+    a : pandas.Series
+        First series; values that cannot be converted to numbers count as null.
+    b : pandas.Series
+        Second series, coerced in the same way. It should have the same index as ``a``.
+    tol : float
+        Absolute tolerance. A difference is flagged only when it is strictly greater
+        than ``tol`` (a difference equal to ``tol`` is consistent).
+
+    Returns
+    -------
+    pandas.Series of bool
+        True at the positions that are inconsistent, False elsewhere.
     """
     a_num = pd.to_numeric(a, errors="coerce")
     b_num = pd.to_numeric(b, errors="coerce")
@@ -161,7 +218,22 @@ def mismatch_mask(a: pd.Series, b: pd.Series, tol: float) -> pd.Series:
 
 
 def time_diff_seconds(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Return (a - b) in seconds after parsing both to datetime (errors → NaT)."""
+    """Return (a - b) in seconds after parsing both to datetime (errors → NaT).
+
+    Parameters
+    ----------
+    a : pandas.Series
+        Time values (strings or timestamps); values that ``pd.to_datetime`` cannot
+        parse become NaT.
+    b : pandas.Series
+        Time values subtracted from ``a``, parsed in the same way.
+
+    Returns
+    -------
+    pandas.Series of float
+        ``a - b`` in seconds (negative when ``a`` is earlier); NaN wherever either side
+        is missing or unparseable.
+    """
     a_dt = pd.to_datetime(a, errors="coerce")
     b_dt = pd.to_datetime(b, errors="coerce")
     return (a_dt - b_dt).dt.total_seconds()
@@ -177,6 +249,22 @@ def time_mismatch_mask(a: pd.Series, b: pd.Series, tol_seconds: float) -> pd.Ser
     If neither side can be parsed (NaT), they are treated as consistent and False is returned.
     The semantics match ``mismatch_mask``; the only difference is that values are parsed with
     ``pd.to_datetime`` and compared in seconds, which suits time strings and timestamps.
+
+    Parameters
+    ----------
+    a : pandas.Series
+        First series of time values (strings or timestamps); unparseable values count
+        as null.
+    b : pandas.Series
+        Second series, parsed in the same way. It should have the same index as ``a``.
+    tol_seconds : float
+        Tolerance in seconds. A difference is flagged only when its absolute value is
+        strictly greater than ``tol_seconds``.
+
+    Returns
+    -------
+    pandas.Series of bool
+        True at the positions that are inconsistent, False elsewhere.
     """
     a_dt = pd.to_datetime(a, errors="coerce")
     b_dt = pd.to_datetime(b, errors="coerce")
@@ -196,47 +284,65 @@ class UATConfig:
 
     Parameters
     ----------
-    main_model_score_col : str
+    main_model_score_col : str, default 'credit_risk_ltrs_subomdel_score'
         Name of the main model score column (used by both the offline and the online SQL).
         After the pandas merge, the online column automatically gets the ``_online`` suffix.
-    include_submodel_scores : bool
+        The default is a placeholder, so set it explicitly.
+    include_submodel_scores : bool, default True
         True  → submodel scores are already covered as features by the §6 automatic check, so the
         §5 dedicated submodel check is skipped.
         False → run the §5 dedicated submodel score check; ``submodel_pairs`` must also be set.
-    excel_output_path : str
+    excel_output_path : str, default 'online_offline_consistency_report_<YYYYmmdd_HHMMSS>.xlsx'
         Output path of the Excel report (including the file name). The default contains a
-        timestamp with second resolution so that the name is unique.
-    sql_dir : str
+        timestamp with second resolution so that the name is unique; the timestamp is taken
+        when the ``UATConfig`` object is created.
+    sql_dir : str, default 'sql'
         Directory containing the SQL files (absolute path, or path relative to the CWD).
-    offline_sql / online_sql / joined_sql : str
-        Names of the three SQL files.
-    tol_score : float
-        Comparison tolerance for the main model score / submodel scores (default 1e-6).
-    tol_feat : float
-        Comparison tolerance for the feature variables (default 1e-2).
-    n_process : int
-        Number of concurrent processes used to pull the SQL data (default cpu_count - 1).
-    submodel_pairs : dict
+    offline_sql : str, default 'pull_offline.sql'
+        Name of the SQL file, inside ``sql_dir``, that pulls the offline (backtest) table.
+    online_sql : str, default 'pull_online.sql'
+        Name of the SQL file, inside ``sql_dir``, that pulls the online table.
+    tol_score : float, default 1e-06
+        Comparison tolerance for the main model score / submodel scores.
+    tol_feat : float, default 0.01
+        Comparison tolerance for the feature variables.
+    n_process : int, default max(1, cpu_count - 1)
+        Number of concurrent processes used to pull the SQL data; it is passed to
+        ``sqlrunner.run_sql(sql, n_process=...)``. The default is
+        ``max(1, multiprocessing.cpu_count() - 1)``.
+    submodel_pairs : dict of str to str, default {}
         Submodel score column pairs ``{offline_col: online_col}``; used only when
         ``include_submodel_scores=False``.
-    excel_font : str
-        Global font name of the Excel report (default ``"Arial"``).
+        (The per-flow report, however, adds a ``<offline_col>_diff`` column for every pair
+        whose two columns exist, whatever the value of ``include_submodel_scores``.)
+    excel_font : str, default 'Arial'
+        Global font name of the Excel report.
         Overrides ``font_name`` of every format object in ExcelMaster/ExcelFormatTool.
-    info_list : list of str
+    info_list : list of str, default []
         Auxiliary information fields, besides flow_id, to write with the report (e.g. user_id / curp /
         launch_time). These fields are appended after flow_id in every per-flow_id detail table (main
         model score / submodel / Feat_* / Per-Flow) and are excluded from the §6 automatic feature check
         (treated as identifier fields rather than features to compare). Only fields that actually exist
         in the data are kept; missing ones are ignored with a warning.
-    time_featlist : list of str
+    time_featlist : list of str, default []
         Time fields that need a time-semantic comparison (original field names; they must have the same
         name online and offline). The structure is the same as for ordinary model features: the offline
         column is ``col`` and the online column is ``col_online``. Only the time fields in this list are
         parsed with ``pd.to_datetime`` in §7 and compared with a tolerance on the time difference in
         seconds; once configured, these fields are excluded from the §6 numeric feature comparison.
-    tol_time_seconds : float
-        Tolerance on the time difference (seconds, default 60). ``|online - offline| ≤ tol_time_seconds``
+    tol_time_seconds : float, default 60.0
+        Tolerance on the time difference in seconds. ``|online - offline| ≤ tol_time_seconds``
         counts as consistent.
+    comparison_block_size : int, default 128
+        Number of (offline, online) feature column pairs compared at a time when the per-flow report
+        is built; it bounds the memory used on wide tables and does not change the results. It must be
+        a positive integer: ``UATConsistencyChecker`` raises ``ValueError`` at construction otherwise.
+
+    Notes
+    -----
+    The online and offline SQL files are the only two SQL inputs. An earlier ``joined_sql``
+    field (SQL-side join) is disabled in the code and is not a parameter; passing it raises
+    ``TypeError``.
     """
 
     main_model_score_col: str = "credit_risk_ltrs_subomdel_score"
@@ -293,6 +399,65 @@ class UATConsistencyChecker:
         Full configuration parameters.
     sqlrunner : object
         An initialized ODPSRunner instance; it must provide a ``run_sql(sql, n_process)`` method.
+
+    Raises
+    ------
+    ValueError
+        If ``config.comparison_block_size`` is not a positive integer.
+
+    Attributes
+    ----------
+    cfg : UATConfig
+        The configuration passed to the constructor.
+    sqlrunner : object
+        The SQL runner passed to the constructor.
+    df_offline : pandas.DataFrame or None
+        Offline table pulled with ``offline_sql``; set by `load_data`.
+    df_online : pandas.DataFrame or None
+        Online table pulled with ``online_sql``; set by `load_data`.
+    df_onoff : pandas.DataFrame or None
+        Reserved for a SQL-side joined table; always ``None`` because the code that
+        would fill it is disabled.
+    df_compare : pandas.DataFrame or None
+        Outer merge of the offline and online tables on ``flow_id`` (online columns get the
+        ``_online`` suffix, ``_merge`` marks the origin of each row); set by `load_data`.
+    df_both : pandas.DataFrame or None
+        Rows of ``df_compare`` whose ``flow_id`` exists both offline and online; the base of
+        every consistency comparison. Set by `load_data`.
+    offline_fids : set
+        flow_ids found in the offline table; set by `check_coverage` (empty before).
+    online_fids : set
+        flow_ids found in the online table; set by `check_coverage` (empty before).
+    common_fids : set
+        flow_ids present on both sides; set by `check_coverage` (empty before).
+    only_offline : set
+        flow_ids present only offline; set by `check_coverage` (empty before).
+    only_online : set
+        flow_ids present only online; set by `check_coverage` (empty before).
+    offline_score_col : str or None
+        Offline main score column found in ``df_compare``, or ``None`` if it is missing;
+        set by `check_main_score`.
+    online_score_col : str or None
+        Online main score column (``<main_model_score_col>_online``) found in ``df_compare``,
+        or ``None`` if it is missing; set by `check_main_score`.
+    main_score_mismatch_df : pandas.DataFrame or None
+        Rows of ``df_both`` whose main score mismatches (flow_id, launch_time, the two scores
+        and their difference); set by `check_main_score` only when there are mismatches.
+    submodel_summary : list of dict
+        Result of `check_submodel_features` (empty list before, or when the check is skipped).
+    feature_pairs : dict
+        ``{offline_col: online_col}`` pairs compared by `check_all_features` (empty before).
+    diff_summary : pandas.DataFrame or None
+        Result of `check_all_features`.
+    time_summary : pandas.DataFrame or None
+        Result of `check_time_fields` (an empty DataFrame when ``time_featlist`` is empty).
+    time_fields_resolved : dict
+        ``{offline_col: online_col}`` for the ``time_featlist`` fields found in the data;
+        set by `check_time_fields` (empty before).
+    per_flow_df : pandas.DataFrame or None
+        Result of `build_per_flow_report`.
+    summary_df : pandas.DataFrame or None
+        Result of `build_summary`.
     """
 
     def __init__(self, config: UATConfig, sqlrunner) -> None:

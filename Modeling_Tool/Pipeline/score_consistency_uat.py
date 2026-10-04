@@ -15,6 +15,94 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class ScoreConsistencyUATPipelineConfig:
+    """Configuration of :class:`ScoreConsistencyUATPipeline`.
+
+    Two data modes exist. In DataFrame mode (``offline_data`` / ``online_data`` given here or to ``run``) the frames are
+    used directly. In SQL mode the two SQL files are executed with ``sqlrunner``.
+
+    Parameters
+    ----------
+    output_dir : str, default "output/score_consistency_uat"
+        Root output directory. CSV files and the default Excel report go to ``<output_dir>/report``.
+    random_state : int, default 42
+        Not used by this pipeline; kept so that all high-level Pipeline configs share the same interface.
+    write_outputs : bool, default True
+        Whether to write the CSV tables ``coverage_summary``, ``main_score_summary``, ``submodel_summary``,
+        ``feature_diff_summary``, ``time_summary``, ``per_flow_report`` and ``summary`` to ``<output_dir>/report``.
+    write_excel : bool, default True
+        Whether to export the Excel report with ``UATConsistencyChecker.export_excel`` (path in ``report_path``).
+    sql_dir : str, default "sql"
+        Directory that contains the SQL files (SQL mode). It is resolved to an absolute path.
+    offline_sql : str, default "pull_offline.sql"
+        File name, inside ``sql_dir``, of the SQL that pulls the offline (backtest) data.
+    online_sql : str, default "pull_online.sql"
+        File name, inside ``sql_dir``, of the SQL that pulls the online data.
+    sqlrunner : object or None, default None
+        SQL runner whose ``run_sql(sql, n_process=...)`` returns a DataFrame (SQL mode). ``None`` creates
+        ``Modeling_Tool.Core.ODPSRunner()``, which reads its credentials from environment variables
+        (``ALIBABA_CLOUD_ACCESS_KEY_ID``, ``ALIBABA_CLOUD_ACCESS_KEY_SECRET``; optional ``ODPS_PROJECT`` and
+        ``ODPS_ENDPOINT``). In DataFrame mode the runner is never called.
+    env_path : str or None, default None
+        Path of a ``.env`` file loaded with python-dotenv at the start of ``run`` without overriding variables that are
+        already set (``~`` and environment variables in the path are expanded). ``ImportError`` if python-dotenv is not
+        installed.
+    n_process : int or str or None, default "auto"
+        Number of processes passed to ``sqlrunner.run_sql`` when the SQL files are pulled. ``None`` or ``"auto"`` means
+        ``max(1, cpu_count - 1)``; any other value must be an integer >= 1, otherwise ``ValueError`` (checked in both
+        data modes).
+    offline_data : pandas.DataFrame or None, default None
+        Offline data for DataFrame mode; the ``offline_data`` argument of ``run`` takes precedence. It must contain a
+        ``flow_id`` column.
+    online_data : pandas.DataFrame or None, default None
+        Online data for DataFrame mode; the ``online_data`` argument of ``run`` takes precedence. It must contain a
+        ``flow_id`` column.
+    main_model_score_col : str, default "credit_risk_v31_cdc_submodel_score"
+        Name of the main model score column, identical offline and online. After the outer merge on ``flow_id`` the
+        online column is ``<name>_online``. If either column is missing, the main score check only reports the two
+        column names (the missing one as None).
+    tol_score : float, default 1e-06
+        Absolute tolerance for the main score and the dedicated submodel check. A row mismatches when
+        ``|online - offline| > tol_score`` or when exactly one side is null.
+    tol_feat : float, default 0.01
+        Absolute tolerance for numeric feature pairs (``col`` offline versus ``col_online``). The same one-side-null
+        rule applies.
+    time_featlist : list of str, default []
+        Time fields (same name offline and online) compared as datetimes with ``tol_time_seconds``. They are excluded
+        from the numeric feature comparison. Empty means no time check.
+    tol_time_seconds : float, default 60.0
+        Tolerance in seconds on ``|online - offline|`` for the ``time_featlist`` fields. A value that cannot be parsed
+        on one side counts as a mismatch.
+    comparison_block_size : int, default 128
+        Number of feature columns compared per block when ``per_flow_report`` is built; a smaller value lowers peak
+        memory for wide tables. Must be positive, otherwise ``ValueError``.
+    excel_output_path : str or None, default None
+        Excel report path (``~`` and environment variables are expanded, relative paths become absolute). ``None`` uses
+        ``<output_dir>/report/Score_Consistency_UAT_Report.xlsx``. Parent directories are created when ``write_excel``
+        is True.
+    excel_font : str, default "Arial"
+        Font name applied to the whole Excel report.
+    info_list : list of str, default []
+        Identifier columns (for example user_id or launch_time) written after ``flow_id`` in the detail tables and
+        ``per_flow_report``. They are excluded from the numeric feature comparison. Columns that do not exist in the
+        data are ignored (with a warning in SQL mode).
+    include_submodel_scores : bool, default True
+        True: submodel scores are compared like any other feature and the dedicated submodel check is skipped.
+        False: run the dedicated check for ``submodel_pairs`` and fill ``submodel_summary``.
+    submodel_pairs : dict of str to str, default {}
+        ``{offline_col: online_col}`` submodel score column pairs. The dedicated check uses them only when
+        ``include_submodel_scores`` is False, but ``per_flow_report`` gets an ``<offline_col>_diff`` column for every
+        pair whose two columns exist, whatever the flag.
+    numeric_coercion_mode : str, default "safe"
+        DataFrame mode only: how object-dtype columns of the merged frame become numeric. ``"safe"`` converts a column
+        only if at least ``numeric_coercion_min_ratio`` of its non-null values parse as numbers (a warning is logged when
+        some, but not enough, values parse); ``"aggressive"`` always converts and turns unparsable values into NaN
+        (warning); ``"off"`` converts nothing. Any other value raises ``ValueError``. In SQL mode the checker converts
+        every object column that has at least one numeric value, and this field is ignored.
+    numeric_coercion_min_ratio : float, default 0.99
+        DataFrame mode with ``numeric_coercion_mode="safe"`` only: minimum share of parsable non-null values required
+        to convert an object column.
+    """
+
     output_dir: str = "output/score_consistency_uat"
     random_state: int = 42
     write_outputs: bool = True
@@ -53,6 +141,47 @@ class ScoreConsistencyUATPipelineConfig:
 
 @dataclass
 class ScoreConsistencyUATPipelineResult:
+    """Result returned by :meth:`ScoreConsistencyUATPipeline.run`.
+
+    Parameters
+    ----------
+    offline_data : pandas.DataFrame or None
+        Offline data held by the checker (a copy of the input in DataFrame mode).
+    online_data : pandas.DataFrame or None
+        Online data held by the checker (a copy of the input in DataFrame mode).
+    compare_data : pandas.DataFrame or None
+        Outer merge of the two frames on ``flow_id``. Columns present on both sides get the suffix ``_online`` on the
+        online side, and the ``_merge`` column marks ``left_only`` / ``right_only`` / ``both``.
+    both_data : pandas.DataFrame or None
+        Rows of ``compare_data`` whose ``flow_id`` exists both offline and online; all consistency checks use it.
+    coverage_summary : dict
+        ``flow_id`` coverage counts: ``n_offline``, ``n_online``, ``n_common``, ``n_only_offline``, ``n_only_online``,
+        ``dup_offline`` and ``dup_online`` (duplicated ``flow_id`` rows).
+    main_score_summary : dict
+        Main score comparison: ``offline_score_col``, ``online_score_col``, ``n_compared``, ``n_null``,
+        ``n_one_side_null``, ``mean_diff``, ``max_abs_diff``, ``n_mismatch`` and ``consistent``. Only the two column
+        names are present when one of the score columns is missing.
+    submodel_summary : list of dict
+        One dict per ``submodel_pairs`` entry with ``submodel``, ``n_compared``, ``n_one_side_null``, ``n_mismatch``,
+        ``n_mismatch_gt_1e6`` and ``max_abs_diff``. Empty when ``include_submodel_scores`` is True.
+    feature_diff_summary : pandas.DataFrame
+        One row per ``col`` / ``col_online`` feature pair, sorted by ``n_mismatch`` descending: ``feature``,
+        ``n_compared``, ``n_one_side_null``, ``n_mismatch``, ``pct_mismatch``, ``mean_diff``, ``max_abs_diff``.
+    time_summary : pandas.DataFrame
+        One row per ``time_featlist`` field (``time_field``, ``offline_col``, ``online_col``, ``n_compared``,
+        ``n_one_side_null``, ``n_mismatch``, ``pct_mismatch``, ``mean_diff_sec``, ``max_abs_diff_sec``); empty when
+        ``time_featlist`` is empty.
+    per_flow_report : pandas.DataFrame
+        One row per common ``flow_id``: ``flow_id``, the ``info_list`` columns, ``main_score_diff``, ``main_score_ok``,
+        ``<submodel>_diff`` columns, ``n_feature_mismatch`` and ``mismatch_features`` (comma-separated feature names).
+    summary : pandas.DataFrame
+        Overall conclusion with columns ``Check Item``, ``Detail`` and ``Status``; the last row is ``OVERALL``.
+    report_path : str or None, default None
+        Path of the Excel report; None when ``write_excel`` is False.
+    checker : UATConsistencyChecker or None, default None
+        The underlying checker, for access to intermediate attributes such as ``main_score_mismatch_df``.
+    """
+
     offline_data: pd.DataFrame | None
     online_data: pd.DataFrame | None
     compare_data: pd.DataFrame | None
@@ -69,7 +198,23 @@ class ScoreConsistencyUATPipelineResult:
 
 
 class ScoreConsistencyUATPipeline:
-    """Reusable online/offline score consistency UAT workflow."""
+    """Reusable online/offline score consistency UAT workflow.
+
+    Wraps ``Modeling_Tool.UAT.UATConsistencyChecker``: loads the offline and online data (SQL files or DataFrames),
+    merges them on ``flow_id`` and checks coverage, main score, submodel scores, all features, time fields and
+    per-flow differences.
+
+    Parameters
+    ----------
+    config : ScoreConsistencyUATPipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``ScoreConsistencyUATPipelineConfig()`` with its
+        defaults.
+
+    Attributes
+    ----------
+    config : ScoreConsistencyUATPipelineConfig
+        The configuration in use.
+    """
 
     def __init__(self, config: ScoreConsistencyUATPipelineConfig | None = None):
         self.config = config or ScoreConsistencyUATPipelineConfig()
@@ -79,6 +224,35 @@ class ScoreConsistencyUATPipeline:
         offline_data: pd.DataFrame | None = None,
         online_data: pd.DataFrame | None = None,
     ) -> ScoreConsistencyUATPipelineResult:
+        """Run the consistency checks and write the configured reports.
+
+        Parameters
+        ----------
+        offline_data : pandas.DataFrame or None, default None
+            Offline data; overrides ``config.offline_data``. It must contain a ``flow_id`` column.
+        online_data : pandas.DataFrame or None, default None
+            Online data; overrides ``config.online_data``. It must contain a ``flow_id`` column.
+
+        Returns
+        -------
+        ScoreConsistencyUATPipelineResult
+            The checker tables, the merged data, the Excel report path and the checker itself.
+
+        Raises
+        ------
+        ValueError
+            If only one of the two DataFrames is available, or if ``n_process``, ``numeric_coercion_mode`` or
+            ``comparison_block_size`` is invalid.
+        KeyError
+            If a DataFrame has no ``flow_id`` column.
+        ImportError
+            If ``config.env_path`` is set and python-dotenv is not installed.
+
+        Notes
+        -----
+        DataFrame mode is used as soon as one of the two frames is given (as argument or in the config); then both are
+        required. Otherwise the SQL files in ``sql_dir`` are run with ``config.sqlrunner`` (``ODPSRunner()`` when None).
+        """
         from Modeling_Tool.UAT import UATConsistencyChecker
 
         cfg = self.config

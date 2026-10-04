@@ -64,6 +64,127 @@ class _LRNanFillWrapper:
 
 @dataclass
 class RejectInferencePipelineConfig:
+    """Configuration of :class:`RejectInferencePipeline`.
+
+    Parameters
+    ----------
+    output_dir : str, default "output/reject_inference"
+        Root output directory: ``datasets`` (RI datasets as CSV), ``report`` (CSV tables, performance reports, Excel
+        report, ``perf_figs`` plots) and, by default, ``models``.
+    approved_col : str, default "approved"
+        Approval flag column: 1 marks approved rows and 0 rejected rows. Rows with any other value (including missing)
+        belong to neither group.
+    target_col : str, default "badflag"
+        Performance label (1 = bad). Approved rows need it; the labels of rejected rows are inferred, so any existing
+        values are overwritten in the RI datasets.
+    score_col : str, default "prescore_prob"
+        Pre-score column holding the probability of bad (see ``ri_score_direction``). It is created, or overwritten with
+        a ``UserWarning``, when the pre-score is trained.
+    feature_cols : list of str or None, default None
+        Feature columns of the pre-score and RI models. ``None`` uses every numeric column except ``target_col``,
+        ``approved_col``, ``score_col``, ``split_col`` and a column named ``true_badflag``.
+    split_col : str or None, default None
+        Column with ``ins`` / ``oos`` / ``oot`` labels (case and surrounding spaces ignored; other values raise
+        ``ValueError``). Only INS and OOS rows enter the pipeline and need both, and OOT rows are kept aside for
+        evaluation; rows with a missing label are dropped. ``oot_data`` takes precedence over the OOT rows. Approved OOS
+        rows serve as the validation sample and are excluded from training.
+    random_state : int, default 42
+        Seed for the pre-score split, the OOT and validation sampling, the reference sampling, the random labels of the
+        inference methods and the models (unless a model param sets its own seed).
+    write_outputs : bool, default True
+        Whether to write CSV files and plots: ``datasets/ri_<method>.csv`` (see ``write_ri_datasets``) and, in ``report``,
+        ``ri_comparison_summary.csv``, ``ri_model_perf.csv``, ``oot_summary.csv``, ``model_paths.csv``,
+        ``perf_<method>.csv`` and ``perf_figs/perf_<method>.png``.
+    write_excel : bool, default True
+        Whether to write ``report/RI_Pipeline_Report.xlsx`` (its path is ``report_path``).
+    train_prescore : bool, default True
+        True trains a pre-score model on approved rows with an observed target and scores all rows into ``score_col``.
+        False reuses the supplied ``score_col``; if that column is absent the pre-score is trained anyway.
+    prescore_model_type : str, default "lgb"
+        Pre-score model: ``"lgb"``, ``"xgb"``, ``"cat"`` or ``"lr"`` (aliases ``lightgbm``, ``xgboost``, ``catboost``,
+        ``logistic``, ``logistic_regression``; case-insensitive). Anything else raises ``ValueError``.
+    prescore_params : dict, default {}
+        Model parameters that override the built-in defaults of ``prescore_model_type``.
+    prescore_test_size : float, default 0.3
+        Share of the approved rows held out as the (stratified) validation set when the pre-score is trained.
+    ri_methods : list of str, default ['simple_augment', 'hard_cutoff', 'fuzzy_augment', 'parceling']
+        Reject-inference methods to run; the aliases ``simple``, ``hard``, ``fuzzy`` and ``parcel`` are accepted. Unknown
+        names raise ``ValueError``. Results are keyed by the full method name.
+    ri_method_params : dict of str to dict, default {}
+        Per-method parameters keyed by the full method name: ``simple_augment`` ``bad_rate`` (default: mean target of the
+        reference sample), ``hard_cutoff`` ``cutoff`` (default: 25th, or 75th for ``high_good``, percentile of the bad
+        reference scores), ``fuzzy_augment`` ``weight_factor`` (1.0) and ``parceling`` ``n_parcels`` (10). Other keys, and
+        entries filed under an alias, are ignored.
+    ri_score_direction : {"high_bad", "high_good"}, default "high_bad"
+        Meaning of ``score_col``. ``"high_bad"`` means a higher score is a higher bad probability, ``"high_good"`` the
+        opposite. It is passed to the inference methods and sets the default hard cutoff and the sign of
+        ``prescore_AUC``. Any other value raises ``ValueError``.
+    train_ri_models : bool, default True
+        Whether to train a model on every RI dataset (and the benchmark) and compare their train, validation and OOT
+        performance in ``ri_model_perf``.
+    ri_model_type : str, default "lgb"
+        Model type of the RI models; same options as ``prescore_model_type``. The ``_weight`` column of
+        ``fuzzy_augment`` is passed as sample weight.
+    ri_model_params : dict, default {}
+        Model parameters that override the built-in defaults of ``ri_model_type``.
+    lr_nan_handling : {"fillna_median", "fillna_mean", "fillna_0", "raise"}, default "fillna_median"
+        NaN/Inf handling for logistic-regression models only (pre-score and RI models). The fill modes impute with values
+        learned on the training frame, re-applied at scoring time, with a ``UserWarning`` when values were filled.
+        ``"raise"`` raises ``ValueError`` on non-finite features. Gradient-boosting models ignore it.
+    include_no_ri_benchmark : bool, default True
+        Whether to also train an approved-only model named ``no_ri_benchmark`` that takes part in the ``ri_model_perf``
+        ranking; it is not added to ``ri_datasets``.
+    ri_validation_frac : float, default 0.2
+        Share of the approved training pool sampled (stratified by target) as validation data unless approved OOS rows are
+        available. Must lie in (0, 1), and ``oot_frac + ri_validation_frac`` must be below 1.
+    save_models : bool, default False
+        Whether to pickle the models with ``save_model`` into ``model_output_dir``: ``prescore_model.pkl`` (only if the
+        pre-score was trained) and ``ri_model_<method>.pkl`` for every RI model and the benchmark.
+    model_output_dir : str or None, default None
+        Folder for the model files. ``None`` uses ``<output_dir>/models``.
+    model_include_metadata : bool, default True
+        Whether the saved models carry the SMF metadata envelope (passed as ``include_metadata`` to ``save_model``).
+    write_ri_datasets : bool, default True
+        Whether to write each RI dataset as ``datasets/ri_<method>.csv``; used only when ``write_outputs`` is True.
+        Turn it off for very wide or large data.
+    ri_dataset_output_cols : list of str or None, default None
+        Columns to keep in the RI dataset CSVs (missing names trigger a ``UserWarning``). ``None`` writes all columns. The
+        in-memory ``ri_datasets`` are not affected.
+    ri_dataset_warn_mb : float, default 1024.0
+        A ``UserWarning`` is issued when a dataset is estimated at this many MB or more before the CSV is written.
+    oot_data : pandas.DataFrame or None, default None
+        External out-of-time sample used for evaluation instead of a random hold-out. It needs ``target_col`` and the
+        feature columns; rows with a missing target are dropped with a ``UserWarning`` and ``ValueError`` is raised if
+        none remains.
+    oot_frac : float, default 0.2
+        Share of the approved rows (at least one row) randomly held out as OOT when neither ``oot_data`` nor OOT rows from
+        ``split_col`` exist. Must lie in [0, 1).
+    perf_pct_bins : int, default 10
+        Number of percentile bins of ``PerformanceEvaluator`` for the model reports.
+    min_bin_prop : float, default 0.03
+        Minimum share of samples per bin in ``PerformanceEvaluator``.
+    ri_approved_data : pandas.DataFrame or None, default None
+        External approved sample used only as the reference that fits the inference rules; the approved rows of the main
+        data are still the approved part of the output. It needs ``target_col`` and the feature columns (and ``score_col``
+        unless the pre-score is trained); a missing ``score_col`` is filled with the pre-score model and only
+        ``approved_col == 1`` rows are kept when that column exists. It cannot be combined with ``ri_approved_query``,
+        ``ri_approved_func`` or ``ri_approved_scope="output_subset"``.
+    ri_approved_query : str or None, default None
+        pandas ``query`` expression selecting the reference rows among the approved rows of the main data.
+    ri_approved_func : callable or None, default None
+        Function ``f(df)`` returning a boolean mask that selects the reference rows among the approved rows of the main
+        data; applied after ``ri_approved_query`` when both are given.
+    ri_approved_frac : float or None, default None
+        Fraction in (0, 1] of the reference sample drawn at random. It cannot be combined with ``ri_approved_n``.
+    ri_approved_n : int or None, default None
+        Number of rows drawn at random from the reference sample (must be positive and not exceed its size). It cannot be
+        combined with ``ri_approved_frac``.
+    ri_approved_scope : {"reference_only", "output_subset"}, default "reference_only"
+        ``"reference_only"`` uses the reference only to fit the inference rules and keeps all approved rows in the output.
+        ``"output_subset"`` also restricts the approved rows of the output (and ``approved_data``) to the reference; it
+        is not allowed with ``ri_approved_data``.
+    """
+
     output_dir: str = "output/reject_inference"
     approved_col: str = "approved"
     target_col: str = "badflag"
@@ -117,6 +238,53 @@ class RejectInferencePipelineConfig:
 
 @dataclass
 class RejectInferencePipelineResult:
+    """Result returned by :meth:`RejectInferencePipeline.run`.
+
+    The frames may contain the helper columns ``_smf_ri_row_id`` (and ``_smf_ri_split`` with ``split_col``).
+
+    Parameters
+    ----------
+    approved_data : pandas.DataFrame
+        Approved rows used as the approved part of the RI datasets, with the pre-score: all approved rows, or only the
+        reference rows with ``ri_approved_scope="output_subset"``.
+    rejected_data : pandas.DataFrame
+        Rejected rows (``approved_col == 0``) with the pre-score and without inferred labels.
+    ri_datasets : dict of str to pandas.DataFrame
+        ``{method: dataset}`` keyed by full method name: ``approved_data`` followed by the rejected rows with inferred
+        labels, plus an ``ri_method`` column and, for ``fuzzy_augment``, a ``_weight`` column (each rejected row appears
+        twice, as bad and as good).
+    ri_summary : pandas.DataFrame
+        One row per method: ``ri_method``, ``N_total``, ``N_approved``, ``N_rejected``, ``bad_rate_appr``,
+        ``bad_rate_rej``, ``bad_rate_total`` (weighted when ``_weight`` exists), ``has_weight_col``, ``prescore_AUC``
+        (oriented so that high means high risk), ``prescore_AUC_raw`` and ``prescore_score_direction``.
+    ri_model_perf : pandas.DataFrame or None, default None
+        One row per trained model (each RI method and ``no_ri_benchmark``) with ``train_N``, ``oot_N``,
+        ``weighted_train`` and the train, validation and OOT ``AUC``, ``KS`` and ``Gini``, sorted by ``oot_AUC``
+        descending. None when ``train_ri_models`` is False.
+    best_method : str or None, default None
+        Method with the highest OOT AUC (the first row of ``ri_model_perf``); it can be ``no_ri_benchmark``. None when no
+        models were trained.
+    prescore_model : object or None, default None
+        The fitted pre-score model. None when the pre-score was not trained.
+    ri_models : dict, default {}
+        ``{method: fitted model}`` for every RI method and the benchmark; empty when ``train_ri_models`` is False.
+    report_path : str or None, default None
+        Path of the Excel report; None when ``write_excel`` is False.
+    approved_full_data : pandas.DataFrame or None, default None
+        All approved rows of the input (with pre-score), before any ``ri_approved_*`` restriction.
+    ri_approved_reference_data : pandas.DataFrame or None, default None
+        The approved reference sample that was used to fit the inference rules.
+    ri_approved_summary : pandas.DataFrame or None, default None
+        Two columns ``metric`` and ``value``: the sizes of the full approved, reference and output approved samples, the
+        number of rejected rows, the reference source and scope, the reference share and the ``ri_approved_*`` settings.
+    model_paths : dict of str to str, default {}
+        ``{key: file path}`` of the saved models (``prescore`` and the method names); empty unless ``save_models`` is
+        True.
+    oot_summary : pandas.DataFrame or None, default None
+        Two columns ``metric`` and ``value``: ``oot_source``, ``oot_raw_n``, ``oot_observed_n``,
+        ``oot_dropped_missing_target_n`` and ``oot_missing_target_rate``. None when ``train_ri_models`` is False.
+    """
+
     approved_data: pd.DataFrame
     rejected_data: pd.DataFrame
     ri_datasets: dict[str, pd.DataFrame]
@@ -134,7 +302,24 @@ class RejectInferencePipelineResult:
 
 
 class RejectInferencePipeline:
-    """Reusable reject-inference workflow for approved/rejected application data."""
+    """Reusable reject-inference workflow for approved/rejected application data.
+
+    The pipeline (optionally) trains a pre-score model on the approved rows, infers labels for the rejected rows with
+    each configured method, optionally trains a model per augmented dataset and ranks the methods by OOT AUC.
+
+    Parameters
+    ----------
+    config : RejectInferencePipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``RejectInferencePipelineConfig()`` with its defaults.
+
+    Attributes
+    ----------
+    config : RejectInferencePipelineConfig
+        The configuration in use.
+    predict_positive_nan_stats : dict
+        ``{method: {dataset: count}}`` number of non-finite predictions per evaluation dataset (``train``,
+        ``validation``, ``oot``) of each model trained by ``run``; empty before the first run.
+    """
 
     _METHOD_ALIASES = {
         "simple": "simple_augment",
@@ -381,6 +566,37 @@ class RejectInferencePipeline:
         return train_fit, val_fit, fill_values
 
     def run(self, data: pd.DataFrame) -> RejectInferencePipelineResult:
+        """Run the reject-inference workflow on the approved and rejected applications in ``data``.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Application data with all approved (``approved_col == 1``) and rejected (``approved_col == 0``) rows. It must
+            contain ``approved_col``, the feature columns, ``split_col`` when configured, ``target_col`` whenever the
+            pre-score is trained (``train_prescore`` is True or ``score_col`` is absent) and ``score_col`` when
+            ``train_prescore`` is False. The input frame is not modified.
+
+        Returns
+        -------
+        RejectInferencePipelineResult
+            Approved and rejected data, the RI datasets and summary, the model comparison, the best method and the report
+            and model paths.
+
+        Raises
+        ------
+        KeyError
+            If a required column is missing from ``data``, ``oot_data`` or ``ri_approved_data``.
+        ValueError
+            If the configuration is inconsistent (unknown model type, method or direction, invalid fractions, conflicting
+            ``ri_approved_*`` settings, invalid ``split_col`` labels), if no approved row has an observed target for the
+            pre-score, or if a training, validation, OOT or reference sample is empty.
+
+        Notes
+        -----
+        Warnings are issued when ``train_prescore=True`` overwrites an existing ``score_col``, when rows with a missing
+        target are dropped from an external OOT, and when non-finite values are imputed or predicted. With
+        ``save_models=True`` the models are pickled even if ``write_outputs`` is False.
+        """
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
         self._validate_input(data, feature_cols)

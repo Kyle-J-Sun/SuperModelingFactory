@@ -21,6 +21,114 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class ScoreComparisonPipelineConfig:
+    """Configuration of :class:`ScoreComparisonPipeline`.
+
+    Parameters
+    ----------
+    output_dir : str, default "output/score_comparison"
+        Root output directory. CSV files and the Excel report go to ``<output_dir>/report``.
+    target_col : str, default "badflag"
+        Binary target column (1 = bad). It must exist in the input data.
+    score_cols : list of str or None, default None
+        All score columns to compare. Without ``base_score`` the first entry is the base score and the rest are the
+        comparison scores. When None, both ``base_score`` and ``comp_scores`` must be given, otherwise ``ValueError``.
+    base_score : str or None, default None
+        Baseline score column. ``None`` uses ``score_cols[0]``.
+    comp_scores : list of str or None, default None
+        Comparison score columns. ``None`` uses the entries of ``score_cols`` other than ``base_score``.
+    weight_col : str or None, default None
+        Sample-weight column (must exist in the data). It weights the performance tables (``global_perf`` and
+        ``group_perf``) and ``gains``; the cross-risk tables (``cross_results`` and ``pairwise_cross``) are unweighted.
+    split_col : str or None, default None
+        Column with evaluation-set labels (any non-empty names such as ``ins`` / ``oos`` / ``oot``). Values are
+        stripped and lower-cased and must include at least one non-empty value. It only adds one entry to
+        ``group_perf`` (when ``group_specs`` is None); it does not split the data for the other tables.
+    random_state : int, default 42
+        Not used by this pipeline; kept so that all high-level Pipeline configs share the same interface.
+    write_outputs : bool, default True
+        Whether to write CSV files to ``<output_dir>/report``: ``step1_global_perf.csv``, ``step2_by_<group>.csv``,
+        ``step3_gains_with_metrics.csv``, ``step4_<score>__<cross_var>__<metric>.csv`` and ``step4_pairwise.csv``.
+    write_excel : bool, default True
+        Whether to write ``<output_dir>/report/Score_Comparison_Report.xlsx`` (its path is returned in
+        ``report_path``).
+    nbins : int, default 10
+        Number of bins for the performance tables, the gains tables and both cross-risk analyses.
+    min_bin_prop : float, default 0.02
+        Minimum share of samples per bin.
+    equal_freq : bool, default True
+        Whether to use equal-frequency binning.
+    min_data_size : int, default 50
+        Minimum number of rows a group value needs to be evaluated (smaller groups are skipped). It is also the
+        default for ``group_min_size``.
+    precision : int, default 5
+        Decimal precision of bin boundaries and of the score ranges (not applied to the ``cross_vars`` tables).
+    include_missing : bool, default False
+        Whether missing values get their own bin in the gains and cross-risk tables. The performance tables always
+        exclude missing scores. With ``drop_missing_group_values=False`` it also turns the missing group tokens into a
+        ``[Missing]`` group.
+    fillna : any, default -999999
+        Value used to fill missing scores before binning the gains tables and the ``cross_vars`` cross-risk tables.
+    positive_score_only : bool, default True
+        Evaluate the performance tables only on rows where the score is greater than 0, so zero, negative and missing
+        scores are dropped. It does not change the gains tables, and the pairwise cross always requires both scores to
+        be greater than 0.
+    group_missing_values : list, default ['', ' ', 'NA', 'NULL', 'nan']
+        Text values (compared after stripping whitespace) treated as missing in the grouping columns (``split_col``,
+        ``time_dims``, ``population_dims`` and the columns of ``group_specs``). Only text columns are inspected, and all
+        their values are stripped of surrounding whitespace.
+    drop_missing_group_values : bool, default True
+        True sets those values to missing so that they do not form a group. False keeps them as ordinary group labels,
+        or as ``[Missing]`` when ``include_missing`` is True.
+    time_dims : list of str, default ['apply_month']
+        Time columns; each one is evaluated as a group in ``group_perf``. Columns absent from the data are skipped
+        silently.
+    population_dims : list of str, default ['channel']
+        Population columns; each one is evaluated as a group in ``group_perf``. Columns absent from the data are
+        skipped silently.
+    segment_dims : list of str or None, default None
+        Alias of ``population_dims``: when not None its content replaces ``population_dims`` at construction.
+    include_time_population_cross : bool, default True
+        Whether to also evaluate every population column crossed with every time column (group name
+        ``<population>_x_<time>``).
+    group_min_size : int or None, default None
+        Minimum rows per group value in the group evaluation (an entry of ``group_specs`` may set its own
+        ``min_size``). ``None`` uses ``min_data_size``.
+    group_specs : dict or list or None, default None
+        Custom grouping that replaces the automatic groups (``split_col``, ``time_dims``, ``population_dims`` and their
+        cross). Either ``{name: [columns]}`` or a list whose items are column lists or dicts with ``columns`` (or
+        ``cols``) and optional ``name`` and ``min_size``. Specs with a column missing from the data are skipped
+        silently; invalid specs raise ``ValueError``.
+    gains_add_func : callable or None, default None
+        Function ``f(df) -> pandas.Series`` applied to every gains bin to add extra metric columns. ``None`` adds the
+        mean of every ``custom_metric_cols`` column present in the data as ``<col>_mean``.
+    custom_metric_cols : list of str, default ['credit_limit', 'age', 'apr']
+        Business columns averaged in the default gains metrics and used in the default ``cross_metrics`` (mean) and
+        ``pairwise_cross_agg_dict`` (count and mean). Columns absent from the data are skipped silently.
+    gains_display_metric_list : list of str, default ['MIN', 'MAX', 'N', 'PROP', 'AVG_SCORE', 'AVG_BAD', 'CUM_BAD_PCT', 'KS_PER_BIN', 'LIFT', 'RANK_ORDER_BUMP']
+        Gains columns to display. It is passed to the evaluation tool, which applies it only when no ``add_func`` is
+        given; this pipeline always supplies one, so the ``gains`` result currently keeps all gains columns.
+    cross_vars : list of str, default []
+        Second-dimension variables for ``cross_results``: every score in the score list is crossed with each variable
+        for each ``cross_metrics`` entry. Variables absent from the data are skipped with a warning. The default is no
+        cross analysis (in 0.4.0 it stopped defaulting to ``["rating"]``).
+    cross_metrics : dict, default {}
+        ``{metric_name: (column, aggregation)}`` evaluated in each cross table; the aggregation is a pandas aggregation
+        name or a callable. An empty dict uses the bad rate (mean of ``target_col``) and the mean of each
+        ``custom_metric_cols`` column present in the data. Invalid items raise ``TypeError``, ``ValueError`` or
+        ``KeyError``.
+    cross_binning_numeric : list of bool or bool, default [True, False]
+        ``[bin the score, bin the cross variable]`` for numeric columns in ``cross_results``. Give a two-element list: a
+        single ``bool`` passes the annotation but ``cross_risk`` indexes the value and raises ``TypeError``. It does not
+        affect ``pairwise_cross``.
+    pairwise_cross_enabled : bool, default True
+        Whether to compute ``pairwise_cross``, the cross of the base score with each comparison score.
+    pairwise_cross_agg_dict : dict or None, default None
+        ``{column: aggregation or [aggregations]}`` evaluated in the pairwise cross (a row count and share of
+        ``flow_id`` is always added). ``None`` uses the count and bad rate of ``target_col`` plus the count and mean of
+        each ``custom_metric_cols`` column present. Columns that do not exist raise ``KeyError`` and a wrong format
+        raises ``TypeError``.
+    """
+
     output_dir: str = "output/score_comparison"
     target_col: str = "badflag"
     score_cols: list[str] | None = None
@@ -83,6 +191,28 @@ class ScoreComparisonPipelineConfig:
 
 @dataclass
 class ScoreComparisonPipelineResult:
+    """Result returned by :meth:`ScoreComparisonPipeline.run`.
+
+    Parameters
+    ----------
+    global_perf : pandas.DataFrame
+        Performance (``N``, ``KS``, ``AUC``, top/bottom decile lift and so on) of the base and comparison scores on the
+        whole sample. One row per score (``score_name``); ``sample_scope`` is ``"global"``.
+    group_perf : dict of str to pandas.DataFrame
+        Same performance metrics per group value, keyed by group name: ``split_col``, each time and population
+        column, ``<population>_x_<time>`` crosses, or the ``group_specs`` names. Empty when no group is evaluated.
+    gains : pandas.DataFrame
+        Gains table of every score on the whole sample (one block of bins per ``score_name``), with the metrics of
+        ``gains_add_func`` or the ``custom_metric_cols`` means.
+    cross_results : dict of str to pandas.DataFrame
+        Cross-risk tables keyed ``<score>__<cross_var>__<metric_name>``. Empty when ``cross_vars`` is empty.
+    pairwise_cross : pandas.DataFrame or None, default None
+        Long table with columns ``base_scr_range``, ``eval_metric``, ``score_name``, ``comp_scr_range`` and ``value``
+        for the base score crossed with each comparison score. None when ``pairwise_cross_enabled`` is False.
+    report_path : str or None, default None
+        Path of the Excel report; None when ``write_excel`` is False.
+    """
+
     global_perf: pd.DataFrame
     group_perf: dict[str, pd.DataFrame]
     gains: pd.DataFrame
@@ -92,12 +222,49 @@ class ScoreComparisonPipelineResult:
 
 
 class ScoreComparisonPipeline:
-    """Reusable multi-score comparison workflow built on Model_Evaluation_Tool."""
+    """Reusable multi-score comparison workflow built on Model_Evaluation_Tool.
+
+    Parameters
+    ----------
+    config : ScoreComparisonPipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``ScoreComparisonPipelineConfig()`` with its
+        defaults, which still requires ``base_score`` and ``comp_scores`` or ``score_cols`` to be set before ``run``.
+
+    Attributes
+    ----------
+    config : ScoreComparisonPipelineConfig
+        The configuration in use.
+    """
 
     def __init__(self, config: ScoreComparisonPipelineConfig | None = None):
         self.config = config or ScoreComparisonPipelineConfig()
 
     def run(self, data: pd.DataFrame) -> ScoreComparisonPipelineResult:
+        """Compare the configured scores globally, per group, by gains and by cross risk.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Scored sample. It must contain ``target_col``, the score columns and ``weight_col`` / ``split_col`` when
+            configured; time, population, ``group_specs`` and ``cross_vars`` columns are optional. A missing
+            ``flow_id`` column is created as a running number. The input frame is not modified.
+
+        Returns
+        -------
+        ScoreComparisonPipelineResult
+            Global and group performance, gains, cross-risk tables and the Excel report path.
+
+        Raises
+        ------
+        ValueError
+            If neither ``score_cols`` nor ``base_score`` with ``comp_scores`` is configured, if ``split_col`` has no
+            non-empty value, or if a ``cross_metrics`` / ``group_specs`` entry is malformed.
+        KeyError
+            If a required column (target, scores, ``weight_col``, ``split_col``) or a column referenced by
+            ``cross_metrics`` / ``pairwise_cross_agg_dict`` is missing.
+        TypeError
+            If ``cross_metrics`` or ``pairwise_cross_agg_dict`` has an invalid structure.
+        """
         from Modeling_Tool import EvaluationPipeline, Model_Evaluation_Tool, cross_risk
 
         cfg = self.config

@@ -4,7 +4,48 @@ import os
 import pandas as pd
 
 def single_model_perf(em, ws, fig_path, res_path, model_name, image_size, text = None):
-    """ Put Single Model Performance Summary. """
+    """ Put Single Model Performance Summary.
+
+    Writes an optional heading, the performance figure of one model and its performance table,
+    one below the other, at the cursor of ``em``.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    fig_path : str
+        Path of the performance figure (image file). The file is resized in place to ``image_size``,
+        so the original image is overwritten.
+    res_path : str
+        Path of the performance table (CSV file), such as the one written by
+        ``PerformanceEvaluator.evaluate(rpt_save_path=...)``. It must contain the columns
+        ``Top10%_TargetRate``, ``avgTrue`` and ``AUC``.
+    model_name : str
+        Model name used in the table title ``Performance for <model_name>``.
+    image_size : tuple of int
+        Size of the figure as ``(rows, columns)`` in worksheet cells, not pixels.
+    text : str or None, default None
+        Optional heading written with ``em.write_text_content`` before the figure; it may start
+        with a format tag such as ``{##}``. End it with a newline, otherwise the figure is placed
+        over the heading.
+
+    Returns
+    -------
+    tuple of list of int
+        ``(img_loc, df_loc)``: the zero-based cell ranges ``[first_row, first_col, last_row,
+        last_col]`` of the figure and of the table.
+
+    Notes
+    -----
+    The columns ``Top10%_Lift`` (``Top10%_TargetRate / avgTrue``) and ``AUC_Shift`` (AUC of the
+    previous row divided by the AUC of this row, minus 1) are computed and added to the table
+    (replacing columns of the same name). The table is rounded to 3 decimals and written with
+    its header and without the index. Sets ``em.gap_number`` to 1 (it is 0 while the heading and
+    the figure are written).
+    """
     
     em.gap_number = 0
     if text is not None:
@@ -22,7 +63,44 @@ def single_model_perf(em, ws, fig_path, res_path, model_name, image_size, text =
     return img_loc, df_loc
 
 def write_var_info(em, ws, var, var_name, data_dict, var_info_title = "", skipby = "row"):
-    """ Write Var Information Table. """
+    """ Write Var Information Table.
+
+    Writes the rows of the data dictionary that describe one variable as a table and returns
+    the description of the variable.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    var : str
+        Variable to look up.
+    var_name : str
+        Name of the column of ``data_dict`` that holds the variable names, matched against ``var``.
+    data_dict : pandas.DataFrame
+        Data dictionary. It must contain the column named by ``var_name`` and a column named
+        ``description``.
+    var_info_title : str, default ""
+        Title written above the table; an empty string writes no title.
+    skipby : str, default "row"
+        Where the cursor goes after the table: ``"row"`` below it, ``"col"`` to its right, None
+        leaves it unchanged.
+
+    Returns
+    -------
+    tuple
+        ``(description, info_loc)``: the ``description`` of the first row of ``data_dict`` whose
+        ``var_name`` column equals ``var``, and the zero-based cell range ``[first_row,
+        first_col, last_row, last_col]`` of the written table.
+
+    Notes
+    -----
+    The table holds every column of the matching rows of ``data_dict`` (header included, index
+    excluded). If ``var`` is not found in ``data_dict[var_name]`` the function fails with an
+    ``IndexError``. Sets ``em.gap_number`` to 0.
+    """
     description = data_dict.loc[data_dict[var_name] == f"{var}", "description"].values[0]
     
     em.gap_number = 0
@@ -35,7 +113,54 @@ def write_var_info(em, ws, var, var_name, data_dict, var_info_title = "", skipby
 
 
 def plot_woe(em, ws, var, woe_bins, x_col, spec_missing_value = -99999, chart_size = (20, 5), var_name = "var_name", description = "", skipby = "row"):
-    """ Plot WOE Table. """
+    """ Plot WOE Table.
+
+    Draws a native Excel chart for the WOE bins of one variable: stacked columns with the bad
+    (``n1``) and good (``n0``) counts, the bad rate (``tr``) as a line on the secondary axis, and
+    two dashed reference lines with the mean bad rate of the variable, with and without the
+    missing-value bin.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    var : str
+        Variable to plot: the rows of ``woe_bins`` whose ``var_name`` column equals ``var``.
+    woe_bins : pandas.DataFrame
+        WOE bin table with one row per bin. Required columns: the variable column named by
+        ``var_name``, ``n1`` (bad count), ``n0`` (good count), ``tr`` (bad rate), ``iv`` (IV of
+        the bin), ``bin_value`` (bin label, as str) and the column named by ``x_col``.
+    x_col : str
+        Column of ``woe_bins`` used as the x-axis labels, usually ``"bin_value"``.
+    spec_missing_value : int or float, default -99999
+        Special value that codes missing values. Bins whose ``bin_value`` starts with
+        ``[<spec_missing_value>`` are left out of the "mean without missing" line.
+    chart_size : tuple of int, default (20, 5)
+        Size of the chart as ``(rows, columns)`` in worksheet cells.
+    var_name : str, default "var_name"
+        Name of the column of ``woe_bins`` that holds the variable names.
+    description : str, default ""
+        Text used as the x-axis title.
+    skipby : str, default "row"
+        Where the cursor goes after the chart: ``"row"`` below it, ``"col"`` to its right, None
+        leaves it unchanged.
+
+    Returns
+    -------
+    list of int
+        Zero-based cell range ``[first_row, first_col, last_row, last_col]`` of the chart.
+
+    Notes
+    -----
+    The chart title is the variable name followed by ``(iv: <IV>)``, where the IV is the sum of
+    the ``iv`` column over the rows of the variable, rounded to 4 decimals. The two reference
+    lines are simple, unweighted means of ``tr`` over the bins. The column ``bin_value`` is read
+    by that name whatever ``x_col`` is (``KeyError`` if it is missing). If ``var`` has no row in
+    ``woe_bins``, an empty chart is still written. Sets ``em.gap_number`` to 1.
+    """
     
 
     em.gap_number = 1
@@ -89,7 +214,45 @@ def plot_woe(em, ws, var, woe_bins, x_col, spec_missing_value = -99999, chart_si
 
 
 def get_woe_plot_report(em, ws, analysis_dir, varlist, means_rpt = None):
-    """ Generate Plots for WOE BINS in Excel."""
+    """ Generate Plots for WOE BINS in Excel.
+
+    Older layout of the WOE plot report. Under the heading ``Bivar Table``, every variable of
+    ``varlist`` gets one block: its WOE plot and its grouped WOE plot side by side and, if
+    ``means_rpt`` is given, a table of descriptive statistics to their right. Column A repeats
+    the variable name on every row of its block.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    analysis_dir : str
+        Directory of the analysis output. It must contain ``numvars_woe.csv`` and
+        ``numvars_woe_group.csv`` (both are read, but their content is not used afterwards) and
+        the sub-directory ``woe_plot`` with the images ``<var>_woe.png`` and
+        ``<var>_woe_group.png``.
+    varlist : list of str
+        Variables to report. A variable is skipped when ``woe_plot/<var>_woe_group.png`` does not
+        exist; for every other variable ``woe_plot/<var>_woe.png`` must exist too
+        (``FileNotFoundError`` otherwise).
+    means_rpt : pandas.DataFrame or None, default None
+        Optional descriptive statistics, one row per variable, with the variable name in a column
+        named ``attribute``. The row of each variable is written rounded to 2 decimals and
+        transposed, under the title ``Means for <var>``.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    Every image is resized in place to 30 rows by 9 columns of worksheet cells, so the PNG files
+    are overwritten. The function moves the cursor of ``em`` to fixed locations and sets
+    ``em.gap_number`` to 0 once at least one variable has been written.
+    """
     
     train_image_dir = f"{analysis_dir}/woe_plot/"
 
@@ -171,7 +334,45 @@ def get_woe_plot_report(em, ws, analysis_dir, varlist, means_rpt = None):
 
 
 def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt = None):
-    """ Generate Plots for WOE BINS in Excel."""
+    """ Generate Plots for WOE BINS in Excel.
+
+    Under the heading ``Bivar Table``, every variable of ``varlist`` gets one block: its overall
+    WOE plot and its WOE plot by group side by side and, if ``means_rpt`` is given, a table of
+    descriptive statistics to their right. Column A repeats the variable name on every row of
+    its block.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    woe_plot_dir : str
+        Directory with the plot images ``<var>.png`` (overall plot) and ``<var>_<grp_name>.png``
+        (plot by group), as written by ``WOE_Master.plot_bivar_graph``.
+    grp_name : str
+        Suffix of the by-group images. A variable is skipped when ``<var>_<grp_name>.png`` does
+        not exist; for every other variable ``<var>.png`` must exist too
+        (``FileNotFoundError`` otherwise).
+    varlist : list of str
+        Variables to report, in the order of the blocks.
+    means_rpt : pandas.DataFrame or None, default None
+        Optional descriptive statistics, one row per variable, with the variable name in a column
+        named ``attribute``. The row of each variable is written rounded to 2 decimals and
+        transposed, under the title ``Means for <var>``.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    Every image is resized in place to 40 rows by 9 columns of worksheet cells, so the PNG files
+    are overwritten. The function moves the cursor of ``em`` to fixed locations and sets
+    ``em.gap_number`` to 0 once at least one variable has been written.
+    """
     
     train_image_dir = woe_plot_dir
 
@@ -247,7 +448,40 @@ def get_woe_plot_report_new(em, ws, woe_plot_dir, grp_name, varlist, means_rpt =
 
 
 def get_multi_model_perf_report(em, ws, eval_img_path, eval_res_path):
-    """ Create Multi-models Evaluation Report. """
+    """ Create Multi-models Evaluation Report.
+
+    Writes a fixed layout that compares five models: XGBoost and LightGBM on the original
+    features, then logistic regression, XGBoost and LightGBM on the WOE-transformed features.
+    Each model block is a performance figure followed by its performance table (see
+    ``single_model_perf``).
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    eval_img_path : str
+        Directory with the five performance figures ``xgb_original_perf.jpg``,
+        ``lgb_original_perf.jpg``, ``lr_woe_perf.jpg``, ``xgb_woe_perf.jpg`` and
+        ``lgb_woe_perf.jpg``. They are resized in place.
+    eval_res_path : str
+        Directory with the five matching performance tables, named like the figures with the
+        extension ``.csv``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The file names, the order of the models and the headings (``Multi-Model Evaluation
+    (Untuned)``, ``Using Third-Party Features Directly``, ``Modeling on WOE-Transformed
+    Features``) are fixed. The function registers the formats ``CUS_#``, ``CUS_##`` and
+    ``bg_tmp`` on ``em`` (a name that is already registered is kept) and leaves
+    ``em.gap_number`` at 1.
+    """
     
     image_size = (39, 13)
     init_format = {
@@ -315,7 +549,39 @@ def get_multi_model_perf_report(em, ws, eval_img_path, eval_res_path):
     return None
 
 def get_multi_model_varimp(em, ws, raw_varimp = None, woe_varimp = None):
-    """ Varimp for Multi Model Evaluation. """
+    """ Varimp for Multi Model Evaluation.
+
+    Writes the heading ``Feature Importance Evaluation`` and the variable-importance tables of
+    several models: the original-feature table and, to its right, the WOE-feature table.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    raw_varimp : pandas.DataFrame or None, default None
+        Importance of the original features, with the columns ``variable``, ``xgb_rank``,
+        ``xgb_varimp``, ``lgb_rank`` and ``lgb_varimp`` (other columns are dropped). None skips
+        this table.
+    woe_varimp : pandas.DataFrame or None, default None
+        Importance of the WOE features, with the columns ``variable``, ``lr_rank``,
+        ``coefficient``, ``xgb_rank``, ``xgb_varimp``, ``lgb_rank`` and ``lgb_varimp`` (other
+        columns are dropped). None skips this table.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    The heading uses the format ``CUS_#``, which must be registered on ``em`` beforehand (for
+    example with ``em.add_new_format``), otherwise a ``KeyError`` is raised. The tables are
+    written under the titles ``Variable Importance (Original Feature)`` and ``Variable
+    Importance (WOE-ed Feature)``, rounded to 4 decimals. Sets ``em.gap_number`` to 1.
+    """
     
     ################################# Varimp Worksheet ##################################
     em.write_text_content(worksheet=ws, input_text="{CUS_#} Feature Importance Evaluation \n \n")
@@ -335,7 +601,34 @@ def get_multi_model_varimp(em, ws, raw_varimp = None, woe_varimp = None):
     return 0
 
 def get_fnl_model_report(em, ws, result_dir):
-    """ Create Final Model Performance Report. """
+    """ Create Final Model Performance Report.
+
+    Writes a fixed layout for a final XGBoost model: the headings ``Final Model Evaluation`` and
+    ``Modeling on Original Features``, then the performance figure and table of the model (see
+    ``single_model_perf``). The headings and the table title say ``XGBoost (Without Monotonic
+    Constraints)`` and ``XGBoost (Without MC)``; for any other model use ``single_model_perf``.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    result_dir : str
+        Directory with the figure ``xgb_fnl_model_perf.jpg`` (resized in place) and the
+        performance table ``xgb_fnl_model_perf.csv``.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    Registers the formats ``CUS_#`` and ``CUS_##`` on ``em`` (a name that is already registered
+    is kept) and leaves ``em.gap_number`` at 1.
+    """
     
     image_size = (39, 13)
     init_format = {
@@ -368,7 +661,33 @@ def get_fnl_model_report(em, ws, result_dir):
 
 
 def get_model_varimp(em, ws, varimp):
-    """ Varimp for Multi Model Evaluation. """
+    """ Varimp for a single model: write one variable-importance table.
+
+    Writes the heading ``Feature Importance Evaluation`` and one importance table titled
+    ``Variable Importance``.
+
+    Parameters
+    ----------
+    em : ExcelMaster
+        ExcelMaster instance that writes the workbook; its cursor (``curr_row`` / ``curr_col``)
+        decides where the content is written.
+    ws : xlsxwriter.worksheet.Worksheet
+        Worksheet to write on, as returned by ``em.add_worksheet``.
+    varimp : pandas.DataFrame
+        Variable-importance table (any columns). It is rounded to 4 decimals and written with its
+        header and without the index.
+
+    Returns
+    -------
+    int
+        Always 0.
+
+    Notes
+    -----
+    The heading uses the format ``CUS_#``, which must be registered on ``em`` beforehand (for
+    example with ``em.add_new_format``), otherwise a ``KeyError`` is raised. Sets
+    ``em.gap_number`` to 1.
+    """
     
     ################################# Varimp Worksheet ##################################
     em.write_text_content(worksheet=ws, input_text="{CUS_#} Feature Importance Evaluation \n \n")

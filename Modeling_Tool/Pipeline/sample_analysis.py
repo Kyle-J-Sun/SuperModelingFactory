@@ -14,6 +14,75 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class SampleAnalysisPipelineConfig:
+    """Configuration of :class:`SampleAnalysisPipeline`.
+
+    The defaults for the column names (``target_cols``, ``time_dims``, ``population_dims``, ``profile_cols``,
+    ``approved_col``) match one particular dataset. ``run`` raises ``KeyError`` when a configured column is missing from
+    the data, so override them for your own data.
+
+    Parameters
+    ----------
+    target_cols : list of str, default ['y_flag_dpd7_in_mob1', 'y_flag_dpd7_in_mob3', 'y_flag_dpd7_in_mob6', 'y_flag_dpd7_in_mob12']
+        Candidate target label columns (1 = bad). Each target is analysed separately and only rows where the label is
+        not null (mature rows) take part.
+    time_col : str, default "apply_time"
+        Application time column; converted with ``pandas.to_datetime`` on a copy of the data.
+    time_dims : list of str, default ['apply_week', 'apply_month', 'apply_quarter']
+        Existing time-period columns used for the bad-rate and profile summaries (alone and crossed with
+        ``population_dims``).
+    population_dims : list of str, default ['channel', 'strategy_version']
+        Existing population columns used for the bad-rate and profile summaries (alone and crossed with
+        ``time_dims``).
+    profile_cols : list of str, default ['age', 'income', 'education', 'credit_limit']
+        Columns profiled in ``profile_summary``: the missing rate for every column, mean and median for numeric columns,
+        and number of distinct values, top value, its count and its share for the other columns. All must exist in the
+        data.
+    oot_time_dim : str, default "apply_month"
+        Column whose sorted distinct values define the out-of-time (OOT) windows: the last ``N`` distinct values among a
+        target's mature rows form the OOT sample.
+    oot_windows : list of int, default [1, 2, 3, 6]
+        Candidate OOT window lengths ``N`` in ``oot_time_dim`` periods.
+    ins_oos_ratios : list of float, default [0.7, 0.75, 0.8]
+        Candidate INS shares of the non-OOT pool; the OOS share is ``1 - ratio``. The pool is split with
+        ``SampleSplitter(stratify=True)``, falling back to an unstratified split when stratification fails.
+    random_seeds : range or list of int or tuple of int, default range(3000, 3020)
+        Random seeds tried for every INS/OOS split. The number of candidates per target is
+        ``len(oot_windows) * len(ins_oos_ratios) * len(random_seeds)``.
+    min_sample_size : int, default 500
+        Minimum rows required in each of INS, OOS and OOT for a candidate to be eligible for the recommendation. If a
+        target has no eligible candidate, all of its candidates are considered.
+    output_dir : str, default "output/sample_analysis"
+        Directory for the CSV files, the Excel report and the optional split files.
+    write_outputs : bool, default True
+        Whether to write the five summary tables as ``<table_name>.csv`` files in ``output_dir``.
+    write_excel : bool, default True
+        Whether to write ``Sample_Analysis_Report.xlsx`` (a ``Charts`` sheet plus one sheet per table) in
+        ``output_dir``.
+    approved_col : str or None, default "is_approved"
+        Approval flag column (1 = approved) used to count ``n_approved_observed`` in ``label_coverage_summary``. If it
+        is set but absent from the data a ``UserWarning`` is issued and that count is NaN; ``None`` turns the count off.
+    dry_run : bool, default False
+        True makes ``run`` validate the input and return only the split-count estimate (a one-row
+        ``split_candidate_summary``, the other tables empty, ``output_paths`` empty) without any analysis or file
+        output.
+    id_col : str or None, default None
+        Unique row identifier column, required when ``materialize_split`` is True (``ValueError`` if empty,
+        ``KeyError`` if absent from the data). It must have no duplicates among the mature rows of any target.
+    materialize_split : bool, default False
+        True replays the recommended (OOT window, ratio, seed) of every target into row-level INS/OOS/OOT labels
+        (``row_level_split``) and an audit record (``split_artifact``). A ``ValueError`` is raised if no recommendation
+        exists.
+    oot_cutoff : any, default None
+        Used only when ``materialize_split`` is True: the OOT sample becomes the mature rows with
+        ``oot_time_dim >= oot_cutoff`` (artifact ``oot_basis="cutoff"``) instead of the recommended trailing window, and
+        the INS/OOS pool is rebuilt from that boundary. The candidate statistics still use the trailing windows.
+    split_col_name : str, default "sample_split"
+        Name of the label column in ``row_level_split``; its values are ``"ins"``, ``"oos"`` and ``"oot"``.
+    persist_split_map : bool, default False
+        With ``materialize_split=True``, write ``row_level_split.csv`` and ``split_artifact.json`` to ``output_dir``
+        (even when ``write_outputs`` and ``write_excel`` are False) and add their absolute paths to ``output_paths``.
+    """
+
     target_cols: list[str] = field(
         default_factory=lambda: [
             "y_flag_dpd7_in_mob1",
@@ -59,6 +128,41 @@ class SampleAnalysisPipelineConfig:
 
 @dataclass
 class SampleAnalysisPipelineResult:
+    """Result returned by :meth:`SampleAnalysisPipeline.run`.
+
+    Parameters
+    ----------
+    label_coverage_summary : pandas.DataFrame
+        One row per target: ``target_col``, ``approved_col``, ``n_total``, ``n_observed``, ``observed_rate``,
+        ``bad_rate``, ``apply_time_min``, ``apply_time_max`` (over observed rows) and ``n_approved_observed``.
+    segment_bad_rate_summary : pandas.DataFrame
+        Mature-row counts and bad rates per target and group: ``target_col``, ``group_type`` (``global``, ``time``,
+        ``population`` or ``time_x_population``), ``group_cols``, ``group_value``, ``n`` and ``bad_rate``.
+    profile_summary : pandas.DataFrame
+        Same group keys as ``segment_bad_rate_summary`` with ``n``, ``bad_rate`` and the profile statistics of every
+        ``profile_cols`` column (``<col>_missing_rate``, ``<col>_mean`` / ``<col>_median`` for numeric columns,
+        ``<col>_nunique`` / ``<col>_top`` / ``<col>_top_count`` / ``<col>_top_rate`` for the others).
+    split_candidate_summary : pandas.DataFrame
+        One row per target, OOT window, INS ratio and seed with the OOT periods, sample sizes (``n_ins``, ``n_oos``,
+        ``n_oot``), bad rates (``bad_rate_ins``, ``bad_rate_oos``, ``bad_rate_oot``), the pairwise absolute gaps and
+        ``max_abs_bad_rate_gap``. With ``dry_run=True`` it holds a single row with the split-count estimate instead.
+    split_recommendation : pandas.DataFrame
+        One row per target: the eligible candidate with the smallest ``max_abs_bad_rate_gap`` (ties go to the larger
+        ``n_oot``, then the ratio closest to 0.75), with the extra columns ``ratio_distance_to_75_25`` and
+        ``recommend_reason``. Empty when there are no candidates.
+    output_paths : dict of str to str
+        Absolute paths of the files written: one entry per table name (CSV), ``excel_report``, and ``row_level_split``
+        and ``split_artifact`` when ``persist_split_map`` is used. Empty when nothing was written.
+    row_level_split : pandas.DataFrame or None, default None
+        None unless ``materialize_split=True``. Otherwise a long frame with the ``id_col`` column, a ``target_col``
+        column holding the target name and the ``split_col_name`` column (``ins`` / ``oos`` / ``oot``), with one row per
+        mature row of each target.
+    split_artifact : dict or None, default None
+        None unless ``materialize_split=True``. Audit record with ``split_col_name``, ``id_col``, ``smf_version`` and,
+        per target, the seed, INS ratio, OOT basis (``window`` or ``cutoff``) and specification, the row counts and
+        hashes of the sorted ids of each segment (``ins``, ``oos``, ``oot``, ``full``).
+    """
+
     label_coverage_summary: pd.DataFrame
     segment_bad_rate_summary: pd.DataFrame
     profile_summary: pd.DataFrame
@@ -72,7 +176,18 @@ class SampleAnalysisPipelineResult:
 
 
 class SampleAnalysisPipeline:
-    """Analyze label maturity, segment drift, and INS/OOS/OOT split stability."""
+    """Analyze label maturity, segment drift, and INS/OOS/OOT split stability.
+
+    Parameters
+    ----------
+    config : SampleAnalysisPipelineConfig or None, default None
+        Pipeline configuration. ``None`` (or any falsy value) uses ``SampleAnalysisPipelineConfig()`` with its defaults.
+
+    Attributes
+    ----------
+    config : SampleAnalysisPipelineConfig
+        The configuration in use.
+    """
 
     def __init__(self, config: SampleAnalysisPipelineConfig | None = None):
         self.config = config or SampleAnalysisPipelineConfig()
@@ -82,6 +197,24 @@ class SampleAnalysisPipeline:
 
         If `data` is provided, refine the OOT window count against the actual number of
         distinct oot_time_dim values available (some windows may collapse if history is short).
+
+        Parameters
+        ----------
+        data : pandas.DataFrame or None, default None
+            Optional data. When it contains the ``oot_time_dim`` column, the number of distinct non-null periods in it is
+            added to the estimate.
+
+        Returns
+        -------
+        dict
+            ``n_targets``, ``n_oot_windows``, ``n_ins_oos_ratios``, ``n_random_seeds`` and ``estimated_max_splits`` (their
+            product). With ``data``, also ``available_oot_periods`` (distinct ``oot_time_dim`` values over all rows) and
+            ``windows_usable`` (number of ``oot_windows`` smaller than that count).
+
+        Notes
+        -----
+        Nothing is computed from the labels, so the real number of candidates can be lower: a target without usable
+        OOT and pool segments contributes none.
         """
         cfg = self.config
         n_targets = len(cfg.target_cols)
@@ -103,6 +236,36 @@ class SampleAnalysisPipeline:
         return info
 
     def run(self, data: pd.DataFrame) -> SampleAnalysisPipelineResult:
+        """Run the label coverage, segment, profile and split-stability analyses.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Sample to analyse. It must contain ``time_col``, ``oot_time_dim``, every column of ``target_cols``,
+            ``time_dims``, ``population_dims`` and ``profile_cols``, and ``id_col`` when ``materialize_split`` is True.
+            The input frame is not modified.
+
+        Returns
+        -------
+        SampleAnalysisPipelineResult
+            The five summary tables, the paths of the files written and, with ``materialize_split=True``, the row-level
+            split and its audit artifact.
+
+        Raises
+        ------
+        KeyError
+            If a required column (or ``id_col`` for ``materialize_split``) is missing from ``data``.
+        ValueError
+            If ``materialize_split`` is True without ``id_col``, if no recommendation could be produced, if ``id_col``
+            has duplicates among the mature rows of a target, or if the OOT or the INS/OOS pool segment is empty.
+        AssertionError
+            If the materialized INS, OOS and OOT segments overlap or do not cover all mature rows of a target.
+
+        Notes
+        -----
+        With ``dry_run=True`` the input is validated, a warning with the estimated split count is logged and the
+        analysis is skipped (see :meth:`estimate_split_count`). Existing output files are overwritten.
+        """
         self._validate_input(data)
         if self.config.dry_run:
             info = self.estimate_split_count(data)
