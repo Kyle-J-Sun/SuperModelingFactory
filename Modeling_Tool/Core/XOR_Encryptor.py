@@ -7,53 +7,71 @@ class TextEncryptor:
     """
     Text encryption and decryption utility class based on the XOR algorithm.
 
-    The class provides text encryption and decryption, and supports both single strings and entire pandas DataFrames.
-    Encrypted data is encoded as URL-safe Base64, which makes it easy to store and transmit.
+    The class encrypts and decrypts single strings and entire pandas DataFrames. Encrypted data is encoded as URL-safe
+    Base64, which makes it easy to store and transmit. This is obfuscation, not strong cryptography: do not rely on it to
+    protect secrets.
 
-    Attributes:
-        key (str): Key used for encryption and decryption. If None, an empty string is used as the key.
-        suffix (str): Suffix appended to DataFrame column names after encryption. Defaults to '_encrypted'.
+    Parameters
+    ----------
+    key : str, default None
+        Key used for encryption and decryption. A key is required in practice: with ``None`` (the default) ``encrypt``
+        raises ``TypeError``, with an empty string it raises ``ZeroDivisionError``, and ``decrypt`` raises ``ValueError``
+        in both cases.
+    suffix : str, default '_encrypted'
+        Suffix that ``encrypt_dataframe`` appends to the column names. ``decrypt_dataframe`` removes every occurrence of
+        it from the column names.
 
-    Example:
-        >>> encryptor = TextEncryptor(key="my_secret_key")
-        >>> encrypted = encryptor.encrypt("Hello World")
-        >>> decrypted = encryptor.decrypt(encrypted)
-        >>> print(decrypted)  # Output: Hello World
+    Attributes
+    ----------
+    key : str
+        The key given at construction.
+    suffix : str
+        The column-name suffix given at construction.
+
+    Examples
+    --------
+    >>> encryptor = TextEncryptor(key="my_secret_key")
+    >>> encrypted = encryptor.encrypt("Hello World")
+    >>> encryptor.decrypt(encrypted)
+    'Hello World'
     """
 
     def __init__(self, key=None, suffix='_encrypted'):
-        """
-        Initialize the encryptor instance.
-
-        Parameters:
-            key (str, optional): Key used for encryption and decryption. If None, an empty string is used as the key.
-                               Note: data encrypted with an empty key is not confidential.
-            suffix (str, optional): Suffix appended to column names when a DataFrame is encrypted.
-                                  Defaults to '_encrypted'. The suffix is removed on decryption.
-        """
+        """Store the key and the column-name suffix (see the class docstring for the parameters)."""
         self.key = key
         self.suffix = suffix
 
     def encrypt(self, text):
         """
-        Encrypt the input text.
+        Encrypt a string.
 
-        XOR the plaintext with the key, then output the result as URL-safe Base64.
-        The encrypted result carries the original text length (the first 2 bytes), which is used for validation during decryption.
+        The UTF-8 bytes of ``text`` are XORed with the repeated key and prefixed with 2 bytes that hold the length of
+        the plaintext in bytes, which ``decrypt`` uses for validation. The result is encoded as URL-safe Base64.
 
-        Parameters:
-            text (str): Plaintext string to encrypt.
+        Parameters
+        ----------
+        text : str
+            Plaintext to encrypt, at most 65,535 bytes of UTF-8.
 
-        Returns:
-            str: Encrypted string, encoded as URL-safe Base64.
+        Returns
+        -------
+        str
+            Encrypted text, URL-safe Base64.
 
-        Raises:
-            AttributeError: If the key attribute is None (when self.key is None, an empty string is actually used).
+        Raises
+        ------
+        TypeError
+            If the key is None.
+        ZeroDivisionError
+            If the key is an empty string.
+        OverflowError
+            If ``text`` is longer than 65,535 bytes.
 
-        Example:
-            >>> encryptor = TextEncryptor(key="secret")
-            >>> encrypted = encryptor.encrypt("Hello")
-            >>> print(encrypted)  # Output: AAU7AA8eCg==
+        Examples
+        --------
+        >>> encryptor = TextEncryptor(key="secret")
+        >>> encryptor.encrypt("Hello")
+        'AAU7AA8eCg=='
         """
         # Text to bytes
         text_bytes = text.encode('utf-8')
@@ -65,8 +83,8 @@ class TextEncryptor:
         # XOR encryption
         encrypted_bytes = bytes([text_bytes[i] ^ key_bytes[i] for i in range(len(text_bytes))])
 
-        # Add 2 more bytes for verification
-        length_byte = len(text).to_bytes(2, 'big')
+        # Add 2 more bytes for verification: the plaintext length in bytes, which is what decrypt compares against
+        length_byte = len(text_bytes).to_bytes(2, 'big')
 
         # combine
         result_bytes = length_byte + encrypted_bytes
@@ -74,28 +92,33 @@ class TextEncryptor:
 
     def decrypt(self, encrypted_text):
         """
-        Decrypt previously encrypted text.
+        Decrypt a string produced by ``encrypt``.
 
-        Decode the Base64 string, extract the length information (the first 2 bytes), then XOR the remaining bytes with the key to recover the plaintext.
-        After decryption, the length of the recovered text is checked against the stored length to ensure data integrity.
+        The Base64 text is decoded, the first 2 bytes give the stored plaintext length, and the remaining bytes are
+        XORed with the repeated key. The length of the recovered bytes is checked against the stored length.
 
-        Parameters:
-            encrypted_text (str): Base64-encoded string produced by the encrypt method.
+        Parameters
+        ----------
+        encrypted_text : str
+            URL-safe Base64 text produced by ``encrypt``.
 
-        Returns:
-            str: Original plaintext string after decryption.
+        Returns
+        -------
+        str
+            The original plaintext.
 
-        Raises:
-            ValueError: If decryption fails. Possible causes include:
-                       - Base64 decoding failed (the input is not a valid Base64 string)
-                       - Length validation failed (the data was tampered with or a different key was used)
-                       - Other decoding errors
+        Raises
+        ------
+        ValueError
+            If decryption fails for any reason: the input is not valid Base64, the key is wrong or missing, the stored
+            length does not match the recovered length (the data was altered), or the recovered bytes are not valid
+            UTF-8.
 
-        Example:
-            >>> encryptor = TextEncryptor(key="secret")
-            >>> encrypted = encryptor.encrypt("Hello")
-            >>> decrypted = encryptor.decrypt(encrypted)
-            >>> print(decrypted)  # Output: Hello
+        Examples
+        --------
+        >>> encryptor = TextEncryptor(key="secret")
+        >>> encryptor.decrypt(encryptor.encrypt("Hello"))
+        'Hello'
         """
         try:
             # b64 decryption
@@ -124,34 +147,42 @@ class TextEncryptor:
 
     def encrypt_dataframe(self, data):
         """
-        Encrypt an entire pandas DataFrame.
+        Encrypt every value of a DataFrame.
 
-        Convert all column values of the DataFrame to strings and encrypt them, and append the configured suffix to the column names.
-        The method returns a new DataFrame; the original data is not modified.
+        All values are converted to strings (a missing value becomes ``'nan'``) and encrypted with ``encrypt``, and the
+        suffix is appended to every column name. The original DataFrame is not modified.
 
-        Parameters:
-            data (pandas.DataFrame): pandas DataFrame to encrypt.
-                                   The values of all columns are converted to strings before encryption.
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            The DataFrame to encrypt.
 
-        Returns:
-            pandas.DataFrame: New encrypted DataFrame with the following properties:
-                             - All column values are encrypted and Base64-encoded
-                             - All column names carry the suffix specified at initialization (default '_encrypted')
-                             - A copy is returned; the original DataFrame is unchanged
+        Returns
+        -------
+        pandas.DataFrame
+            A new DataFrame of encrypted strings (object dtype) whose column names carry the suffix.
 
-        Raises:
-            AttributeError: If encryption fails because the key attribute is None.
+        Raises
+        ------
+        TypeError
+            If the key is None.
+        ZeroDivisionError
+            If the key is an empty string.
+        OverflowError
+            If a value, converted to a string, is longer than 65,535 bytes.
 
-        Note:
-            - An encrypted DataFrame cannot be used directly for data analysis; it must be decrypted first
-            - Back up the mapping of the original DataFrame column names before encrypting
+        Notes
+        -----
+        An encrypted DataFrame cannot be analyzed; decrypt it first. A column name that already contains the suffix text
+        does not survive a round trip, because ``decrypt_dataframe`` removes every occurrence of the suffix.
 
-        Example:
-            >>> import pandas as pd
-            >>> df = pd.DataFrame({'name': ['Alice', 'Bob'], 'age': [25, 30]})
-            >>> encryptor = TextEncryptor(key="secret")
-            >>> encrypted_df = encryptor.encrypt_dataframe(df)
-            >>> print(encrypted_df.columns.tolist())  # Output: ['name_encrypted', 'age_encrypted']
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> df = pd.DataFrame({'name': ['Alice', 'Bob'], 'age': [25, 30]})
+        >>> encryptor = TextEncryptor(key="secret")
+        >>> encryptor.encrypt_dataframe(df).columns.tolist()
+        ['name_encrypted', 'age_encrypted']
         """
         res = data.copy()
         collist = data.columns.tolist()
@@ -164,39 +195,37 @@ class TextEncryptor:
 
     def decrypt_dataframe(self, data):
         """
-        Decrypt an encrypted pandas DataFrame.
+        Decrypt a DataFrame produced by ``encrypt_dataframe``.
 
-        Iterate over all columns of the DataFrame, decrypt every column value, and remove the encryption suffix from the column names.
-        The method returns a new DataFrame; the original data is not modified.
+        Every value is decrypted with ``decrypt`` and every occurrence of the suffix is removed from the column names.
+        The original DataFrame is not modified.
 
-        Parameters:
-            data (pandas.DataFrame): pandas DataFrame to decrypt.
-                                   It should be a DataFrame produced by the encrypt_dataframe method.
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            A DataFrame produced by ``encrypt_dataframe`` with the same key.
 
-        Returns:
-            pandas.DataFrame: New decrypted DataFrame with the following properties:
-                             - All column values are decrypted and restored to their original string form
-                             - The suffix specified at initialization (default '_encrypted') is removed from all column names
-                             - A copy is returned; the original DataFrame is unchanged
+        Returns
+        -------
+        pandas.DataFrame
+            A new DataFrame whose values are the decrypted strings (object dtype: numbers and missing values come back
+            as text such as ``'2'`` and ``'nan'``) and whose column names no longer contain the suffix.
 
-        Raises:
-            ValueError: If decryption fails. Possible causes include:
-                       - A column value is not a valid encrypted string
-                       - The wrong key was used for decryption
-                       - The data was corrupted during transmission or storage
-            UnicodeDecodeError: If the decrypted bytes cannot be decoded as a UTF-8 string.
+        Raises
+        ------
+        ValueError
+            If a value cannot be decrypted, for example because the key is wrong or a column was never encrypted.
 
-        Note:
-            - Encryption and decryption must use the same key
-            - Decryption may fail if the DataFrame contains columns that are not encrypted
-
-        Example:
-            >>> import pandas as pd
-            >>> df = pd.DataFrame({'name_encrypted': ['aGVsbG8=', 'd29ybGQ='],
-            ...                    'age_encrypted': ['c2F2ZWQ=', 'dGVzdA==']})
-            >>> encryptor = TextEncryptor(key="secret")
-            >>> decrypted_df = encryptor.decrypt_dataframe(df)
-            >>> print(decrypted_df.columns.tolist())  # Output: ['name', 'age']
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> df = pd.DataFrame({'name': ['Alice', 'Bob'], 'age': [25, 30]})
+        >>> encryptor = TextEncryptor(key="secret")
+        >>> decrypted = encryptor.decrypt_dataframe(encryptor.encrypt_dataframe(df))
+        >>> decrypted.columns.tolist()
+        ['name', 'age']
+        >>> decrypted['age'].tolist()
+        ['25', '30']
         """
         res = data.copy()
         collist = data.columns.tolist()
