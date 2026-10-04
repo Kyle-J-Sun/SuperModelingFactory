@@ -11,23 +11,23 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def get_max_nbins(data, nbins, min_bin_prop = 0.05):
     """
-    根据给定的最小分箱比例计算最大分箱数。
+    Compute the maximum number of bins from a given minimum bin proportion.
     
-    根据数据总量和最小分箱比例，计算能够满足最小样本数要求的最大分箱数。
+    From the total number of records and the minimum bin proportion, compute the largest number of bins that still meets the minimum sample-size requirement.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table
     nbins : int
-        期望的分箱数量
+        Desired number of bins
     min_bin_prop : float, default 0.05
-        每个分箱最小样本占比
+        Minimum proportion of samples in each bin
     
     Returns
     -------
     int
-        可行的最大分箱数
+        Maximum feasible number of bins
     
     Examples
     --------
@@ -36,12 +36,12 @@ def get_max_nbins(data, nbins, min_bin_prop = 0.05):
     
     n = data.shape[0]
     if n == 0:
-        return nbins   # 空数据无法分箱，返回原值
+        return nbins   # empty data cannot be binned; return the original value
     
     min_bin_size = min_bin_prop * n
     
     if min_bin_size == 0:
-            # 此时 min_bin_prop == 0，退化为最多 nbins 个箱
+            # Here min_bin_prop == 0, which degenerates to at most nbins bins
             return min(nbins, n)
         
     nbins = min(nbins, max(5, n // min_bin_size))
@@ -49,32 +49,32 @@ def get_max_nbins(data, nbins, min_bin_prop = 0.05):
 
 def get_decision_tree_binning_edges(feature, target, max_leaf_nodes=5, min_samples_leaf=0.05, random_state=42, missing_ref_value = None, spec_values = []):
     """
-    使用决策树对连续变量进行最优分箱。
+    Find the optimal bins of a continuous variable using a decision tree.
     
-    通过决策树分类算法寻找最优的分箱边界点，适用于连续型变量的自动化分箱。
-    算法会自动处理缺失值和特殊值，并返回合适的分箱边界。
+    Use a decision-tree classifier to find the optimal bin edges; suitable for automated binning of continuous variables.
+    The algorithm handles missing values and special values automatically and returns suitable bin edges.
     
     Parameters
     ----------
     feature : array-like
-        待分箱的连续特征，Pandas Series或一维数组
+        Continuous feature to bin, a pandas Series or a 1-D array
     target : array-like
-        目标变量，二分类标签（Pandas Series或一维数组）
+        Target variable, a binary label (pandas Series or 1-D array)
     max_leaf_nodes : int, default 5
-        决策树最大叶节点数，即最大分箱数
+        Maximum number of leaf nodes of the decision tree, i.e. the maximum number of bins
     min_samples_leaf : float, default 0.05
-        叶节点最小样本比例，默认为0.05(5%)
+        Minimum sample fraction per leaf node; defaults to 0.05 (5%)
     random_state : int, default 42
-        随机种子，确保结果可重现
+        Random seed to make the results reproducible
     missing_ref_value : any, optional
-        缺失值参考值，该值将被视为缺失
+        Reference value for missing values; this value is treated as missing
     spec_values : list, optional
-        特殊数值列表，这些值将被独立分箱
+        List of special values; these values are binned separately
     
     Returns
     -------
     bin_edges : list
-        分箱边界列表
+        List of bin edges
     
     Examples
     --------
@@ -86,7 +86,7 @@ def get_decision_tree_binning_edges(feature, target, max_leaf_nodes=5, min_sampl
     if missing_ref_value:
         feature = np.where(feature == missing_ref_value, np.nan, feature)
     
-    # 数据预处理：移除缺失值
+    # Data preprocessing: remove missing values
     df = pd.DataFrame({
         'feature': feature,
         'target': target
@@ -98,37 +98,37 @@ def get_decision_tree_binning_edges(feature, target, max_leaf_nodes=5, min_sampl
     feature_clean = df['feature']
     target_clean = df['target']
     
-    # 如果特征方差为0或几乎为0，无法分箱
+    # If the feature variance is 0 or almost 0, binning is not possible
     if feature_clean.nunique() <= 1:
-        logger.info("警告: 特征方差为0，无法分箱")
+        logger.info("Warning: feature variance is 0, cannot bin")
         return [feature_clean.min(), feature_clean.max()], pd.cut(feature, bins=[feature_clean.min(), feature_clean.max()])
     
-    # 重塑特征为2D数组以适配sklearn
+    # Reshape the feature to a 2D array to fit sklearn
     X = feature_clean.values.reshape(-1, 1)
     y = target_clean.values
     
-    # 创建决策树分类器
+    # Create the decision-tree classifier
     tree_model = DecisionTreeClassifier(
         max_leaf_nodes=max_leaf_nodes,
         min_samples_leaf=min_samples_leaf,
         random_state=random_state
     )
     
-    # 拟合决策树模型
+    # Fit the decision-tree model
     tree_model.fit(X, y)
     
-    # 提取分箱边界
+    # Extract the bin edges
     threshold = tree_model.tree_.threshold
     feature_min = feature_clean.min()
     feature_max = feature_clean.max()
     
-    # 获取非叶子节点的分割阈值并排序
+    # Get the split thresholds of the non-leaf nodes and sort them
     bin_edges = sorted([th for th in threshold if th != -2])
     
-    # 添加最小值和最大值作为边界
+    # Add the minimum and maximum values as edges
 #     bin_edges = [feature_min] + bin_edges + [feature_max]
     
-    # 移除可能重复的边界
+    # Remove possibly duplicated edges
     bin_edges = sorted(list(set(bin_edges)))
     if missing_ref_value:
         bin_edges = sorted(list(set(bin_edges + [missing_ref_value])))
@@ -139,30 +139,30 @@ def get_decision_tree_binning_edges(feature, target, max_leaf_nodes=5, min_sampl
 
 class NumVarBinning:
     """
-    根据分组数和方法, 计算数值型数值变量切分点数值序列。
+    Compute the cut-point sequence of a numeric variable from the number of bins and the binning method.
     
-    根据指定分组数计算切分点数值, 分组方法包括"等距分组"和"等分分组":
-    (1) 当分组数不小于变量唯一值个数时, 切分点数值序列即为变量唯一值序列
-    (2) 当分组数小于变量唯一值个数时, 可选择"等距分组"或"等分分组"
+    The cut points are computed from the specified number of bins; the binning methods are "equal-width" and "equal-frequency":
+    (1) When the number of bins is not smaller than the number of unique values of the variable, the cut-point sequence is the sequence of unique values
+    (2) When the number of bins is smaller than the number of unique values, either "equal-width" or "equal-frequency" binning can be chosen
     
-    若有指定需要独立成组的数值, 则:
-    (1) 将数值加入切分点数值序列
-    (2) 添加数值上确界=数值+0.1**(精度+1), 加入切分点数值序列
+    If values that must be binned separately are specified:
+    (1) Add the values to the cut-point sequence
+    (2) Add the upper bound of each value = value + 0.1**(precision+1) to the cut-point sequence
     
-    切分点数值精度:
-    (1) 若变量取值为整数, 则精度为保留1位小数
-    (2) 若变量取值为浮点数, 则精度为保留输入的位数
+    Cut-point precision:
+    (1) If the variable takes integer values, the precision is 1 decimal place
+    (2) If the variable takes floating-point values, the precision is the number of decimal places of the input
     
-    为了泛化性, 将切分点数值序列中的最小值替换为-inf, 最大值增加+inf
+    For better generalization, the minimum of the cut-point sequence is replaced with -inf and +inf is added as the maximum
     
     Parameters
     ----------
     var_name : str
-        变量名
+        Variable name
     spec_values : list, optional
-        指定需要单独成组的特殊数值
+        Special values to be binned separately
     spec_digit : int, default 3
-        指定特殊的切分点上确界保留小数位数, 若变量为整数则固定为1, 若非整数则为spec_digit值
+        Number of decimal places kept for the upper bound of a special cut point; fixed to 1 if the variable is an integer, otherwise equal to spec_digit
     
     Examples
     --------
@@ -171,16 +171,16 @@ class NumVarBinning:
     """
     def __init__(self, var_name, spec_values=None, spec_digit=3):
         """
-        初始化数值变量分箱对象。
+        Initialize the numeric-variable binning object.
         
         Parameters
         ----------
         var_name : str
-            变量名
+            Variable name
         spec_values : list, optional
-            指定需要单独成组的特殊数值
+            Special values to be binned separately
         spec_digit : int, default 3
-            特殊值精度位数
+            Number of decimal places of precision for special values
         """
         self.var_name = var_name
         self.spec_values = spec_values
@@ -191,45 +191,45 @@ class NumVarBinning:
 
     def calc_equi_cutpoints(self, df, bins=10, equi_method="equif"):
         """
-        根据分组数和等值分组方法, 计算数值型数值变量切分点数值序列。
+        Compute the cut-point sequence of a numeric variable from the number of bins and the equi-binning method.
         
-        1、根据指定分组数计算切分点数值, 分组方法包括"等距分组"和"等分分组"
-        (1) 当分组数不小于变量唯一值个数时, 切分点数值序列即为变量唯一值序列
-        (2) 当分组数小于变量唯一值个数时, 可选择"等距分组"或"等分分组"
+        1. Compute the cut points from the specified number of bins; the binning methods are "equal-width" and "equal-frequency"
+        (1) When the number of bins is not smaller than the number of unique values of the variable, the cut-point sequence is the sequence of unique values
+        (2) When the number of bins is smaller than the number of unique values, either "equal-width" or "equal-frequency" binning can be chosen
         
-        2、若有指定需要独立成组的数值, 则:
-        (1) 将数值加入切分点数值序列;
-        (2) 添加数值上确界=数值+0.1**(精度+1), 加入切分点数值序列;
+        2. If values that must be binned separately are specified:
+        (1) Add the values to the cut-point sequence;
+        (2) Add the upper bound of each value = value + 0.1**(precision+1) to the cut-point sequence;
         
-        3、切分点数值精度:
-        (1) 若变量取值为整数, 则精度为保留1位小数
-        (2) 若变量取值为浮点数, 则精度为保留输入的位数
+        3. Cut-point precision:
+        (1) If the variable takes integer values, the precision is 1 decimal place
+        (2) If the variable takes floating-point values, the precision is the number of decimal places of the input
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         bins : int, default 10
-            切分组数
+            Number of bins
         equi_method : string, default "equif"
-            分组方法, 候选值{"equid"等距分组, "equif"等分分组}
+            Binning method, candidate values {"equid": equal-width, "equif": equal-frequency}
         
         Returns
         -------
         cut_points : numpy.array
-            切分点数值序列
+            Cut-point sequence
         """
         var_series = df[self.var_name]
 
         if any(pd.isnull(var_series)):
-            raise ValueError(f"{self.var_name}变量取值中出现NaN值")
+            raise ValueError(f"{self.var_name}: the variable contains NaN values")
 
         if pd.api.types.is_integer_dtype(var_series):
             spec_digit = 1
         else:
             spec_digit = self.spec_digit
 
-        # 根据指定分bin数计算切分点值
+        # Compute the cut-point values from the specified number of bins
         cut_points = var_series.unique()
         if len(cut_points) <= bins:
             cut_points.sort()
@@ -242,9 +242,9 @@ class NumVarBinning:
             step = (max_value - min_value) / bins
             cut_points = np.arange(start=min_value, stop=max_value, step=step)[1:]
         else:
-            raise ValueError("equi_method取值错误.")
+            raise ValueError("Invalid equi_method value.")
 
-        # 添加需要单独成组的特殊数值
+        # Add the special values that need to be binned separately
         if bool(self.spec_values) and len(self.spec_values) > 0:
             self.spec_values.sort()
             spec_values_upper = [x + 0.1**spec_digit for x in self.spec_values]
@@ -252,34 +252,34 @@ class NumVarBinning:
             cut_points.sort()
         
 #         print("NumVarBinning Cut Points: ", cut_points)
-        # 返回Info
+        # Return info
         self.equi_method = equi_method
 
         return cut_points
 
     def modify_cutpoints(self, df, points):
         """
-        修正切分点数值序列。
+        Adjust the cut-point sequence.
         
-        1、切分点数值精度:
-        (1) 若变量取值为整数, 则精度为保留1位小数
-        (2) 若变量取值为浮点数, 则精度为保留输入的位数
+        1. Cut-point precision:
+        (1) If the variable takes integer values, the precision is 1 decimal place
+        (2) If the variable takes floating-point values, the precision is the number of decimal places of the input
         
-        2、过滤不在变量值域内的切分点, 并去重
+        2. Filter out cut points that fall outside the value range of the variable, and remove duplicates
         
-        3、为了泛化性, 将切分点数值序列中的最小值替换为-inf, 最大值增加+inf。
+        3. For better generalization, the minimum of the cut-point sequence is replaced with -inf and +inf is added as the maximum.
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         points : array-like
-            切分点数值序列
+            Cut-point sequence
         
         Returns
         -------
         cut_points : numpy.array
-            修正后的切分点数值序列
+            Adjusted cut-point sequence
         """
         var_series = df[self.var_name]
 
@@ -288,7 +288,7 @@ class NumVarBinning:
         else:
             spec_digit = self.spec_digit
 
-        # 过滤变量值域内切分点
+        # Filter the cut points within the value range of the variable
         ## Added
         min_value_wo_spec_values = min(var_series[~var_series.isin(self.spec_values)])
         max_value_wo_spec_values = max(var_series[~var_series.isin(self.spec_values)])
@@ -315,49 +315,49 @@ class NumVarBinning:
         cut_points = np.append(cut_points, np.inf)
         
 #         print("Final Cut Points Before Binning: ", cut_points)
-        # 过滤有样本的切分点
+        # Filter to the cut points that have samples
         binning_series = pd.cut(df[self.var_name], cut_points, right=False, labels=cut_points[:-1])
         binning_cnts = binning_series.value_counts()
         cut_points = np.array(binning_cnts.index[binning_cnts > 0])
         cut_points.sort()
 
-        # 若第一位切分点非spec_values, 则令其为-inf
+        # If the first cut point is not in spec_values, set it to -inf
         if bool(self.spec_values):
             if cut_points[0] not in self.spec_values:
                 cut_points[0] = -np.inf
         else:
             cut_points[0] = -np.inf
         
-        # 将变量的最大值增加+inf
+        # Add +inf as the maximum of the variable
         cut_points = np.append(cut_points, np.inf)
 
         return cut_points
 
     def apt_binning(self, df, points, modify=True):
         """
-        使用指定切分点数值序列对变量进行分组。
+        Bin the variable using the specified cut-point sequence.
         
-        切分点数值精度: 
-        (1) 若变量取值为整数, 则精度为保留1位小数
-        (2) 若变量取值为浮点数, 则精度为保留输入的位数
+        Cut-point precision:
+        (1) If the variable takes integer values, the precision is 1 decimal place
+        (2) If the variable takes floating-point values, the precision is the number of decimal places of the input
         
-        过滤不在变量值域内的切分点
+        Filter out cut points that fall outside the value range of the variable
         
-        为了泛化性, 将切分点数值序列中的最小值替换为-inf, 最大值增加+inf。
+        For better generalization, the minimum of the cut-point sequence is replaced with -inf and +inf is added as the maximum.
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         points : array-like
-            切分点数值序列
+            Cut-point sequence
         modify : bool, default True
-            是否修正切分点数值序列
+            Whether to adjust the cut-point sequence
         
         Returns
         -------
         binning_series : pandas.Categorical
-            分组后序列
+            Binned series
         """
         if modify:
             self.cut_points = self.modify_cutpoints(df, points)
@@ -374,21 +374,21 @@ class NumVarBinning:
 
     def equi_binning(self, df, bins=10, equi_method="equif"):
         """
-        根据分组数和等值分组方法, 计算数值型数值变量切分点数值序列并分箱。
+        Compute the cut-point sequence of a numeric variable from the number of bins and the equi-binning method, then bin the variable.
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         bins : int, default 10
-            切分组数
+            Number of bins
         equi_method : string, default "equif"
-            分组方法, 候选值{"equid"等距分组, "equif"等分分组}
+            Binning method, candidate values {"equid": equal-width, "equif": equal-frequency}
         
         Returns
         -------
         binning_series : pandas.Categorical
-            分组后序列
+            Binned series
         """
         logging.info(f"-------- [{self.var_name} : EquiX Binning] --------")
         logging.info(f"PARAMS: bins={bins}, equi_method={equi_method}")
@@ -399,95 +399,95 @@ class NumVarBinning:
 
     def apply_binning(self, df):
         """
-        使用已保存的切分点数值序列对变量进行分组。
+        Bin the variable using the saved cut-point sequence.
         
-        使用之前通过equi_binning或auto_binning等方法计算的切分点对新数据进行分组。
+        Bin new data using the cut points previously computed by methods such as equi_binning or auto_binning.
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         
         Returns
         -------
         binning_series : pandas.Categorical
-            分组后序列
+            Binned series
         """
         if self.cut_points is None:
-            raise ValueError("类self.cut_points变量为None。")
+            raise ValueError("The class attribute self.cut_points is None.")
         binning_series = self.apt_binning(df, self.cut_points, modify=False)
 
         return binning_series
  
     def auto_binning(self, df, tgt_name, max_bins=10, min_prop_in_bin=0.05, equi_bins=200, equi_method="equif", init_points = None,  binning_criteria="chi2", chi2_p=0.95):
         """
-        基于卡方检验的自动分组。
+        Automatic binning based on the chi-square test.
         
-        基于分布距离计算方法, 按照规定最大组数和最小组样本数, 自动求解分组序列。
-        步骤:
-        1. 利用初始分组方法, 完成初始分组
-        2. 基于分布距离计算方法, 计算初始分组中各组样本大小、组内分布距离, 以及合并相邻组后对原分组的距离差异增益
-        3. 不断合并样本量不符合最小组样本数要求, 合并相邻组后距离差异增益较大的组, 直至满足最大组数和最小组样本数要求
-        4. 根据最终分组结果, 生成分组后变量序列。
+        Using a distribution-distance measure, automatically derive the bin sequence for the given maximum number of bins and minimum number of samples per bin.
+        Steps:
+        1. Use the initial binning method to complete the initial binning
+        2. Based on the distribution-distance measure, compute the sample size and within-bin distribution distance of each initial bin, as well as the gain in distance difference relative to the original bins after merging adjacent bins
+        3. Keep merging bins whose sample size does not meet the minimum-samples-per-bin requirement and bins whose merge with an adjacent bin yields a larger distance-difference gain, until the maximum number of bins and the minimum number of samples per bin are satisfied
+        4. Generate the binned variable series from the final binning result.
         
         Parameters
         ----------
         df : pandas.DataFrame
-            数据表
+            Data table
         tgt_name : str
-            目标变量名
+            Target variable name
         max_bins : int, default 10
-            最大分组数量
+            Maximum number of bins
         min_prop_in_bin : float, default 0.05
-            每组最小样本数占比
+            Minimum proportion of samples per bin
         equi_bins : int, default 200
-            初始分组数量
+            Number of initial bins
         equi_method : string, default "equif"
-            初始分组方法, 候选值{"equid"等距分组, "equif"等分分组}
+            Initial binning method, candidate values {"equid": equal-width, "equif": equal-frequency}
         init_points : array-like, default None
-            初始切分点数值序列, 若非None时则equi_bins、equi_method失效
+            Initial cut-point sequence; if not None, equi_bins and equi_method are ignored
         binning_criteria : string, default "chi2"
-            分组准则, 候选值{"chi2": "卡方值"}
+            Binning criterion, candidate values {"chi2": "chi-square value"}
         chi2_p : float, default 0.95
-            用于计算自由度为1的卡方分布分位数的概率值. 当相邻组卡方值小于该值时, 认为不独立, 进行合并. 故越大独立性判断越严格
+            Probability used to compute the quantile of the chi-square distribution with 1 degree of freedom. When the chi-square value of adjacent bins is smaller than this quantile, the bins are considered not independent and are merged; a larger value therefore makes the independence test stricter
         
         Returns
         -------
         binning_series : pandas.Categorical
-            分组后序列
+            Binned series
         """
         logging.info(f"\n---------------- [{self.var_name} : Auto binning] ----------------")
         min_cnt_in_bin = np.floor(df.shape[0] * min_prop_in_bin)
         logging.info(f"PARAMS: max_bins={max_bins}, min_cnt_in_bin={min_cnt_in_bin}, criteria={binning_criteria}")
 
-        # 初始分组
+        # Initial binning
         if init_points is None:
             binning_series = self.equi_binning(df, bins=equi_bins, equi_method=equi_method)
         else:
             binning_series = self.apt_binning(df=df, points=init_points, modify=True)
         cut_points = self.cut_points
 
-        # 初始分组字段透视表
+        # Pivot table of the initial bins
         df_tmp = df[[self.var_name, tgt_name]].copy()
         df_tmp[self.var_name] = binning_series
         df_pvt = cre_pvt(df=df_tmp, var_name=self.var_name, tgt_name=tgt_name)
         df_pvt.index = cut_points[:-1]
 
-        # 单独列出特殊值
+        # List the special values separately
         if bool(self.spec_values):
             df_pvt_spec = df_pvt.loc[[x in self.spec_values for x in df_pvt.index], ].copy()
             df_pvt = df_pvt.loc[[x not in self.spec_values for x in df_pvt.index], ].copy()
             max_bins = max_bins - df_pvt_spec.shape[0]
         
-        # 自动分组
+        # Automatic binning
         if not df_pvt.empty:
             logging.info(f"-------- [{self.var_name} : Auto binning] --------")
             df_pvt = chi2_auto_binning(df_pvt=df_pvt, max_bins=max_bins, min_cnt_in_bin=min_cnt_in_bin, p=chi2_p)
                         
-            # 重新计算分组
+            # Recompute the bins
             cut_points = df_pvt.index
             
-            # 添加需要单独成组的特殊数值
+            # Add the special values that need to be binned separately
             if bool(self.spec_values) and len(self.spec_values) > 0:
 #                 spec_values_upper = [x + 0.1**spec_digit for x in self.spec_values]
                 cut_points = np.append(cut_points, self.spec_values)
@@ -507,28 +507,28 @@ class NumVarBinning:
 
 def cre_pvt(df, var_name, tgt_name):
     """
-    生成以变量为行，目标变量为列的数据透视表。
+    Create a pivot table with the variable as rows and the target variable as columns.
     
-    根据指定变量和目标变量生成分组统计透视表，包含每组的负样本数、正样本数、
-    总样本数以及目标转化率。
+    Build a per-bin statistics pivot table from the specified variable and target variable, containing the number of negative samples,
+    the number of positive samples, the total number of samples, and the target rate of each bin.
     
     Parameters
     ----------
     df : pandas.DataFrame
-        数据表
+        Data table
     var_name : str
-        变量名（分组依据）
+        Variable name (the grouping key)
     tgt_name : str
-        目标变量名（二分类标签，0和1）
+        Target variable name (binary label, 0 and 1)
     
     Returns
     -------
     df_pvt : pandas.DataFrame
-        变量数据透视表，包含列：
-        - 0: 负样本数
-        - 1: 正样本数
-        - n: 总样本数
-        - tr: 目标转化率（正样本占比）
+        Variable pivot table, containing the columns:
+        - 0: number of negative samples
+        - 1: number of positive samples
+        - n: total number of samples
+        - tr: target rate (proportion of positive samples)
     
     Examples
     --------
@@ -544,24 +544,24 @@ def cre_pvt(df, var_name, tgt_name):
 
 def merge_bins(df_pvt, ilocs):
     """
-    基于位置编号的变量组合并。
+    Merge variable bins based on position indices.
     
-    将指定位置的分组进行合并，计算合并后的统计指标（样本数、转化率等），
-    并更新卡方值和转化率差异。
+    Merge the bins at the specified positions, compute the statistics after merging (sample counts, target rate, etc.),
+    and update the chi-square values and target-rate differences.
     
-    特别注意: 不可重置df_pvt的index
+    Important: the index of df_pvt must not be reset
     
     Parameters
     ----------
     df_pvt : pandas.DataFrame
-        变量数据透视表，通过cre_pvt函数生成
+        Variable pivot table generated by the cre_pvt function
     ilocs : list
-        待合并的位置编号列表（如[0,1]表示合并前两个分组）
+        List of position indices to merge (e.g. [0,1] merges the first two bins)
     
     Returns
     -------
     df_pvt_new : pandas.DataFrame
-        合并后的变量数据透视表
+        Variable pivot table after merging
     
     Examples
     --------
@@ -570,14 +570,14 @@ def merge_bins(df_pvt, ilocs):
     ilocs.sort()
     df = df_pvt.copy()
 
-    # 汇总字段值至最小位置序号
+    # Aggregate the field values into the smallest position index
     idxes = df.index
     l_idx = idxes[ilocs[0]]
     df.loc[l_idx, [0, 1, "n"]] = np.apply_over_axes(np.sum, df.loc[idxes[ilocs], [0, 1, "n"]], axes=0)[0]
     df.loc[l_idx, "tr"] = df.loc[l_idx, 1] / df.loc[l_idx, "n"]
     df.drop(index=idxes[ilocs[1:]], inplace=True)
 
-    # 重新计算 tr_diff 和 chisq
+    # Recompute tr_diff and chisq
     idxes = df.index
     if "tr_diff" in df.columns:
         if ilocs[0]+1 < df.shape[0]:
@@ -596,22 +596,22 @@ def merge_bins(df_pvt, ilocs):
 
 def observed_laplace(observed, digit=6):
     """
-    对列联表数值进行拉普拉斯修正。
+    Apply a Laplace correction to the values of a contingency table.
     
-    在列联表的每个单元格数值上加上一个小量（0.1**digit），以避免
-    零计数导致的卡方检验问题。
+    Add a small amount (0.1**digit) to every cell of the contingency table to avoid
+    chi-square test problems caused by zero counts.
     
     Parameters
     ----------
     observed : array_like
-        列联表（二维数组或类似结构）
+        Contingency table (a 2-D array or similar structure)
     digit : int, default 6
-        对观测值增加小数的位数, 若为-1则增加整数1
+        Number of decimal places of the small amount added to the observed values; if -1, the integer 1 is added
     
     Returns
     -------
     obs_laplace : numpy.ndarray
-        拉普拉斯修正后的列联表
+        Contingency table after the Laplace correction
     
     Examples
     --------
@@ -625,20 +625,20 @@ def observed_laplace(observed, digit=6):
 
 def cat_2_list(bin_series):
     """
-    将分箱后的Categorical序列转换为边界值列表。
+    Convert a binned Categorical series to a list of edge values.
     
-    从Categorical类型的数据中提取所有区间边界，返回所有左边界和右边界
-    组成的去重列表。
+    Extract all interval edges from Categorical data and return the de-duplicated list
+    made up of all left and right edges.
     
     Parameters
     ----------
     bin_series : pandas.Categorical
-        分箱后的Categorical序列
+        Binned Categorical series
     
     Returns
     -------
     list
-        包含所有区间边界值的列表
+        List containing all interval edge values
     
     Examples
     --------
@@ -657,28 +657,28 @@ def cat_2_list(bin_series):
 
 def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', right_sign = ']'):
     """
-    根据分箱边界生成区间字符串描述列表。
+    Generate a list of interval string descriptions from the bin edges.
     
-    将分箱边界点列表转换为带区间符号的字符串描述列表，支持自定义
-    区间开闭符号和精度。
+    Convert a list of bin edges into a list of string descriptions with interval signs; supports custom
+    open/closed interval signs and precision.
     
     Parameters
     ----------
     edges : array-like
-        分箱边界值列表
+        List of bin edge values
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     ascending : bool, default False
-        是否升序排列
+        Whether to sort in ascending order
     left_sign : str, default '('
-        左区间符号，'['表示包含，'('表示不包含
+        Left interval sign; '[' means inclusive, '(' means exclusive
     right_sign : str, default ']'
-        右区间符号，']'表示包含，')'表示不包含
+        Right interval sign; ']' means inclusive, ')' means exclusive
     
     Returns
     -------
     list
-        区间字符串描述列表
+        List of interval string descriptions
     
     Examples
     --------
@@ -689,7 +689,7 @@ def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', righ
     
     i = 0
     reverse = not ascending
-    # 极大边界（如 float 最大值）按精度取整会溢出成 inf，历来如此，不为此告警
+    # Very large edges (such as the float maximum) overflow to inf when rounded to the given precision; this has always been the case, so no warning is issued
     with np.errstate(over="ignore"):
         edges = sorted([round(x, precision) for x in edges], reverse = reverse)
     res = []
@@ -748,22 +748,22 @@ def _parse_bin_range_bounds(data, col="_bin_range"):
 
 def get_bin_range_list(data, col = "_bin_range"):
     """
-    将分箱区间字符串列转换为边界值列表。
+    Convert a column of bin interval strings to a list of edge values.
     
-    解析DataFrame中的分箱区间字符串列（如"[0, 10)", "(10, 20]"等），
-    提取所有唯一的边界值并排序返回。
+    Parse the bin interval string column of a DataFrame (such as "[0, 10)", "(10, 20]"),
+    extract all unique edge values, and return them sorted.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含分箱区间列的DataFrame
+        DataFrame containing the bin interval column
     col : str, default "_bin_range"
-        分箱区间列名
+        Name of the bin interval column
     
     Returns
     -------
     list
-        去重并排序后的边界值列表
+        De-duplicated, sorted list of edge values
     
     Examples
     --------
@@ -776,41 +776,41 @@ def get_bin_range_list(data, col = "_bin_range"):
 
 def chi2_auto_binning(df_pvt, max_bins, min_cnt_in_bin, p=0.95):
     """
-    基于卡方检验的自动分箱。
+    Automatic binning based on the chi-square test.
     
-    通过卡方检验判断相邻分箱是否应该合并，迭代进行以下步骤：
-    1. 首先处理样本量不满足最小要求的头尾分箱
-    2. 然后处理样本量不足的中间分箱
-    3. 最后进行卡方检验合并不独立的相邻分箱
+    Use the chi-square test to decide whether adjacent bins should be merged, iterating through the following steps:
+    1. First handle the head and tail bins whose sample size does not meet the minimum requirement
+    2. Then handle the middle bins with insufficient sample size
+    3. Finally, merge adjacent bins that are not independent according to the chi-square test
     
     Parameters
     ----------
     df_pvt : pandas.DataFrame
-        变量数据透视表，通过cre_pvt函数生成，包含列：0, 1, n, tr
+        Variable pivot table generated by the cre_pvt function, containing the columns: 0, 1, n, tr
     max_bins : int
-        最大分组数量
+        Maximum number of bins
     min_cnt_in_bin : int
-        每组最小样本数
+        Minimum number of samples per bin
     p : float, default 0.95
-        用于计算自由度为1的卡方分布分位数的概率值. 当相邻组卡方值小于该值时, 
-        认为不独立, 进行合并. 值越大独立性判断越严格
+        Probability used to compute the quantile of the chi-square distribution with 1 degree of freedom. When the chi-square value of adjacent bins is smaller than this quantile,
+        the bins are considered not independent and are merged. The larger the value, the stricter the independence test
     
     Returns
     -------
     df_pvt : pandas.DataFrame
-        合并后的变量数据透视表
+        Variable pivot table after merging
     
     Examples
     --------
     >>> df_pvt = chi2_auto_binning(df_pvt, max_bins=10, min_cnt_in_bin=100, p=0.95)
     """
-    # 计算样本数是否满足最小样本数要求
+    # Check whether the sample count meets the minimum-samples requirement
     if np.sum(df_pvt["n"]) <= min_cnt_in_bin:
         df_pvt = merge_bins(df_pvt=df_pvt, ilocs=list(range(df_pvt.shape[0])))
         logging.info("Merge ilocs: all")
     else:
-        # 头尾分箱
-        # 计算头尾两侧Bin是否满足最小样本要求
+        # Head and tail bins
+        # Check whether the bins at the head and tail ends meet the minimum sample requirement
         csumn_asc = np.cumsum(df_pvt["n"])
         ilocs_head = np.min(np.where(csumn_asc >= min_cnt_in_bin))
         if ilocs_head > 0:
@@ -826,8 +826,8 @@ def chi2_auto_binning(df_pvt, max_bins, min_cnt_in_bin, p=0.95):
             logging.info(f"TailMerge: ilocs={[ori_bins-(ilocs_tail+1), ori_bins]}, bins={ori_bins} -> {df_pvt.shape[0]}")
 
 
-        # 自动分箱
-        # 计算初始分组每组卡方值、与后一组合并后的分布散度及增益值
+        # Automatic binning
+        # Compute, for each initial bin, the chi-square value, the distribution divergence after merging with the next bin, and the gain
         chisq = [chi2_contingency(observed_laplace(df_pvt.loc[df_pvt.index[[i, i+1]], [0, 1]]), correction=False)[0] for i in range(df_pvt.shape[0] - 1)]
         chisq.append(np.inf)
         tr_diff = np.diff(df_pvt["tr"])
@@ -839,10 +839,10 @@ def chi2_auto_binning(df_pvt, max_bins, min_cnt_in_bin, p=0.95):
         ori_bins = df_pvt.shape[0]
         while df_pvt.shape[0] > max_bins or any(df_pvt["n"] < min_cnt_in_bin):
             r += 1
-            # 优先处理样本量不满足最低要求的Bin, 向前或向后合并
+            # Handle first the bins whose sample size does not meet the minimum, merging forward or backward
             if any(df_pvt["n"] < min_cnt_in_bin):
                 iloc = np.min(np.where(df_pvt["n"] < min_cnt_in_bin))
-                # 计算变量组合并方向：位置与单调性
+                # Determine the merge direction of the bin: position and monotonicity
                 if iloc == 0:
                     iloc_merge = iloc + 1
                 elif iloc == df_pvt.shape[0]-1:
@@ -853,18 +853,18 @@ def chi2_auto_binning(df_pvt, max_bins, min_cnt_in_bin, p=0.95):
                         iloc_merge = iloc - 1
                     else:
                         iloc_merge = iloc + 1
-            # 其次处理卡方值低的Bin, 向后合并
+            # Then handle the bins with low chi-square values, merging backward
             else:
                 chisq_list = df_pvt["chisq"].to_list()
                 iloc = chisq_list.index(np.min(chisq_list))
                 iloc_merge = iloc + 1
             
-            # 变量组合并
+            # Merge the variable bins
             df_pvt = merge_bins(df_pvt=df_pvt, ilocs=[iloc, iloc_merge])
         logging.info(f"LoopMerge: round={r}, bins={ori_bins} -> {df_pvt.shape[0]}")
 
 
-        # 卡方检验分箱
+        # Chi-square test binning
         r = 0
         ori_bins = df_pvt.shape[0]
         while df_pvt["chisq"].min() <= chi2.ppf(p, 1):
@@ -881,54 +881,54 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
                   min_bin_prop = 0.05, ascending = True, include_missing = False, tree_binning = False, target = None, random_state=42, 
                   fillna = -999999, spec_values = []):
     """
-    快速分箱函数。
+    Quick binning function.
     
-    对数据进行快速等频或等距分箱，支持多种分箱策略：
-    - 等频分箱：按分位数切分，保证每箱样本数接近
-    - 等距分箱：按数值区间均匀切分
-    - 决策树分箱：使用决策树寻找最优切分点
+    Quickly bin the data with equal-frequency or equal-width binning; several binning strategies are supported:
+    - Equal-frequency binning: split by quantiles so that every bin has a similar number of samples
+    - Equal-width binning: split evenly by value intervals
+    - Decision-tree binning: use a decision tree to find the optimal cut points
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table
     column : str
-        需要分箱的列名
+        Name of the column to bin
     labels : array-like, optional
-        自定义分箱标签
+        Custom bin labels
     nbins : int or list/tuple, default 10
-        分箱数量（整数）或指定分箱边界（列表或元组）
+        Number of bins (an integer) or the specified bin edges (a list or tuple)
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning
     right : bool, default True
-        区间是否右闭合
+        Whether the intervals are closed on the right
     include_lowest : bool, default False
-        是否包含最小值
+        Whether to include the lowest value
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending
     include_missing : bool, default False
-        是否包含缺失值
+        Whether to include missing values
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning
     target : str, optional
-        目标变量名（决策树分箱时必需）
+        Target variable name (required for decision-tree binning)
     random_state : int, default 42
-        随机种子
+        Random seed
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values
     spec_values : list, default []
-        特殊值列表，将独立成箱
+        List of special values; each is placed in its own bin
     
     Returns
     -------
     binned : pandas.Categorical
-        分箱后的序列
+        Binned series
     bin_edges : numpy.ndarray
-        分箱边界数组
+        Array of bin edges
     
     Examples
     --------
@@ -951,7 +951,7 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
 #         print("Tree Binning No Spec Value: ", value_no_spec_value)
 
         if len(value_no_spec_value) == 0:
-            # 返回一个默认的空分箱结果
+            # Return a default empty binning result
             return pd.Series(), []
         
         if equal_freq:
@@ -1012,58 +1012,58 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
 
 class Binning:
     """
-    统一的分箱操作类。
+    Unified binning class.
     
-    整合了快速分箱、卡方分箱等多种分箱方法，提供统一的接口进行数据分箱操作。
-    支持等频/等距分箱、决策树分箱、卡方自动分箱等多种策略。
+    Integrate several binning methods, such as quick binning and chi-square binning, behind a unified interface for binning data.
+    Supports equal-frequency/equal-width binning, decision-tree binning, automatic chi-square binning, and other strategies.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表（将被复制，不修改原数据）
+        Input data table (it is copied; the original data is not modified)
     column : str
-        需要分箱的列名
+        Name of the column to bin
     tgt_name : str, optional
-        目标变量名（卡方分箱时必需）
+        Target variable name (required for chi-square binning)
     nbins : int, default 10
-        分箱数量
+        Number of bins
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning
     bin_colnames : tuple, default ("_bin_num", "_bin_range")
-        分箱结果列名元组
+        Tuple of the column names of the binning results
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending
     right : bool, default True
-        区间是否右闭合
+        Whether the intervals are closed on the right
     include_lowest : bool, default False
-        是否包含最小值
+        Whether to include the lowest value
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning
     chi2_method : bool, default False
-        是否使用卡方分箱
+        Whether to use chi-square binning
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test
     init_equi_bins : int, default 200
-        初始等频分箱数量
+        Number of initial equal-frequency bins
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values
     spec_values : list, default []
-        特殊值列表
+        List of special values
     random_state : int, default 42
-        随机种子
+        Random seed
     
     Attributes
     ----------
     result : pandas.DataFrame
-        分箱结果数据
+        Binning result data
     bin_edges : numpy.ndarray
-        分箱边界数组
+        Array of bin edges
     
     Examples
     --------
@@ -1071,7 +1071,7 @@ class Binning:
     >>> binner.run()
     >>> result, edges = binner.get_result()
     
-    >>> # 使用卡方分箱
+    >>> # Use chi-square binning
     >>> binner = Binning(data, column='income', tgt_name='default', 
     ...                  nbins=10, chi2_method=True, chi2_p=0.95)
     >>> binner.run()
@@ -1083,48 +1083,48 @@ class Binning:
                  chi2_method=False, chi2_p=0.95, init_equi_bins=200, fillna=-999999,
                  spec_values=[], random_state=42):
         """
-        初始化分箱对象。
+        Initialize the binning object.
         
         Parameters
         ----------
         data : pandas.DataFrame
-            输入数据表
+            Input data table
         column : str
-            需要分箱的列名
+            Name of the column to bin
         tgt_name : str, optional
-            目标变量名
+            Target variable name
         nbins : int, default 10
-            分箱数量
+            Number of bins
         precision : int, default 5
-            边界值精度
+            Precision of the edge values
         min_bin_prop : float, default 0.05
-            每箱最小样本占比
+            Minimum proportion of samples per bin
         include_missing : bool, default True
-            是否包含缺失值
+            Whether to include missing values
         equal_freq : bool, default True
-            等频分箱还是等距分箱
+            Whether to use equal-frequency (True) or equal-width (False) binning
         bin_colnames : tuple, default ("_bin_num", "_bin_range")
-            分箱结果列名
+            Column names of the binning results
         ascending : bool, default True
-            分箱顺序是否升序
+            Whether the bin order is ascending
         right : bool, default True
-            区间是否右闭合
+            Whether the intervals are closed on the right
         include_lowest : bool, default False
-            是否包含最小值
+            Whether to include the lowest value
         tree_binning : bool, default False
-            是否使用决策树分箱
+            Whether to use decision-tree binning
         chi2_method : bool, default False
-            是否使用卡方分箱
+            Whether to use chi-square binning
         chi2_p : float, default 0.95
-            卡方检验显著性水平
+            Significance level of the chi-square test
         init_equi_bins : int, default 200
-            初始等频分箱数量
+            Number of initial equal-frequency bins
         fillna : any, default -999999
-            缺失值填充值
+            Fill value for missing values
         spec_values : list, default []
-            特殊值列表
+            List of special values
         random_state : int, default 42
-            随机种子
+            Random seed
         """
         self.data = data.copy()
         self.original_data = data.copy()
@@ -1151,14 +1151,14 @@ class Binning:
     
     def run_quick_binning(self):
         """
-        执行快速分箱。
+        Run quick binning.
         
-        根据配置参数执行等频或等距分箱，并将结果添加到数据中。
+        Run equal-frequency or equal-width binning according to the configured parameters and add the result to the data.
         
         Returns
         -------
         self
-            返回自身以便链式调用
+            Returns itself to allow method chaining
         """
         if isinstance(self.nbins, int):
             self.nbins = int(get_max_nbins(data=self.data, nbins=self.nbins, 
@@ -1206,19 +1206,19 @@ class Binning:
     
     def run_chi2_binning(self, init_points=None):
         """
-        执行卡方分箱。
+        Run chi-square binning.
         
-        在快速分箱的基础上，进一步使用卡方检验进行自动分箱优化。
+        Building on quick binning, further apply the chi-square test to optimize the bins automatically.
         
         Parameters
         ----------
         init_points : array-like, optional
-            初始分箱边界，将作为卡方分箱的起点
+            Initial bin edges, used as the starting point of chi-square binning
         
         Returns
         -------
         self
-            返回自身以便链式调用
+            Returns itself to allow method chaining
         """
         self.data = self.original_data.copy()
         self.data = self.data.reset_index(drop=True)
@@ -1279,21 +1279,21 @@ class Binning:
     
     def run(self):
         """
-        执行分箱操作。
+        Run the binning.
         
-        根据chi2_method参数决定执行快速分箱还是卡方分箱。
+        Run either quick binning or chi-square binning, depending on the chi2_method parameter.
         
         Returns
         -------
         self
-            返回自身以便链式调用
+            Returns itself to allow method chaining
         """
         if self.chi2_method:
-            # 先执行快速分箱获取初始边界
+            # Run quick binning first to obtain the initial edges
             self.run_quick_binning()
             init_points = self.bin_edges.copy()
             
-            # 再执行卡方分箱
+            # Then run chi-square binning
             self.run_chi2_binning(init_points=init_points)
         else:
             self.run_quick_binning()
@@ -1302,18 +1302,18 @@ class Binning:
     
     def get_result(self, return_edges=True):
         """
-        获取分箱结果。
+        Get the binning result.
         
         Parameters
         ----------
         return_edges : bool, default True
-            是否返回分箱边界
+            Whether to return the bin edges
         
         Returns
         -------
         tuple or pandas.DataFrame
-            如果return_edges为True，返回(result, bin_edges)元组
-            否则只返回result
+            If return_edges is True, return the tuple (result, bin_edges);
+            otherwise return only result
         """
         if return_edges:
             return self.result, self.bin_edges
@@ -1324,48 +1324,48 @@ def chi2_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, t
                  include_missing = True, equal_freq = True, bin_colnames = ("_bin_num", "_bin_range"), ascending = True, 
                  chi2_p = 0.95, init_equi_bins = 100, fillna = -999999, spec_values = [], init_points = None):
     """
-    基于卡方检验的分箱函数。
+    Binning function based on the chi-square test.
     
-    使用卡方检验自动寻找最优分箱边界，通过卡方检验判断相邻分箱是否应该合并，
-    最终得到统计上显著的分箱结果。
+    Use the chi-square test to find the optimal bin edges automatically: the test decides whether adjacent bins should be merged,
+    yielding statistically significant bins in the end.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table
     column : str
-        需要分箱的列名
+        Name of the column to bin
     nbins : int, default 10
-        最大分箱数量
+        Maximum number of bins
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin
     tgt_name : str
-        目标变量名（二分类标签，0和1）
+        Target variable name (binary label, 0 and 1)
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning
     bin_colnames : tuple, default ("_bin_num", "_bin_range")
-        分箱结果列名元组
+        Tuple of the column names of the binning results
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test
     init_equi_bins : int, default 100
-        初始等频分箱数量
+        Number of initial equal-frequency bins
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values
     spec_values : list, default []
-        特殊值列表
+        List of special values
     init_points : array-like, optional
-        初始分箱边界，将作为卡方分箱的起点
+        Initial bin edges, used as the starting point of chi-square binning
     
     Returns
     -------
     tuple
-        (result, bin_edges) - 分箱结果数据框和分箱边界数组
+        (result, bin_edges) - the binning result DataFrame and the array of bin edges
     
     Examples
     --------
@@ -1430,49 +1430,49 @@ def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, in
                 bin_colnames = ("bin_num", "bin_range"), ascending = False, right = True, include_lowest = False, 
                 tree_binning = False, target = None, random_state=42, spec_values = [], fillna = -999999):
     """
-    通用分箱函数，支持等频或等距分箱。
+    General-purpose binning function supporting equal-frequency or equal-width binning.
     
-    对数值型变量进行分箱处理，支持多种配置选项，返回分箱后的数据和边界值。
+    Bin a numeric variable with a range of configuration options and return the binned data together with the bin edges.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含数据的DataFrame
+        DataFrame containing the data
     column : str
-        需要分箱的列名
+        Name of the column to bin
     nbins : int, default 10
-        分箱数量
+        Number of bins
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning
     bin_colnames : tuple, default ("bin_num", "bin_range")
-        分箱结果列名元组
+        Tuple of the column names of the binning results
     ascending : bool, default False
-        分箱顺序是否升序
+        Whether the bin order is ascending
     right : bool, default True
-        区间是否右闭合
+        Whether the intervals are closed on the right
     include_lowest : bool, default False
-        是否包含最小值
+        Whether to include the lowest value
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning
     target : str, optional
-        目标变量名（决策树分箱时必需）
+        Target variable name (required for decision-tree binning)
     random_state : int, default 42
-        随机种子
+        Random seed
     spec_values : list, default []
-        特殊值列表
+        List of special values
     fillna : scalar, default -999999
-        `include_missing=True` 时用于承载缺失值的分箱哨兵。
+        Sentinel value that holds the missing values in their own bin when `include_missing=True`.
     
     Returns
     -------
     tuple
-        (data, bin_edges) - 添加了分箱列的数据和分箱边界数组
+        (data, bin_edges) - the data with the binning columns added and the array of bin edges
     
     Examples
     --------
@@ -1480,9 +1480,9 @@ def run_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, in
     
     """
     
-    # 新增保护：如果数据为空或指定列全为缺失，直接返回占位结果
+    # New guard: if the data is empty or the specified column is entirely missing, return a placeholder result directly
     if data.empty or data[column].isnull().all():
-        # 返回一个包含缺失分箱的默认结果
+        # Return a default result containing a missing-values bin
         bin_num_col, bin_range_col = bin_colnames
         data = data.copy()
         data[bin_num_col] = 0 if include_missing else 1
@@ -1533,62 +1533,62 @@ def super_binning(data, score, dep, nbins = 10, precision = 5, min_bin_prop = 0.
                   spec_values = [], tree_binning = False, random_state=42, return_edges = False, ascending = True,
                   bin_colnames = ("_bin_num", "_bin_range")):
     """
-    超级分箱函数，整合多种分箱策略。
+    Super binning function that combines several binning strategies.
     
-    提供统一的分箱接口，支持基础分箱和卡方分箱两种模式，
-    可以根据参数配置自动选择合适的分箱策略。
+    Provide a unified binning interface with two modes, basic binning and chi-square binning,
+    and automatically choose a suitable binning strategy from the parameter configuration.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input data table
     score : str
-        需要分箱的分数/数值列名
+        Name of the score/numeric column to bin
     dep : str
-        目标变量名（二分类标签，0和1）
+        Target variable name (binary label, 0 and 1)
     nbins : int, default 10
-        最大分箱数量
+        Maximum number of bins
     precision : int, default 5
-        边界值精度（小数位数）
+        Precision of the edge values (number of decimal places)
     min_bin_prop : float, default 0.05
-        每箱最小样本占比
+        Minimum proportion of samples per bin
     include_missing : bool, default True
-        是否包含缺失值
+        Whether to include missing values
     equal_freq : bool, default True
-        True为等频分箱，False为等距分箱
+        True for equal-frequency binning, False for equal-width binning
     chi2_method : bool, default False
-        是否使用卡方分箱进行精细化
+        Whether to refine the bins with chi-square binning
     chi2_p : float, default 0.95
-        卡方检验显著性水平
+        Significance level of the chi-square test
     init_equi_bins : int, default 2000
-        初始等频分箱数量（卡方分箱前）
+        Number of initial equal-frequency bins (before chi-square binning)
     fillna : any, default -999999
-        缺失值填充值
+        Fill value for missing values
     spec_values : list, default []
-        特殊值列表
+        List of special values
     tree_binning : bool, default False
-        是否使用决策树分箱
+        Whether to use decision-tree binning
     random_state : int, default 42
-        随机种子
+        Random seed
     return_edges : bool, default False
-        是否返回分箱边界
+        Whether to return the bin edges
     ascending : bool, default True
-        分箱顺序是否升序
+        Whether the bin order is ascending
     bin_colnames : tuple, default ("_bin_num", "_bin_range")
-        分箱结果列名元组
+        Tuple of the column names of the binning results
     
     Returns
     -------
     pandas.DataFrame or tuple
-        如果return_edges为False，返回分箱结果数据
-        如果return_edges为True，返回(result, edges)元组
+        If return_edges is False, return the binning result data
+        If return_edges is True, return the tuple (result, edges)
     
     Examples
     --------
-    >>> # 基础分箱
+    >>> # Basic binning
     >>> result = super_binning(data, score='income', dep='default', nbins=10)
     
-    >>> # 卡方分箱
+    >>> # Chi-square binning
     >>> result, edges = super_binning(data, score='income', dep='default', 
     ...                                nbins=10, chi2_method=True, return_edges=True)
     """

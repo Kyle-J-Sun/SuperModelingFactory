@@ -1,9 +1,9 @@
 """
 WOE_Monotone_Binner.py
 ======================
-贪心单调 WOE 分箱器 — 可复用独立类
+Greedy monotone WOE binner - a standalone, reusable class
 
-用法示例:
+Usage example:
     from WOE_Monotone_Binner import MonotoneWOEBinner
 
     binner = MonotoneWOEBinner(
@@ -11,30 +11,30 @@ WOE_Monotone_Binner.py
         target_col="is_bad",
         n_init_bins=20,
         min_bin_size=0.03,
-        special_values=[-1, -100],   # 这些值会单独成一箱
-        cate_feats=["city_grade", "edu_level"],  # 已离散化的类别特征，直接算 WOE/IV，不做区间切分
+        special_values=[-1, -100],   # each of these values gets its own bin
+        cate_feats=["city_grade", "edu_level"],  # already-discrete categorical features: direct WOE/IV, no interval cutting
     )
-    binner.fit(train_df)                            # 训练拟合（贪心单调）
-    # 或开启卡方后合并
+    binner.fit(train_df)                            # fit on the training data (greedy monotone)
+    # or add chi-square merging after the greedy step
     binner.fit(train_df, chi2_binning=True, chi2_p=0.95, chi2_init_size=2000)
-    # 类别特征：按坏率聚类合并坏率相近的类别（只作用于 cate_feats）
+    # categorical features: cluster and merge categories with similar bad rates (applies to cate_feats only)
     binner.refine_cate(max_bins=5)
 
-    # --- 或直接加载已有分箱结果，跳过 fit ---
-    bins_dict   = binner.get_final_bins()           # 获取分箱区间+WOE
-    edges_dict  = binner.get_bin_edges()            # 获取分箱边界列表（含 ±inf）
+    # --- or load existing binning results directly and skip fit ---
+    bins_dict   = binner.get_final_bins()           # get the bin intervals + WOE
+    edges_dict  = binner.get_bin_edges()            # get the bin edge lists (including ±inf)
     binner2 = MonotoneWOEBinner(feature_cols=[...], target_col="is_bad")
-    binner2.load_woe_bins(bins_dict)                # 直接加载
+    binner2.load_woe_bins(bins_dict)                # load directly
 
-    df_woe      = binner.apply_woe(test_df)         # WOE转换
-    binner.export_woe_report("woe_report.xlsx")     # 输出Excel报告（含图片Sheet）
-    binner.plot_woe_graph("woe_charts/")            # 输出每个特征的图
+    df_woe      = binner.apply_woe(test_df)         # WOE transformation
+    binner.export_woe_report("woe_report.xlsx")     # write the Excel report (including a chart sheet)
+    binner.plot_woe_graph("woe_charts/")            # write one chart per feature
     binner.plot_woe_graph("woe_charts/", group_name="month", _df_for_group=df)
 
-依赖:
+Dependencies:
     pip install pandas numpy matplotlib xlsxwriter pillow
-    （export_woe_report 通过 SuperModelingFactory 的 ExcelMaster 写出，
-      底层依赖 xlsxwriter + pillow）
+    (export_woe_report writes through the ExcelMaster of SuperModelingFactory,
+      which relies on xlsxwriter + pillow underneath)
 """
 
 from __future__ import annotations
@@ -65,18 +65,18 @@ matplotlib.rcParams["font.family"] = "DejaVu Sans"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 特殊值标签辅助
+# Special-value label helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-_SPECIAL_BIN_PREFIX = "__special__"   # 内部用于标记特殊箱的前缀
-_CATE_GROUP_SEP = " | "               # refine_cate 合并多个类别后，bin_label 的成员分隔符
-# 拟合后 sv_table["sv_policy_applied"] 的合法取值（pending_merge 只在拟合中途出现）
+_SPECIAL_BIN_PREFIX = "__special__"   # internal prefix that marks special bins
+_CATE_GROUP_SEP = " | "               # member separator in bin_label after refine_cate merges several categories
+# Valid values of sv_table["sv_policy_applied"] after fitting (pending_merge only appears mid-fit)
 _SV_POLICIES = frozenset({
     "keep", "neutral", "neutral(fallback)", "merged_into_missing", "merge_target", "unseen_at_fit",
 })
 
 def _is_numeric_special(value) -> bool:
-    """声明的特殊值是否是数值（int / float / numpy 数值，排除 bool 与 NaN）。"""
+    """Return whether a declared special value is numeric (int / float / numpy number; excludes bool and NaN)."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(
         value, (int, float, np.integer, np.floating)
     ):
@@ -85,18 +85,18 @@ def _is_numeric_special(value) -> bool:
 
 
 def _sv_label(sv) -> str:
-    """将特殊值转为分箱标签，nan → '[Missing]'，其余 → '[sv=xxx]'"""
+    """Convert a special value to a bin label: nan → '[Missing]', anything else → '[sv=xxx]'."""
     if sv is None or (isinstance(sv, float) and math.isnan(sv)):
         return "[Missing]"
     return f"[sv={sv}]"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 多进程辅助函数（必须在类外定义，保证 pickle 兼容）
+# Multiprocessing helpers (must be defined outside the class to stay pickle-compatible)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _chunk_fit_worker(args):
-    """fit() 并行 worker：对一批特征执行贪心单调 WOE 分箱。"""
+    """Parallel worker for fit(): run greedy monotone WOE binning on a batch of features."""
     binner_lite, df, chunk_feats, chi2_binning, chi2_p, chi2_init_size = args
     ok, err = {}, {}
     for feat in chunk_feats:
@@ -111,13 +111,13 @@ def _chunk_fit_worker(args):
 
 
 def _chunk_chi2_worker(args):
-    """refine_chi2() 并行 worker：对一批特征执行卡方后合并。"""
+    """Parallel worker for refine_chi2(): run chi-square merging on a batch of features."""
     binner_lite, df, chunk_feats, edges_map, sv_iv_map, chi2_p, chi2_init_size = args
     ok, err = {}, {}
     for feat in chunk_feats:
         edges = edges_map.get(feat, [])
         if not edges:
-            ok[feat] = None          # 标记为跳过（仅 1 箱）
+            ok[feat] = None          # mark as skipped (only 1 bin)
             continue
         try:
             df_normal, _ = binner_lite._split_special(df, feat)
@@ -151,12 +151,12 @@ class BinningPolicyViolation(ValueError):
 
 def _dtree_refine_one_core(binner_lite, df, feat, sv_iv, max_bins, min_samples_leaf,
                            monotone, eps, max_depth=None):
-    """refine_dtree 的单特征核心：串行路径与并行 worker 共用，杜绝两条路径漂移。
+    """Single-feature core of refine_dtree, shared by the serial and parallel paths so they cannot drift apart.
 
     Returns
     -------
     update : dict | None
-        None 表示按 refine_min_n_bins_policy='enforce' 保留 refine 前结果。
+        None means the pre-refine result is kept (refine_min_n_bins_policy='enforce').
     status : str  ("ok" | "kept_prefit_min_n_bins")
     """
     df_normal, _ = binner_lite._split_special(df, feat)
@@ -206,7 +206,7 @@ def _dtree_refine_one_core(binner_lite, df, feat, sv_iv, max_bins, min_samples_l
 
 
 def _chunk_dtree_worker(args):
-    """refine_dtree() 并行 worker：对一批特征执行决策树重分箱。"""
+    """Parallel worker for refine_dtree(): re-bin a batch of features with a decision tree."""
     (binner_lite, df, chunk_feats, sv_iv_map, max_bins, min_samples_leaf,
      monotone, eps, max_depth) = args
     ok, err = {}, {}
@@ -224,73 +224,78 @@ def _chunk_dtree_worker(args):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 主类
+# Main class
 # ══════════════════════════════════════════════════════════════════════════════
 
 class MonotoneWOEBinner:
     """
-    贪心合并单调 WOE 分箱器（支持特殊值单独分箱 + 可选卡方后合并）。
+    Greedy-merge monotone WOE binner (supports separate special-value bins and optional chi-square merging).
 
     Parameters
     ----------
-    feature_cols   : 需要分箱的数值特征列名列表
-    target_col     : 二分类目标变量列名（0=好，1=坏）
-    n_init_bins    : 初始等频分箱数，默认 20
-    min_bin_size   : 每箱最小样本占比，默认 0.03（3%）
-    min_n_bins     : 最终分箱数下限（不含特殊值箱），默认 2
-    eps            : 防止 log(0) 的微小量，默认 1e-6
-    missing_woe    : 缺失值(NaN)对应的 WOE 填充值，默认 0.0（中性）
-                     注意：若 nan 已在 special_values 中则会独立计算 WOE，
-                     此参数仅对未列入 special_values 的 NaN 生效。
-    special_values : 需要单独成箱的特殊值列表，如 [-1, -100, float('nan')]
-                     这些值会在 fit 时先被剔除，对剩余数据做单调分箱；
-                     最终在汇总表中单独追加为独立箱，WOE 独立计算。
-                     支持 nan / None / float('nan') 表示"缺失值单独分箱"。
-                     注意：仅作用于 feature_cols（数值特征），不影响 cate_feats。
-    cate_feats     : 已离散化的类别（离散）特征列名列表，默认 None。
-                     这些特征**不做任何区间切分**——每个不同的取值直接作为一箱，
-                     直接计算其 WOE / IV，箱标签即类别取值本身。
-                     缺失值(NaN)若存在则单独归为 [Missing] 箱（独立计算 WOE）。
-                     与 feature_cols 互斥（同名时按 cate_feats 处理）；卡方/决策树
-                     后合并(refine_chi2 / refine_dtree)对类别特征自动跳过。
-                     可用 refine_cate() 按坏率(bad rate)聚类合并坏率相近的类别。
-    bin_label_decimals : 分箱区间边界值的小数点保留位数，默认 None（使用 .8g
-                         格式，最多 8 位有效数字）。设为正整数 N 时，边界值固定
-                         显示 N 位小数（:.Nf），例如 N=2 时 1234.5678 → 1234.57。
-                         注意：较低的精度会使 load_woe_bins(get_final_bins()) 的
-                         round-trip 边界稍有误差，但通常可忽略。
-    sv_min_bin_size    : 低占比 SV 兜底阈值（SV 箱占**全量**样本的占比），
-                         默认 0.0 = 关闭。
-    sv_small_policy    : 占比 < sv_min_bin_size 的 SV 箱如何处理，
-                         'keep'（默认，经验 WOE，零行为变更）/
-                         'neutral'（woe=iv=0）/
-                         'merge_missing'（bad/good 并入 [Missing] 箱后重算，
-                         被合并行的存表 WOE 改写为 [Missing] 的 WOE；
-                         无 [Missing] 箱时降级 'neutral' 并告警）。
-    sv_woe_smoothing   : SV 箱 WOE 是否向全局坏率收缩，'none'（默认）/'laplace'。
-    sv_smoothing_alpha : 平滑强度 α（伪计数），默认 0.0（数值等价旧 WOE）。
-                         方式1 优先：低占比箱走兜底后**不再**平滑；平滑只作用于
-                         占比达标（或 policy='keep'）的 SV 箱。
-    unseen_special_policy : 声明了、但拟合样本里一行都没有的数值特殊值如何处理。
-                         'normal_bin'（默认，旧行为）：不建箱，apply_woe 按普通数值
-                         归箱（如 -1 落入最低箱），by-group 图与组 IV 同口径；
-                         'neutral'：拟合时追加占位特殊值箱（n=0、woe=missing_woe、
-                         iv=0、sv_policy_applied='unseen_at_fit'），打分 / 筛选 / 图表
-                         都把这些取值当特殊值，组 IV 不计入。NaN 与类别特征不适用。
-                         两种策略下 fit 与 apply_woe 都会记录（normal_bin 时 fit 告警）
-                         这类取值，见 _unseen_special_at_fit / _unseen_special_stats。
+    feature_cols   : names of the numeric feature columns to bin
+    target_col     : name of the binary target column (0 = good, 1 = bad)
+    n_init_bins    : number of initial equal-frequency bins, default 20
+    min_bin_size   : minimum share of the samples per bin, default 0.03 (3%)
+    min_n_bins     : lower limit on the final number of bins (special-value bins excluded), default 2
+    eps            : tiny constant that prevents log(0), default 1e-6
+    missing_woe    : WOE assigned to missing values (NaN), default 0.0 (neutral)
+                     Note: if nan is already in special_values, its WOE is computed
+                     independently; this parameter only applies to NaN not listed in special_values.
+    special_values : list of special values that each get their own bin, e.g. [-1, -100, float('nan')]
+                     These values are removed first during fit, and the remaining data is binned
+                     monotonically; they are then appended to the summary table as separate
+                     bins, each with its own WOE.
+                     nan / None / float('nan') mean "bin missing values separately".
+                     Note: applies to feature_cols (numeric features) only; cate_feats are not affected.
+    cate_feats     : names of already-discretized categorical (discrete) feature columns, default None.
+                     These features are **not cut into intervals at all**: each distinct value
+                     becomes its own bin, its WOE / IV is computed directly, and the bin label is
+                     the category value itself.
+                     Missing values (NaN), if present, go into a separate [Missing] bin (WOE computed independently).
+                     Mutually exclusive with feature_cols (a name in both is treated as a cate_feats entry); chi-square /
+                     decision-tree post-merging (refine_chi2 / refine_dtree) is skipped automatically for categorical features.
+                     Use refine_cate() to cluster categories by bad rate and merge those with similar bad rates.
+    bin_label_decimals : number of decimal places kept for the bin-interval boundary values, default None (uses the .8g
+                         format, at most 8 significant digits). When set to a positive integer N, boundaries
+                         are always shown with N decimals (:.Nf), e.g. with N=2, 1234.5678 → 1234.57.
+                         Note: lower precision makes the load_woe_bins(get_final_bins())
+                         round trip slightly inexact at the boundaries, which is usually negligible.
+    sv_min_bin_size    : threshold for the low-share special-value (SV) fallback (an SV bin's share of the **full**
+                         sample), default 0.0 = off.
+    sv_small_policy    : how an SV bin with a share < sv_min_bin_size is handled:
+                         'keep' (default; empirical WOE, no behavior change) /
+                         'neutral' (woe=iv=0) /
+                         'merge_missing' (bad/good counts are merged into the [Missing] bin and WOE is recomputed;
+                         the stored WOE of each merged row is overwritten with the WOE of [Missing];
+                         without a [Missing] bin it falls back to 'neutral' and warns).
+    sv_woe_smoothing   : whether SV-bin WOE is shrunk toward the global bad rate, 'none' (default) / 'laplace'.
+    sv_smoothing_alpha : smoothing strength alpha (pseudo-count), default 0.0 (numerically equivalent to the old WOE).
+                         Approach 1 takes precedence: a low-share bin handled by the fallback is **not** smoothed
+                         again; smoothing only applies to SV bins that meet the share threshold (or policy='keep').
+    unseen_special_policy : how to handle numeric special values that are declared but have no rows in the fit sample.
+                         'normal_bin' (default, legacy behavior): no bin is created and apply_woe bins them as
+                         ordinary numbers (e.g. -1 falls into the lowest bin); by-group charts and group IV
+                         use the same convention;
+                         'neutral': at fit time a placeholder special-value bin is appended (n=0, woe=missing_woe,
+                         iv=0, sv_policy_applied='unseen_at_fit'); scoring / screening / charts
+                         all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
+                         Under both policies fit and apply_woe record such values (fit warns under normal_bin);
+                         see _unseen_special_at_fit / _unseen_special_stats.
 
-    fit() 参数（传入 fit() 方法，不在 __init__ 中设置）
+    fit() parameters (passed to fit(), not set in __init__)
     -------------------------------------------------------
-    chi2_binning   : 是否在贪心单调分箱后再做卡方后合并，默认 False。
-                     True 时：以贪心结果为起点，迭代合并卡方值最小的相邻箱对，
-                     直到所有相邻对的卡方检验 p 值均 < (1 - chi2_p)，
-                     合并过程中严格保持 WOE 单调（不满足则跳过该对）。
-    chi2_p         : 卡方检验置信度阈值，默认 0.99。相邻箱 p > (1-chi2_p)
-                     时认为两箱分布无显著差异，可以合并。
-    chi2_init_size : 卡方计算时的全局 stratified 采样上限，默认 1000。
-                     若普通行数 > chi2_init_size，则按 target 比例分层
-                     抽样后再计算卡方，避免大数据集下卡方值虚高。
+    chi2_binning   : whether to run chi-square merging after the greedy monotone binning, default False.
+                     When True: starting from the greedy result, iteratively merge the adjacent bin pair
+                     with the smallest chi-square value, until the chi-square test p-value of every
+                     adjacent pair is < (1 - chi2_p);
+                     WOE monotonicity is strictly preserved while merging (a pair that would break it is skipped).
+    chi2_p         : confidence threshold of the chi-square test, default 0.99. When the p-value of adjacent
+                     bins is > (1-chi2_p), the two bins are considered not significantly different and can be merged.
+    chi2_init_size : global cap on the stratified sample used for the chi-square computation, default 1000.
+                     If the number of ordinary rows is > chi2_init_size, rows are stratified-sampled by
+                     the target ratio before the chi-square is computed, which avoids inflated
+                     chi-square values on large datasets.
     """
 
     def __init__(
@@ -331,7 +336,7 @@ class MonotoneWOEBinner:
         self._cate_feats_set   = set(self.cate_feats)
         self.bin_label_decimals = bin_label_decimals
 
-        # ── 分箱治理参数（G08/G09/G17；默认全部 None/auto = 旧行为） ──
+        # ── Binning governance parameters (G08/G09/G17; defaults are all None/auto = legacy behavior) ──
         if small_bin_policy is not None and small_bin_policy not in {"merge", "warn", "raise"}:
             raise ValueError(
                 f"small_bin_policy must be one of ['merge', 'warn', 'raise'] or None; "
@@ -383,7 +388,7 @@ class MonotoneWOEBinner:
                     "missing_bin_strategy='fixed_woe' conflicts with NaN in special_values: "
                     "missing rows would get an empirical bin, not the fixed missing_woe constant."
                 )
-        # ── SV 箱治理参数（G19；默认 keep/none/0.0 = 旧行为，零行为变更） ──
+        # ── SV-bin governance parameters (G19; defaults keep/none/0.0 = legacy behavior, zero behavior change) ──
         if sv_small_policy not in {"keep", "neutral", "merge_missing"}:
             raise ValueError(
                 f"sv_small_policy must be one of ['keep', 'neutral', 'merge_missing']; "
@@ -432,29 +437,29 @@ class MonotoneWOEBinner:
         self._expected_direction: Dict[str, int] = {}
         self._direction_basis: Dict[str, str] = {}
 
-        # 判断 special_values 中是否包含 nan（缺失值独立分箱）
+        # Check whether special_values contains nan (missing values get their own bin)
         self._sv_has_nan = any(
             v is None or (isinstance(v, float) and math.isnan(v))
             for v in self.special_values
         )
-        # 非 nan 特殊值列表
+        # Special values other than nan
         self._sv_numeric = [
             v for v in self.special_values
             if not (v is None or (isinstance(v, float) and math.isnan(v)))
         ]
 
-        # 拟合结果，fit() 后填充
+        # Fit results, populated after fit()
         # {feat: {
-        #   "edges"       : list of float (普通箱切割点),
-        #   "woe_table"   : pd.DataFrame  (普通箱 WOE 明细，bin 列 0-based),
-        #   "sv_table"    : pd.DataFrame  (特殊值箱 WOE 明细，每行一个特殊值),
-        #   "iv"          : float (含特殊值箱的总 IV),
-        #   "is_monotonic": bool (仅对普通箱),
-        #   "n_bins"      : int  (普通箱数),
-        #   --- 类别特征(cate_feats)额外字段 ---
+        #   "edges"       : list of float (cut points of the ordinary bins),
+        #   "woe_table"   : pd.DataFrame  (WOE details of the ordinary bins, 0-based bin column),
+        #   "sv_table"    : pd.DataFrame  (WOE details of the special-value bins, one row per special value),
+        #   "iv"          : float (total IV including the special-value bins),
+        #   "is_monotonic": bool (ordinary bins only),
+        #   "n_bins"      : int  (number of ordinary bins),
+        #   --- extra fields for categorical features (cate_feats) ---
         #   "is_categorical": True,
-        #   "categories"  : list (类别取值，按自然顺序；woe_table 每行一个类别,
-        #                          含 cat_value/bin_label 列),
+        #   "categories"  : list (category values in natural order; woe_table has one row per category
+        #                          and includes the cat_value/bin_label columns),
         # }}
         self._results: Dict[str, Any] = {}
         self._is_fitted = False
@@ -476,32 +481,32 @@ class MonotoneWOEBinner:
         self._direction_stats: Dict[str, dict] = {}
 
     # ─────────────────────────────────────────────────────────────────
-    # 内部工具
+    # Internal helpers
     # ─────────────────────────────────────────────────────────────────
 
     def _split_special(self, df: pd.DataFrame, feat: str):
         """
-        将 df 拆分为：普通行（用于单调分箱）+ 各特殊值行。
+        Split df into ordinary rows (used for the monotone binning) plus the rows of each special value.
 
         Returns
         -------
-        df_normal : 剔除了特殊值和（视情况）NaN 的普通行
-        sv_groups : {sv -> sub_df}，每个特殊值对应的行子集
+        df_normal : ordinary rows, with the special values and (depending on the setting) NaN removed
+        sv_groups : {sv -> sub_df}, the subset of rows for each special value
         """
         mask_normal = pd.Series(True, index=df.index)
 
         sv_groups: Dict[Any, pd.DataFrame] = {}
 
-        # NaN 单独分箱
+        # NaN gets its own bin
         if self._sv_has_nan:
             nan_mask = df[feat].isna()
             sv_groups[float("nan")] = df[nan_mask]
             mask_normal &= ~nan_mask
         else:
-            # NaN 不单独分箱 → 普通分箱时直接 dropna（_compute_woe_table 内部处理）
+            # NaN does not get its own bin → drop it for the ordinary binning (_compute_woe_table handles this internally)
             mask_normal &= df[feat].notna()
 
-        # 数值特殊值
+        # Numeric special values
         for sv in self._sv_numeric:
             sv_mask = (df[feat] == sv)
             sv_groups[sv] = df[sv_mask]
@@ -535,12 +540,12 @@ class MonotoneWOEBinner:
             return False
         return isinstance(equal, (bool, np.bool_)) and bool(equal)
 
-    # ── 分组绘图(by-group)用的分箱辅助：数值=edges，类别=取值映射 ──────────────
+    # ── Binning helpers for by-group plots: numeric = edges, categorical = value mapping ──────────────
 
     @staticmethod
     def _cat_to_bin_map(vr: Dict) -> Dict:
-        """类别特征：构建 {类别取值 -> 普通箱索引} 映射
-        （含 refine_cate 合并后的成员展开）。"""
+        """Categorical features: build the {category value -> ordinary-bin index} mapping
+        (including the expansion of members merged by refine_cate)."""
         wt = vr["woe_table"]
         has_members = "cat_members" in wt.columns
         has_value   = "cat_value"   in wt.columns
@@ -559,10 +564,10 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _sv_table_entries(sv_table: pd.DataFrame) -> list:
-        """按 apply_woe 的口径解析特殊值箱标签，返回 [(label, key, is_placeholder)]。
+        """Parse the special-value bin labels the way apply_woe does; return [(label, key, is_placeholder)].
 
-        key：'[Missing]' → None；'[sv=x]' → float(x)，无法转数值时为原字符串。
-        is_placeholder：sv_policy_applied == 'unseen_at_fit'。
+        key: '[Missing]' → None; '[sv=x]' → float(x), or the original string if it cannot be converted to a number.
+        is_placeholder: sv_policy_applied == 'unseen_at_fit'.
         """
         import re
 
@@ -591,20 +596,23 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _series_eq(series: pd.Series, value) -> np.ndarray:
-        """与 apply_woe 相同的取值匹配（dtype 不兼容时退回 object 比较）。"""
+        """Match values the same way apply_woe does (falls back to object comparison when the dtypes are incompatible)."""
         try:
             return series.eq(value).to_numpy(dtype=bool, na_value=False)
         except TypeError:
             return series.astype(object).eq(value).to_numpy(dtype=bool, na_value=False)
 
     def _split_special_for_plot(self, df: pd.DataFrame, feat: str, vr: Dict):
-        """分组绘图用的特殊值拆分。
-        数值特征：以拟合表为准（与 apply_woe 同口径）——只把表里有箱（含 unseen_at_fit
-                  占位箱）的特殊值拆出，按标签解析出的取值匹配；表里没有箱的声明特殊值
-                  apply_woe 会按普通数值归箱，这里同样留在普通行里。NaN 永远不进普通箱，
-                  声明了 NaN 或表里有 [Missing] 箱时拆为 [Missing]。
-        类别特征：仅把 NaN 拆为 [Missing]（与 _categorical_fit_one 口径一致），
-                  数值不视为特殊值。
+        """Split the special values for by-group plots.
+
+        Numeric features: the fitted table is authoritative (same convention as apply_woe) - only
+                  special values that have a bin in the table (including unseen_at_fit placeholder
+                  bins) are split out, matched by the value parsed from the label; declared special
+                  values without a bin in the table are binned by apply_woe as ordinary numbers, and
+                  stay in the ordinary rows here as well. NaN never goes into an ordinary bin: it is
+                  split out as [Missing] when NaN was declared or the table has a [Missing] bin.
+        Categorical features: only NaN is split out as [Missing] (same convention as _categorical_fit_one);
+                  numbers are not treated as special values.
         """
         if vr.get("is_categorical"):
             nan_mask = df[feat].isna()
@@ -620,19 +628,20 @@ class MonotoneWOEBinner:
         if self._sv_has_nan or any(key is None for _, key, _ in entries):
             sv_groups[float("nan")] = df[nan_arr]
         for label, key, _ in entries:
-            # 以标签原文作键，保证 _sv_label(键) 与表里的 bin_label 一致
+            # Use the original label text as the key so that _sv_label(key) matches the bin_label in the table
             text = label[len("[sv="):-1]
             if key is None or text in sv_groups:
                 continue
-            # 每行只归入第一个匹配的箱：表里两行解析成同一数值（如格式 B 按 [-1, -1.0]
-            # 造出的两行）时不重复计数
+            # Each row goes into the first matching bin only: when two table rows parse to the same
+            # number (e.g. the two rows format B builds from [-1, -1.0]), rows are not counted twice
             sv_arr = self._series_eq(values, key) & normal_arr
             sv_groups[text] = df[sv_arr]
             normal_arr &= ~sv_arr
         return df[normal_arr], sv_groups
 
     def _declared_numeric_specials(self) -> list:
-        """声明的数值特殊值（排除 NaN / bool / 非数值），按数值去重，保留首次出现的写法。"""
+        """Return the declared numeric special values (excluding NaN / bool / non-numeric), de-duplicated
+        by value and keeping the first spelling seen."""
         out: list = []
         for sv in self._sv_numeric:
             if _is_numeric_special(sv) and not any(float(sv) == float(v) for v in out):
@@ -640,11 +649,12 @@ class MonotoneWOEBinner:
         return out
 
     def _record_unseen_special_values(self) -> None:
-        """fit 末尾调用：记录声明了、但拟合样本里一行都没有的数值特殊值。
+        """Record numeric special values that were declared but have no rows in the fit sample (called at the end of fit).
 
-        以拟合表为准按数值比较（-1 与 -1.0 视为同一取值）。normal_bin 下整次 fit 汇总
-        成一条告警（warnings + logger.warning）；neutral 下这些取值已有 unseen_at_fit
-        占位箱，只记录不告警。
+        Values are compared numerically against the fitted table (-1 and -1.0 count as the same value).
+        Under normal_bin the whole fit is summarized in a single warning (warnings + logger.warning);
+        under neutral these values already have an unseen_at_fit placeholder bin, so they are
+        recorded without a warning.
         """
         unseen: Dict[str, list] = {}
         declared = self._declared_numeric_specials()
@@ -675,11 +685,12 @@ class MonotoneWOEBinner:
             warnings.warn(message, UserWarning, stacklevel=3)
 
     def _unseen_special_hits(self, series: pd.Series, sv_table: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """apply_woe 用：数据中出现、但拟合样本里没有真实行的数值特殊值。
+        """Find numeric special values that appear in the data (used by apply_woe) but have no real rows in the fit sample.
 
-        以拟合表为准按数值比较：unseen_at_fit 占位箱 → 'neutral'（得占位箱 WOE）；
-        声明了但表里没有箱 → 'normal_bin'（按普通数值归箱）。无命中时返回 None。
-        取值按本实例声明的写法报告，未声明时用表里解析出的数值。
+        Values are compared numerically against the fitted table: an unseen_at_fit placeholder bin → 'neutral'
+        (gets the placeholder bin's WOE); declared but with no bin in the table → 'normal_bin' (binned as an
+        ordinary number). Returns None when nothing matches.
+        Values are reported with the spelling declared on this instance, or the number parsed from the table if undeclared.
         """
         entries = self._sv_table_entries(sv_table)
         table_keys = {key for _, key, _ in entries if isinstance(key, float)}
@@ -699,7 +710,7 @@ class MonotoneWOEBinner:
         if not candidates:
             return None
 
-        # 逐个取值比较即可：Series.isin 预筛在大表上反而比逐值 eq 慢一个数量级
+        # Comparing one value at a time is enough: an up-front Series.isin filter is an order of magnitude slower than per-value eq on large tables
         hit_values: list = []
         handled = set()
         neutral_woe = set()
@@ -723,8 +734,9 @@ class MonotoneWOEBinner:
 
     def _assign_normal_bins(self, sub: pd.DataFrame, feat: str, vr: Dict,
                             fitted_edges: list) -> pd.Series:
-        """把普通行映射到普通箱索引（NaN = 未命中，不计入任何箱）。
-        数值特征：pd.cut on edges；类别特征：按取值查 cat_to_bin。
+        """Map ordinary rows to ordinary-bin indices (NaN = no match, not counted in any bin).
+
+        Numeric features: pd.cut on edges; categorical features: look up cat_to_bin by value.
         """
         if len(sub) == 0:
             return pd.Series([], dtype=float, index=sub.index)
@@ -737,21 +749,26 @@ class MonotoneWOEBinner:
 
     def _group_iv_for_plot(self, grp_df: pd.DataFrame, feat: str, vr: Dict,
                            fitted_edges: list) -> tuple:
-        """分组绘图用的组内 IV，返回 (普通箱 IV, 特殊值箱 IV)。
+        """Compute the within-group IV for by-group plots; return (ordinary-bin IV, special-value-bin IV).
 
-        与拟合时 vr["iv"] 同口径，只把样本换成该组：
-          - 普通箱：按拟合分箱归箱，分母 = 该组落入普通箱的行的 bad/good
-          - 特殊值箱：分母 = 该组全部行的 bad/good，沿用拟合时的
-            sv_policy_applied 决策、不在组内重判占比：keep → 经验值（拟合启用
-            平滑时按拟合时的平滑参数平滑）；neutral / neutral(fallback) → 0；
-            merged_into_missing → 行并入该组 [Missing]；merge_target → 合并后经验值（不平滑）
-          - 单类箱：组内 bad 或 good 为 0 且未经平滑的箱（普通箱、merge_target、未启用
-            laplace 的特殊值箱）不计入，与筛选 IV 的 iv_guard 口径一致，避免 eps 把个别
-            空类箱放大成虚高 IV；laplace 平滑过的特殊值箱 WOE 有限，照常计入
-        以整份拟合样本为一组时，两部分之和等于 vr["iv"]——前提是拟合样本中未经平滑的
-        箱两类齐全、没有落不进任何箱的取值（如 -inf），且特殊值决策可得：本次 fit 所得，或经
-        get_final_bins → load_woe_bins 的 Format-A attrs 恢复。CSV/Excel 回载（attrs
-        丢失）与格式 B 不带决策，特殊值箱一律按 keep 经验值计。
+        Uses the same convention as vr["iv"] at fit time, with the sample replaced by this group:
+          - Ordinary bins: rows are assigned to the fitted bins; the denominators are the bad/good
+            counts of the group's rows that fall into ordinary bins.
+          - Special-value bins: the denominators are the bad/good counts of all rows of the group; the
+            sv_policy_applied decision made at fit time is reused and the share is not re-judged within
+            the group: keep → empirical value (smoothed with the fit-time smoothing parameters if
+            smoothing was enabled at fit); neutral / neutral(fallback) → 0;
+            merged_into_missing → rows join the group's [Missing]; merge_target → empirical value after
+            merging (not smoothed).
+          - Single-class bins: unsmoothed bins whose bad or good count in the group is 0 (ordinary bins,
+            merge_target, special-value bins without laplace) are not counted, matching the iv_guard
+            convention of the screening IV, so that eps cannot blow a few one-class bins up into an
+            inflated IV; special-value bins smoothed with laplace have a finite WOE and count as usual.
+        With the whole fit sample as one group, the two parts add up to vr["iv"], provided that the
+        unsmoothed bins of the fit sample contain both classes, no value falls outside every bin (e.g. -inf),
+        and the special-value decisions are available: from this fit, or restored from the Format-A attrs
+        through get_final_bins → load_woe_bins. Reloading from CSV/Excel (attrs lost) and format B carry
+        no decisions, so special-value bins are always computed as keep (empirical values).
         """
         target = self.target_col
         normal_df, sv_groups = self._split_special_for_plot(grp_df, feat, vr)
@@ -774,14 +791,14 @@ class MonotoneWOEBinner:
             policy_recorded = "sv_policy_applied" in sv_table.columns
             policies = (list(sv_table["sv_policy_applied"]) if policy_recorded
                         else ["keep"] * len(sv_table))
-            # load_woe_bins 恢复的拟合平滑参数优先；fit 所得的分箱沿用实例参数
+            # Fit-time smoothing parameters restored by load_woe_bins take precedence; bins produced by fit use the instance parameters
             smoothing = vr.get("sv_smoothing") or {}
             method = smoothing.get("woe_smoothing")
             method = self.sv_woe_smoothing if method is None else method
             alpha = smoothing.get("smoothing_alpha")
             alpha = self.sv_smoothing_alpha if alpha is None else alpha
             labels = list(sv_table["bin_label"])
-            # 多个特殊值渲染成同一标签时取第一个非空子集（与柱图匹配口径一致）
+            # When several special values render to the same label, take the first non-empty subset (consistent with the bar-chart matching)
             rows_by_label: Dict[str, pd.DataFrame] = {}
             for sv, rows in sv_groups.items():
                 lb = _sv_label(sv)
@@ -803,7 +820,7 @@ class MonotoneWOEBinner:
                     rows, full_bad, full_good, smooth=smooth,
                     woe_smoothing=method, smoothing_alpha=alpha,
                 )
-                # 平滑后的单类箱 WOE 有限、不会被 eps 放大，照常计入
+                # A smoothed single-class bin has a finite WOE that eps cannot blow up, so it is counted as usual
                 smoothed = smooth and method == "laplace" and alpha > 0.0
                 if smoothed or (stats["bad"] > 0 and stats["good"] > 0):
                     iv_sv += stats["iv"]
@@ -814,11 +831,12 @@ class MonotoneWOEBinner:
         smooth: bool = False, *, woe_smoothing: Optional[str] = None,
         smoothing_alpha: Optional[float] = None,
     ) -> Dict[str, float]:
-        """计算某子集的 bad/good/woe/iv 等统计量。
+        """Compute statistics (bad / good / woe / iv, etc.) for a subset of rows.
 
-        ``smooth=True`` 允许 G19 的拉普拉斯平滑生效（仅 SV 箱路径显式开启，
-        普通箱调用保持 ``smooth=False``、口径不变）。``woe_smoothing`` /
-        ``smoothing_alpha`` 为 None 时取实例参数；分组 IV 借此传入加载时恢复的拟合参数。
+        ``smooth=True`` lets the G19 Laplace smoothing take effect (explicitly enabled only on the
+        SV-bin path; ordinary-bin calls keep ``smooth=False`` and their convention is unchanged).
+        When ``woe_smoothing`` / ``smoothing_alpha`` are None the instance parameters are used; the
+        group IV uses this to pass in the fit-time parameters restored at load time.
         """
         eps = self.eps
         n    = len(sub)
@@ -828,9 +846,9 @@ class MonotoneWOEBinner:
         method = self.sv_woe_smoothing if woe_smoothing is None else woe_smoothing
         alpha  = self.sv_smoothing_alpha if smoothing_alpha is None else smoothing_alpha
         if smooth and method == "laplace" and alpha > 0.0:
-            # 把箱内 bad_rate 向全局基准率 p 收缩，再换算回等效 bad/good 计数。
-            # 该式在 alpha→∞ 时 bad_rate→p，WOE→0（严格单调收缩到中性）；
-            # 直接给 pct_bad/pct_good 加伪计数则会收敛到 logit(p) 而非 0。
+            # Shrink the in-bin bad_rate toward the global base rate p, then convert back to equivalent bad/good counts.
+            # With this formula bad_rate→p and WOE→0 as alpha→∞ (strictly monotone shrinkage to neutral);
+            # adding pseudo-counts directly to pct_bad/pct_good would converge to logit(p) instead of 0.
             a = alpha
             p = total_bad / (total_bad + total_good + eps)
             r = (bad + a * p) / (bad + good + a)
@@ -848,7 +866,7 @@ class MonotoneWOEBinner:
     def _compute_woe_table(
         self, df: pd.DataFrame, feat: str, edges: list
     ) -> tuple:
-        """给定分割点 edges，计算普通箱的 WOE 明细表和 IV。"""
+        """Compute the WOE detail table and IV of the ordinary bins for the given cut points edges."""
         sub = df[[feat, self.target_col]].dropna(subset=[feat])
         if len(sub) == 0 or len(edges) == 0:
             bins = pd.Series([0] * len(sub), index=sub.index)
@@ -890,16 +908,16 @@ class MonotoneWOEBinner:
         self, sv_groups: Dict, total_bad: float, total_good: float
     ) -> pd.DataFrame:
         """
-        计算所有特殊值的独立 WOE 明细，返回 DataFrame。
-        每行对应一个特殊值，bin_label 为 '[sv=xxx]' 或 '[Missing]'。
+        Compute the independent WOE details of every special value and return a DataFrame.
+        Each row corresponds to one special value; bin_label is '[sv=xxx]' or '[Missing]'.
 
-        G19：当 sv_small_policy / sv_woe_smoothing 启用时，按固定顺序决策
-        （方式1 兜底优先，方式2 平滑仅作用于占比达标的保留箱），并额外产出
-        ``sv_policy_applied`` 审计列。
+        G19: when sv_small_policy / sv_woe_smoothing are enabled, decisions are made in a fixed order
+        (approach 1, the fallback, takes precedence; approach 2, smoothing, only applies to retained
+        bins that meet the share threshold), and an extra ``sv_policy_applied`` audit column is produced.
 
-        unseen_special_policy='neutral' 时，样本数为 0 的声明数值特殊值在全部治理
-        决策之后追加占位行（n=0、woe=missing_woe、iv=0、
-        sv_policy_applied='unseen_at_fit'），不参与小占比判断 / 合并 / 平滑。
+        With unseen_special_policy='neutral', declared numeric special values with zero samples get a
+        placeholder row appended after all governance decisions (n=0, woe=missing_woe, iv=0,
+        sv_policy_applied='unseen_at_fit'); they take no part in the small-share check / merging / smoothing.
         """
         governance_on = (
             self.sv_small_policy != "keep" or self.sv_woe_smoothing != "none"
@@ -935,7 +953,7 @@ class MonotoneWOEBinner:
                     stats["iv"] = 0.0
                     stats["sv_policy_applied"] = "neutral"
                 elif is_small:
-                    # merge_missing：先留经验值，全部 SV 收集完后再合并
+                    # merge_missing: keep the empirical value for now and merge once all SVs are collected
                     stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
                     stats["sv_policy_applied"] = "pending_merge"
                 else:
@@ -957,7 +975,7 @@ class MonotoneWOEBinner:
             sv_table = self._merge_small_into_missing(
                 sv_table, missing_row_idx, total_bad, total_good
             )
-        # 占位箱按数值去重：与真实行、与其它占位箱都不重复（-1 与 -1.0 视为同一取值）
+        # De-duplicate placeholder bins by value: no overlap with real rows or other placeholder bins (-1 and -1.0 count as the same value)
         taken = {key for _, key, _ in self._sv_table_entries(sv_table) if isinstance(key, float)}
         placeholder_svs = []
         for sv in unseen_values:
@@ -983,16 +1001,17 @@ class MonotoneWOEBinner:
         self, sv_table: pd.DataFrame, missing_row_idx: Optional[int],
         total_bad: float, total_good: float,
     ) -> pd.DataFrame:
-        """把 pending_merge 的低占比 SV 行并入 [Missing] 行并重算 WOE。
+        """Merge the low-share pending_merge SV rows into the [Missing] row and recompute the WOE.
 
-        被合并行保留自己的行，但其存表 WOE 被改写为 [Missing] 重算后的 WOE，
-        iv 置 0（避免与合并目标重复计入总 IV）。这样 apply_woe 的
-        ``bin_label -> woe`` 映射天然指向缺失箱口径，transform 侧零改动。
-        无 [Missing] 箱时降级为 neutral 并告警。
+        A merged row keeps its own row, but its stored WOE is overwritten with the WOE recomputed for
+        [Missing], and its iv is set to 0 (so the total IV does not count it twice with the merge target).
+        This way the ``bin_label -> woe`` mapping used by apply_woe naturally points to the missing-bin
+        convention, and the transform side needs no change.
+        Without a [Missing] bin it falls back to neutral and warns.
 
-        n/bad/good 是**转移**而非复制：合并目标加上、来源行清零。否则
-        ``sv_table["n"].sum()`` 会重复计数，进而污染 pct_n/lift 与
-        transform 侧的 fit_missing_rate 漂移基线。
+        n/bad/good are **transferred**, not copied: the merge target gains them and the source row is
+        zeroed. Otherwise ``sv_table["n"].sum()`` would double count, which would in turn corrupt
+        pct_n/lift and the fit_missing_rate drift baseline on the transform side.
         """
         pend = sv_table["sv_policy_applied"] == "pending_merge"
         if not pend.any():
@@ -1180,43 +1199,43 @@ class MonotoneWOEBinner:
         chi2_init_size: int,
     ) -> list:
         """
-        在贪心单调分箱结果的基础上，做卡方后合并。
+        Merge adjacent bins by chi-square test on top of the greedy monotone binning result.
 
-        算法
-        ----
-        1. 若普通行数 > chi2_init_size，按 target 比例分层采样 chi2_init_size 行
-           用于卡方统计（不改动 edges 本身的全量评估）
-        2. 迭代：计算所有相邻箱对的卡方 p 值
-           a. 若所有相邻对 p < alpha (= 1 - chi2_p)，停止
-           b. 否则选 p 值最大（最不显著）的相邻对尝试合并
-           c. 合并后检验 WOE 是否仍单调（基于全量普通行）
-              - 单调：接受合并，更新 edges
-              - 不单调：标记该对为「禁止合并」，跳过后继续
-           d. 若所有可合并对均被禁止，停止
-        3. 若合并后 edges 剩余箱数 < min_n_bins，停止
+        Algorithm
+        ---------
+        1. If the number of ordinary rows is > chi2_init_size, draw a stratified sample of chi2_init_size
+           rows by target ratio for the chi-square statistics (the full-data evaluation of edges is unchanged)
+        2. Iterate: compute the chi-square p-value of every adjacent bin pair
+           a. If every adjacent pair has p < alpha (= 1 - chi2_p), stop
+           b. Otherwise try to merge the adjacent pair with the largest p-value (least significant)
+           c. After merging, check that the WOE is still monotone (on all ordinary rows)
+              - monotone: accept the merge and update edges
+              - not monotone: mark the pair as "merge forbidden", skip it and continue
+           d. If every mergeable pair is forbidden, stop
+        3. If the number of bins left after merging is < min_n_bins, stop
 
         Parameters
         ----------
-        df_normal      : 已剔除特殊值的普通行 DataFrame
-        feat           : 特征列名
-        edges          : 贪心分箱的切割点列表（in-place 不修改，返回新列表）
-        chi2_p         : 置信度，如 0.99；alpha = 1 - chi2_p
-        chi2_init_size : 采样上限
+        df_normal      : DataFrame of ordinary rows with the special values removed
+        feat           : feature column name
+        edges          : list of cut points from the greedy binning (not modified in place; a new list is returned)
+        chi2_p         : confidence level, e.g. 0.99; alpha = 1 - chi2_p
+        chi2_init_size : sampling cap
 
         Returns
         -------
-        new_edges : 卡方合并后的切割点列表
+        new_edges : list of cut points after the chi-square merging
         """
         from scipy.stats import chi2 as chi2_dist
 
         alpha = 1.0 - chi2_p
-        edges = list(edges)   # 不改动原始列表
+        edges = list(edges)   # do not modify the original list
 
-        # ── 采样（stratified by target）──
+        # ── Sampling (stratified by target) ──
         sub_full = df_normal[[feat, self.target_col]].dropna(subset=[feat])
         n_full   = len(sub_full)
         if n_full > chi2_init_size:
-            # 按 target 分层采样（用 index 采样避免 groupby 把 target 列变成索引）
+            # Stratified sampling by target (sample by index so that groupby does not turn the target column into the index)
             sampled_idx = []
             for tval, grp in sub_full.groupby(self.target_col, sort=False):
                 n_take = max(1, int(round(chi2_init_size * len(grp) / n_full)))
@@ -1225,7 +1244,7 @@ class MonotoneWOEBinner:
                     grp.sample(n=n_take, random_state=42).index.tolist()
                 )
             sampled = sub_full.loc[sampled_idx]
-            # 若分层采样行数不足（极不平衡），补全到 chi2_init_size
+            # If the stratified sample has too few rows (extreme imbalance), top it up to chi2_init_size
             if len(sampled) < chi2_init_size:
                 remain = sub_full.drop(sampled.index)
                 n_extra = min(chi2_init_size - len(sampled), len(remain))
@@ -1237,7 +1256,7 @@ class MonotoneWOEBinner:
             df_chi2 = sub_full
 
         def _bin_series(df_slice, edge_list):
-            """将 df_slice[feat] 按 edge_list 分箱，返回 bin 编号 Series。"""
+            """Bin df_slice[feat] by edge_list and return the bin-number Series."""
             if not edge_list:
                 return pd.Series(0, index=df_slice.index)
             return pd.cut(
@@ -1248,8 +1267,8 @@ class MonotoneWOEBinner:
 
         def _chi2_pval_pair(df_slice, edge_list, bi):
             """
-            计算 bi 和 bi+1 箱合并前的卡方 p 值（2x2 列联表）。
-            返回 p_value；若某箱样本为 0 则返回 1.0（默认可合并）。
+            Compute the chi-square p-value of bins bi and bi+1 before merging (2x2 contingency table).
+            Return p_value; if either bin has no samples, return 1.0 (mergeable by default).
             """
             bins = _bin_series(df_slice, edge_list)
             df_c = df_slice.copy()
@@ -1259,17 +1278,17 @@ class MonotoneWOEBinner:
             grp_j  = df_c[df_c["_bin"] == bi + 1]
 
             if len(grp_i) == 0 or len(grp_j) == 0:
-                return 1.0  # 空箱，可合并
+                return 1.0  # empty bin, mergeable
 
             bad_i  = float((grp_i[self.target_col] == 1).sum())
             good_i = float((grp_i[self.target_col] == 0).sum())
             bad_j  = float((grp_j[self.target_col] == 1).sum())
             good_j = float((grp_j[self.target_col] == 0).sum())
 
-            # 2×2 列联表: [[bad_i, good_i], [bad_j, good_j]]
+            # 2x2 contingency table: [[bad_i, good_i], [bad_j, good_j]]
             table = np.array([[bad_i, good_i], [bad_j, good_j]])
 
-            # 若任一格期望值为 0，退化：返回 p=0（不合并）
+            # If any cell has an expected value of 0, degenerate case: return p=0 (do not merge)
             row_sum = table.sum(axis=1, keepdims=True)
             col_sum = table.sum(axis=0, keepdims=True)
             total   = table.sum()
@@ -1279,39 +1298,39 @@ class MonotoneWOEBinner:
             if np.any(expected == 0):
                 return 0.0
 
-            # 手动计算卡方（避免 scipy 依赖问题时的稳定性）
+            # Compute the chi-square manually (stays stable even if scipy has dependency problems)
             chi2_val = float(np.sum((table - expected) ** 2 / expected))
-            # chi2 分布自由度 = (行-1)*(列-1) = 1
+            # Degrees of freedom of the chi2 distribution = (rows-1)*(cols-1) = 1
             p_val = 1.0 - chi2_dist.cdf(chi2_val, df=1)
             return p_val
 
-        forbidden = set()   # 被禁止合并的 (bi) 索引集合（相对当前 edges）
+        forbidden = set()   # set of (bi) indices that are forbidden to merge (relative to the current edges)
 
         for _iter in range(200):
             n_bins = len(edges) + 1
             if n_bins <= self.min_n_bins:
                 break
 
-            # 计算所有相邻对的 p 值
+            # Compute the p-value of every adjacent pair
             pvals = []
             for bi in range(n_bins - 1):
                 p = _chi2_pval_pair(df_chi2, edges, bi)
                 pvals.append((bi, p))
 
-            # 过滤已禁止 & p < alpha 的对
+            # Filter out the forbidden pairs and the pairs with p < alpha
             candidates = [(bi, p) for bi, p in pvals
                           if p >= alpha and bi not in forbidden]
 
             if not candidates:
-                break   # 所有相邻对都显著（或被禁），停止
+                break   # every adjacent pair is significant (or forbidden): stop
 
-            # 选 p 值最大（最不显著）的对尝试合并
+            # Try to merge the pair with the largest p-value (least significant)
             best_bi, best_p = max(candidates, key=lambda x: x[1])
 
-            # 试合并：移除 edges[best_bi]
+            # Trial merge: remove edges[best_bi]
             trial_edges = [e for i, e in enumerate(edges) if i != best_bi]
 
-            # 检验合并后 WOE 是否仍单调（基于全量普通行）
+            # Check that the WOE is still monotone after merging (on all ordinary rows)
             wt_trial, _ = self._compute_woe_table(sub_full, feat, trial_edges)
             woes_trial  = wt_trial.sort_values("bin")["woe"].values
 
@@ -1322,13 +1341,13 @@ class MonotoneWOEBinner:
                 else self._is_monotone_dir(woes_trial, expected_dir)
             )
             if trial_ok:
-                # 接受合并
+                # accept the merge
                 edges = trial_edges
-                # forbidden 索引需要更新（被合并箱之后的索引都 -1）
+                # the forbidden indices must be updated (every index after the merged bin shifts by -1)
                 forbidden = {bi - (1 if bi > best_bi else 0)
                              for bi in forbidden if bi != best_bi}
             else:
-                # 拒绝：禁止该对后继续
+                # reject: forbid this pair and continue
                 forbidden.add(best_bi)
 
         return edges
@@ -1342,26 +1361,26 @@ class MonotoneWOEBinner:
         chi2_init_size: int = 1000,
     ) -> Dict[str, Any]:
         """
-        对单个特征进行贪心单调 WOE 分箱（+ 可选卡方后合并），支持特殊值剔除。
-        类别特征(cate_feats)走 _categorical_fit_one，不做区间切分。
+        Run greedy monotone WOE binning (+ optional chi-square merging) on a single feature, with special values removed.
+        Categorical features (cate_feats) go through _categorical_fit_one and are not cut into intervals.
         """
-        # 0. 类别特征：每个取值直接成箱，直接算 WOE/IV，不做区间切分
+        # 0. Categorical feature: each value becomes its own bin, WOE/IV computed directly, no interval cutting
         if feat in self._cate_feats_set:
             return self._categorical_fit_one(df, feat)
 
-        # 1. 剔除特殊值，获取普通行和特殊值子集
+        # 1. Remove the special values to get the ordinary rows and the special-value subsets
         df_normal, sv_groups = self._split_special(df, feat)
 
-        # 全量总体（含特殊值）的 bad/good，用于计算 pct_bad/pct_good
+        # bad/good of the full population (special values included), used to compute pct_bad/pct_good
         total_bad  = float(df[self.target_col].sum())
         total_good = float((df[self.target_col] == 0).sum())
 
-        # 2. 对普通行进行贪心单调分箱
+        # 2. Run greedy monotone binning on the ordinary rows
         col = as_binning_numeric(df_normal[feat]).dropna()
         n   = len(col)
 
         if n < 10:
-            # 普通行太少，退化为单箱
+            # too few ordinary rows: degrade to a single bin
             wt, iv = self._compute_woe_table(df_normal, feat, [])
             sv_table = self._compute_sv_table(sv_groups, total_bad, total_good)
             sv_iv = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
@@ -1371,7 +1390,7 @@ class MonotoneWOEBinner:
 
         min_n = max(int(n * self.min_bin_size), 5)
 
-        # 等频初始分位数边界
+        # Initial equal-frequency quantile boundaries
         quantiles = np.linspace(0, 100, self.n_init_bins + 1)
         raw_edges = np.unique(np.nanpercentile(col.values, quantiles[1:-1]))
 
@@ -1392,7 +1411,7 @@ class MonotoneWOEBinner:
         )
         merge_trace: Optional[list] = [] if governance_on else None
 
-        # 贪心合并
+        # Greedy merging
         for _ in range(100):
             woes = wt.sort_values("bin")["woe"].values
             if expected_dir is None:
@@ -1430,7 +1449,7 @@ class MonotoneWOEBinner:
 
         woes_final = wt.sort_values("bin")["woe"].values
 
-        # ── 卡方后合并（可选）──────────────────────────────────────────────
+        # ── Chi-square merging (optional) ──────────────────────────────────────
         if chi2_binning and len(edges) >= 1:
             edges = self._chi2_merge_one(
                 df_normal, feat, edges, chi2_p, chi2_init_size
@@ -1438,17 +1457,17 @@ class MonotoneWOEBinner:
             wt, iv = self._compute_woe_table(df_normal, feat, edges)
             woes_final = wt.sort_values("bin")["woe"].values
 
-        # ── G08：最小坏/好样本数治理（默认关闭） ──────────────────────────
+        # ── G08: minimum bad/good count governance (off by default) ──────────────────────────
         if self.small_bin_policy is not None:
             edges, wt = self._enforce_small_bins(df_normal, feat, edges, wt, merge_trace)
             iv = float(wt["iv"].sum()) if len(wt) else 0.0
             woes_final = wt.sort_values("bin")["woe"].values
 
-        # ── G09：方向冲突检查（默认关闭） ────────────────────────────────
+        # ── G09: direction-conflict check (off by default) ────────────────────────────────
         if expected_dir is not None:
             self._check_direction_conflict(feat, woes_final)
 
-        # 计算特殊值箱
+        # Compute the special-value bins
         sv_table = self._compute_sv_table(sv_groups, total_bad, total_good)
         sv_iv = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
 
@@ -1468,7 +1487,7 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _sort_categories(cats: list) -> list:
-        """对类别取值做稳健排序（同类型自然排序；混合类型回退按字符串排序）。"""
+        """Sort category values robustly (natural order for a single type; falls back to string order for mixed types)."""
         try:
             return sorted(cats)
         except TypeError:
@@ -1476,25 +1495,25 @@ class MonotoneWOEBinner:
 
     def _categorical_fit_one(self, df: pd.DataFrame, feat: str) -> Dict[str, Any]:
         """
-        对单个**已离散化的类别特征**直接计算 WOE/IV，不做任何区间切分。
+        Compute WOE/IV directly for one **already-discretized categorical feature**, with no interval cutting.
 
-        每个不同的取值各自成一箱，箱标签即取值本身；缺失值(NaN)若存在则单独
-        归为 [Missing] 箱（追加进 sv_table，独立计算 WOE）。
+        Each distinct value becomes its own bin and the bin label is the value itself; missing values (NaN),
+        if present, go into a separate [Missing] bin (appended to sv_table, WOE computed independently).
 
-        WOE/IV 口径与数值特征保持一致：
-          - 普通类别箱：pct_bad/pct_good 以**非缺失**样本的 bad/good 为分母
-          - [Missing] 箱：以**全量**样本的 bad/good 为分母（与 _compute_sv_table 一致）
-          - 总 IV = 各类别箱 IV 之和 + [Missing] 箱 IV
+        WOE/IV follow the same convention as numeric features:
+          - Ordinary category bins: pct_bad/pct_good use the bad/good counts of the **non-missing** samples as denominators
+          - [Missing] bin: uses the bad/good counts of the **full** sample as denominators (consistent with _compute_sv_table)
+          - Total IV = sum of the IVs of the category bins + the IV of the [Missing] bin
         """
         sub = df[[feat, self.target_col]]
 
         nan_mask = sub[feat].isna()
         normal   = sub[~nan_mask]
 
-        # 普通类别箱口径：非缺失样本的总 bad/good
+        # Ordinary category bins: total bad/good of the non-missing samples
         norm_total_bad  = float(normal[self.target_col].sum())
         norm_total_good = float((normal[self.target_col] == 0).sum())
-        # [Missing] 箱口径：全量样本的总 bad/good
+        # [Missing] bin: total bad/good of the full sample
         full_total_bad  = float(sub[self.target_col].sum())
         full_total_good = float((sub[self.target_col] == 0).sum())
 
@@ -1523,7 +1542,7 @@ class MonotoneWOEBinner:
 
         normal_iv = float(woe_table["iv"].sum()) if len(woe_table) > 0 else 0.0
 
-        # 缺失值 → [Missing] 箱（复用 sv_table 机制）
+        # Missing values → [Missing] bin (reuses the sv_table mechanism)
         sv_groups = {float("nan"): sub[nan_mask]} if int(nan_mask.sum()) > 0 else {}
         sv_table  = self._compute_sv_table(sv_groups, full_total_bad, full_total_good)
         sv_iv     = float(sv_table["iv"].sum()) if len(sv_table) > 0 else 0.0
@@ -1614,7 +1633,7 @@ class MonotoneWOEBinner:
         return result
 
     # ─────────────────────────────────────────────────────────────────
-    # 公开 API
+    # Public API
     # ─────────────────────────────────────────────────────────────────
 
     def fit(
@@ -1626,44 +1645,45 @@ class MonotoneWOEBinner:
         n_jobs: int = 1,
     ) -> "MonotoneWOEBinner":
         """
-        在训练集上拟合所有特征的单调 WOE 分箱。
+        Fit the monotone WOE binning of all features on the training set.
 
         Parameters
         ----------
-        df             : 训练集 DataFrame，需包含 feature_cols 和 target_col
-        chi2_binning   : 是否在贪心单调分箱后再进行卡方后合并，默认 False。
-                         True 时：当相邻箱的卡方检验 p > (1 - chi2_p)时，
-                         尝试合并该对，并保持 WOE 单调。
-        chi2_p         : 卡方检验置信度，默认 0.99。
-                         较大的值（如 0.99）表示保留更多箱；
-                         较小的值（如 0.90）表示更容易合并。
-        chi2_init_size : 卡方计算时的全局 stratified 采样上限，默认 1000。
-                         若普通行数 > chi2_init_size，按 target 比例分层采样，
-                         避免大数据集下卡方值虚高导致不该合并的箱被强行分开。
-        n_jobs         : 并行线程数，默认 1（顺序执行，行为与旧版完全相同）。
-                         设为 > 1 时使用指定数量的线程；设为 -1 时使用所有可用
-                         CPU 核心。特征数较多（如 3000+）时可显著提速。
+        df             : training DataFrame; must contain feature_cols and target_col
+        chi2_binning   : whether to run chi-square merging after the greedy monotone binning, default False.
+                         When True: if the chi-square test p of an adjacent bin pair is > (1 - chi2_p),
+                         try to merge the pair while keeping the WOE monotone.
+        chi2_p         : confidence level of the chi-square test, default 0.99.
+                         A larger value (e.g. 0.99) merges more readily and leaves fewer bins;
+                         a smaller value (e.g. 0.90) merges less readily and keeps more bins.
+        chi2_init_size : global cap on the stratified sample used for the chi-square computation, default 1000.
+                         If the number of ordinary rows is > chi2_init_size, rows are sampled stratified by
+                         the target ratio, to avoid inflated chi-square values on large datasets
+                         that would keep bins artificially separate.
+        n_jobs         : number of parallel worker processes, default 1 (sequential execution, behavior identical to older versions).
+                         When > 1, that many worker processes are used; -1 uses all available
+                         CPU cores. Can speed things up considerably with many features (e.g. 3000+).
 
         Returns
         -------
-        self (支持链式调用)
+        self (supports chaining)
         """
-        # 待拟合的全部特征 = 数值特征 + 类别特征（去重，保持顺序）
+        # All features to fit = numeric features + categorical features (de-duplicated, order preserved)
         all_fit_feats = list(dict.fromkeys(list(self.feature_cols) + list(self.cate_feats)))
 
         missing_feats = [f for f in all_fit_feats if f not in df.columns]
         if missing_feats:
-            raise ValueError(f"以下特征列不在 DataFrame 中: {missing_feats}")
+            raise ValueError(f"Feature columns not found in the DataFrame: {missing_feats}")
         if self.target_col not in df.columns:
-            raise ValueError(f"目标列 '{self.target_col}' 不在 DataFrame 中")
+            raise ValueError(f"Target column '{self.target_col}' not found in the DataFrame")
 
-        # 检查 scipy 可用性
+        # Check that scipy is available
         if chi2_binning:
             try:
                 from scipy.stats import chi2 as _chi2_check  # noqa
             except ImportError:
                 raise ImportError(
-                    "chi2_binning=True 需要 scipy，请先安装: pip install scipy"
+                    "chi2_binning=True requires scipy; install it first: pip install scipy"
                 )
 
         self._train_n        = len(df)
@@ -1672,7 +1692,7 @@ class MonotoneWOEBinner:
         self._chi2_p         = chi2_p
         self._chi2_init_size = chi2_init_size
 
-        # ── G17：missing_bin_strategy 前置校验与解析（默认 None=按 special_values 推导） ──
+        # ── G17: missing_bin_strategy pre-validation and resolution (default None = derived from special_values) ──
         has_nan_sv = self._sv_has_nan
         if self.missing_bin_strategy == "fail":
             nan_counts = df[all_fit_feats].isna().sum()
@@ -1692,7 +1712,7 @@ class MonotoneWOEBinner:
                 "empirical_special" if has_nan_sv else "fixed_woe"
             )
 
-        # ── G09：解析期望方向（在并行 worker copy 之前，workers 自动继承） ──
+        # ── G09: resolve the expected direction (before the parallel worker copy, so the workers inherit it automatically) ──
         self._expected_direction = {}
         self._direction_basis = {}
         numeric_feats = [f for f in all_fit_feats if f not in self._cate_feats_set]
@@ -1729,15 +1749,15 @@ class MonotoneWOEBinner:
         self._small_bin_stats = {}
         self._direction_stats = {}
 
-        sv_hint   = f"， special_values={self.special_values}" if self.special_values else ""
-        cate_hint = f"， cate_feats={len(self.cate_feats)}个" if self.cate_feats else ""
-        chi2_hint = (f"， chi2_binning=True (p={chi2_p}, sample={chi2_init_size})"
+        sv_hint   = f", special_values={self.special_values}" if self.special_values else ""
+        cate_hint = f", cate_feats={len(self.cate_feats)} features" if self.cate_feats else ""
+        chi2_hint = (f", chi2_binning=True (p={chi2_p}, sample={chi2_init_size})"
                      if chi2_binning else "")
-        logger.info(f"[MonotoneWOEBinner] 开始拟合 {len(all_fit_feats)} 个特征"
+        logger.info(f"[MonotoneWOEBinner] Fitting {len(all_fit_feats)} features"
               f"{sv_hint}{cate_hint}{chi2_hint} ...")
 
         if n_jobs == 0:
-            raise ValueError("n_jobs 不能为 0；请使用正整数或 -1（全部核心）")
+            raise ValueError("n_jobs cannot be 0; use a positive integer or -1 (all cores)")
 
         def _fit_one(feat):
             try:
@@ -1772,16 +1792,16 @@ class MonotoneWOEBinner:
             for feat in all_fit_feats:
                 _, res, err = _fit_one(feat)
                 if err is not None:
-                    logger.info(f"  ✗ {feat}: 拟合失败 — {err[0]}")
+                    logger.info(f"  ✗ {feat}: fit failed - {err[0]}")
                     print(err[1])
                 else:
                     _capture_small_bin_stats(feat, res)
                     self._results[feat] = res
                     _log_feat(feat, res)
         else:
-            # ── 多进程并行（ProcessPoolExecutor）──────────────────────────
-            # 策略：将特征列表均分为 N 块，每块整体发往一个进程，
-            # df 每块只序列化一次（而非每特征一次），大幅降低 IPC 开销。
+            # ── Multiprocess parallelism (ProcessPoolExecutor) ──────────────────────────
+            # Strategy: split the feature list evenly into N chunks and send each chunk to one process as a whole,
+            # so df is serialized once per chunk (not once per feature), which greatly reduces the IPC overhead.
             max_workers = n_jobs if n_jobs > 0 else None
             n_workers   = max_workers or os.cpu_count() or 1
             chunk_size  = max(1, math.ceil(len(all_fit_feats) / n_workers))
@@ -1789,7 +1809,7 @@ class MonotoneWOEBinner:
                 all_fit_feats[i : i + chunk_size]
                 for i in range(0, len(all_fit_feats), chunk_size)
             ]
-            # 轻量副本：只含配置，不含已有拟合结果，减少序列化体积
+            # Lightweight copy: configuration only, without the existing fit results, to reduce the serialized size
             binner_lite = copy.copy(self)
             binner_lite._results   = {}
             binner_lite._is_fitted = False
@@ -1807,7 +1827,7 @@ class MonotoneWOEBinner:
                     ok, err = fut.result()
                     feat_ok.update(ok)
                     feat_err.update(err)
-            # 按原始顺序写回并打印日志
+            # Write back in the original order and print the log
             for feat in all_fit_feats:
                 if feat in feat_ok:
                     _capture_small_bin_stats(feat, feat_ok[feat])
@@ -1817,21 +1837,21 @@ class MonotoneWOEBinner:
                     exc, tb = feat_err[feat]
                     if isinstance(exc, BinningPolicyViolation):
                         raise exc
-                    logger.info(f"  ✗ {feat}: 拟合失败 — {exc}")
+                    logger.info(f"  ✗ {feat}: fit failed - {exc}")
                     print(tb)
 
         self._is_fitted = True
-        # 放在 _is_fitted 之后：告警被设为 error 时 fit 抛错，但分箱结果仍处于已拟合状态
+        # Placed after _is_fitted: when warnings are turned into errors fit raises, but the binning result stays in the fitted state
         self._record_unseen_special_values()
         n_mono = sum(1 for v in self._results.values() if v["is_monotonic"])
         method = "greedy+chi2" if chi2_binning else "greedy"
-        logger.info(f"[MonotoneWOEBinner] 拟合完成 ({method}): "
-              f"{n_mono}/{len(self._results)} 个特征单调")
+        logger.info(f"[MonotoneWOEBinner] Fit finished ({method}): "
+              f"{n_mono}/{len(self._results)} features monotone")
         return self
 
     def _check_fitted(self):
         if not self._is_fitted:
-            raise RuntimeError("请先调用 fit() 或 load_woe_bins() 进行初始化")
+            raise RuntimeError("Call fit() or load_woe_bins() first to initialize the binner")
 
     def refine_chi2(
         self,
@@ -1842,34 +1862,35 @@ class MonotoneWOEBinner:
         n_jobs: int = 1,
     ) -> "MonotoneWOEBinner":
         """
-        在已有贪心分箱结果的基础上，追加卡方后合并（不重跑贪心分箱）。
+        Add chi-square merging on top of existing greedy binning results (without re-running the greedy binning).
 
-        与 fit(chi2_binning=True) 的区别
-        ---------------------------------
-        - 跳过贪心分箱阶段，直接以 self._results 中已有的 edges 为起点
-        - 可在同一份 fit 结果上反复以不同 chi2_p 调参，无需重跑贪心，速度更快
-        - 支持只对指定特征子集执行卡方合并
-        - 特殊值箱 WOE 不受影响，沿用 fit() 时的计算结果
+        Differences from fit(chi2_binning=True)
+        ---------------------------------------
+        - Skips the greedy binning stage and starts directly from the edges already in self._results
+        - Lets you tune chi2_p repeatedly on the same fit result without re-running the greedy step, which is faster
+        - Supports running the chi-square merging on a subset of features only
+        - The WOE of the special-value bins is unaffected and keeps the values computed at fit() time
 
         Parameters
         ----------
-        df             : 原始训练数据（与 fit() 时相同），用于计算卡方统计量
-        features       : 需要做卡方合并的特征列表；默认 None 表示所有已拟合特征
-        chi2_p         : 卡方检验置信度，默认 0.99；较小值（如 0.90）更容易合并箱
-        chi2_init_size : 卡方计算时 stratified 采样上限，默认 1000
-        n_jobs         : 并行线程数，默认 1（顺序执行）。设为 > 1 时使用指定数量
-                         的线程；设为 -1 时使用所有可用 CPU 核心。
+        df             : the original training data (same as in fit()), used to compute the chi-square statistics
+        features       : list of features to merge by chi-square; default None means all fitted features
+        chi2_p         : confidence level of the chi-square test, default 0.99; a larger value merges more
+                         bins, a smaller value (e.g. 0.90) merges fewer
+        chi2_init_size : cap on the stratified sample used for the chi-square computation, default 1000
+        n_jobs         : number of parallel worker processes, default 1 (sequential). When > 1, that many
+                         worker processes are used; -1 uses all available CPU cores.
 
         Returns
         -------
-        self（支持链式调用）
+        self (supports chaining)
 
         Examples
         --------
         >>> binner = MonotoneWOEBinner(feature_cols=["score"], target_col="is_bad")
-        >>> binner.fit(train_df)                                    # 贪心分箱
-        >>> binner.refine_chi2(train_df, chi2_p=0.95, n_jobs=8)    # 并行卡方合并
-        >>> # 或只对部分特征做卡方合并
+        >>> binner.fit(train_df)                                    # greedy binning
+        >>> binner.refine_chi2(train_df, chi2_p=0.95, n_jobs=8)    # parallel chi-square merging
+        >>> # or run the chi-square merging on a subset of features only
         >>> binner.refine_chi2(train_df, features=["score", "income"], chi2_p=0.90)
         """
         self._check_fitted()
@@ -1877,35 +1898,35 @@ class MonotoneWOEBinner:
             from scipy.stats import chi2 as _chi2_check  # noqa
         except ImportError:
             raise ImportError(
-                "refine_chi2() 需要 scipy，请先安装: pip install scipy"
+                "refine_chi2() requires scipy; install it first: pip install scipy"
             )
         if n_jobs == 0:
-            raise ValueError("n_jobs 不能为 0；请使用正整数或 -1（全部核心）")
+            raise ValueError("n_jobs cannot be 0; use a positive integer or -1 (all cores)")
 
         target_feats = features if features is not None else list(self._results.keys())
-        # 类别特征不适用卡方后合并，自动剔除
+        # Chi-square merging does not apply to categorical features; drop them automatically
         _cate_in = [f for f in target_feats if self._results.get(f, {}).get("is_categorical")]
         if _cate_in:
-            logger.info(f"[refine_chi2] 跳过 {len(_cate_in)} 个类别特征（不适用卡方合并）")
+            logger.info(f"[refine_chi2] Skipping {len(_cate_in)} categorical feature(s) (chi-square merging does not apply)")
         target_feats = [f for f in target_feats
                         if not self._results.get(f, {}).get("is_categorical")]
         missing_feats = [f for f in target_feats if f not in self._results]
         if missing_feats:
-            raise ValueError(f"以下特征尚未拟合，无法做 chi2 合并: {missing_feats}")
+            raise ValueError(f"These features have not been fitted yet, so chi2 merging cannot run: {missing_feats}")
         if self.target_col not in df.columns:
-            raise ValueError(f"目标列 '{self.target_col}' 不在 DataFrame 中")
+            raise ValueError(f"Target column '{self.target_col}' not found in the DataFrame")
 
         logger.info(
-            f"[refine_chi2] 对 {len(target_feats)} 个特征做卡方后合并 "
+            f"[refine_chi2] Running chi-square merging on {len(target_feats)} features "
             f"(chi2_p={chi2_p}, sample={chi2_init_size}, n_jobs={n_jobs}) ..."
         )
 
-        # 每个特征的计算完全独立，可安全并行
+        # The computation of each feature is fully independent, so it is safe to parallelize
         def _refine_one(feat):
             vr    = self._results[feat]
             edges = list(vr["edges"])
             if len(edges) < 1:
-                return feat, None, None   # 标记为"跳过"
+                return feat, None, None   # marked as "skipped"
             try:
                 df_normal, _ = self._split_special(df, feat)
                 new_edges = self._chi2_merge_one(
@@ -1943,9 +1964,9 @@ class MonotoneWOEBinner:
 
         def _apply_and_log(feat, ok, err):
             if ok is None and err is None:
-                logger.info(f"  - {feat:40s} | 仅 1 箱，跳过卡方合并")
+                logger.info(f"  - {feat:40s} | only 1 bin, skipping chi-square merging")
             elif err is not None:
-                logger.info(f"  ✗ {feat}: chi2 合并失败 — {err[0]}")
+                logger.info(f"  ✗ {feat}: chi2 merging failed - {err[0]}")
                 print(err[1])
             else:
                 old_nb, update = ok
@@ -1960,7 +1981,7 @@ class MonotoneWOEBinner:
                 feat, ok, err = _refine_one(feat)
                 _apply_and_log(feat, ok, err)
         else:
-            # ── 多进程并行（ProcessPoolExecutor）──────────────────────────
+            # ── Multiprocess parallelism (ProcessPoolExecutor) ──────────────────────────
             max_workers = n_jobs if n_jobs > 0 else None
             n_workers   = max_workers or os.cpu_count() or 1
             chunk_size  = max(1, math.ceil(len(target_feats) / n_workers))
@@ -1971,7 +1992,7 @@ class MonotoneWOEBinner:
             binner_lite = copy.copy(self)
             binner_lite._results   = {}
             binner_lite._is_fitted = False
-            # 只传各特征的 edges 和 sv_iv（轻量），不传完整 _results
+            # Pass only the edges and sv_iv of each feature (lightweight), not the full _results
             edges_map  = {f: list(self._results[f]["edges"]) for f in target_feats}
             sv_iv_map  = {
                 f: float(self._results[f].get("sv_table", pd.DataFrame())["iv"].sum())
@@ -1998,13 +2019,13 @@ class MonotoneWOEBinner:
                         else:
                             feat_ok[feat] = res
                     feat_err.update(err)
-            # 按原始顺序写回并打印日志
+            # Write back in the original order and print the log
             for feat in target_feats:
                 if feat in feat_skip:
-                    logger.info(f"  - {feat:40s} | 仅 1 箱，跳过卡方合并")
+                    logger.info(f"  - {feat:40s} | only 1 bin, skipping chi-square merging")
                 elif feat in feat_err:
                     exc, tb = feat_err[feat]
-                    logger.info(f"  ✗ {feat}: chi2 合并失败 — {exc}")
+                    logger.info(f"  ✗ {feat}: chi2 merging failed - {exc}")
                     print(tb)
                 elif feat in feat_ok:
                     upd = feat_ok[feat]
@@ -2022,8 +2043,8 @@ class MonotoneWOEBinner:
             1 for f in target_feats if len(self._results[f]["edges"]) < 1
         )
         logger.info(
-            f"[refine_chi2] 完成，{len(target_feats) - n_skipped}/{len(target_feats)} "
-            f"个特征参与合并"
+            f"[refine_chi2] Done, {len(target_feats) - n_skipped}/{len(target_feats)} "
+            f"features took part in the merging"
         )
         return self
 
@@ -2032,7 +2053,7 @@ class MonotoneWOEBinner:
     @staticmethod
     def _dtree_edges(df_normal: pd.DataFrame, feat: str, target_col: str,
                      max_bins: int, min_samples_leaf, max_depth: Optional[int] = None) -> list:
-        """用决策树找分割点，返回排好序的内部边界列表。"""
+        """Find the cut points with a decision tree and return the sorted list of internal boundaries."""
         from sklearn.tree import DecisionTreeClassifier
         sub = df_normal[[feat, target_col]].dropna(subset=[feat])
         if len(sub) < 4:
@@ -2047,7 +2068,7 @@ class MonotoneWOEBinner:
         )
         clf.fit(X, y)
         tree = clf.tree_
-        # threshold == -2 表示叶节点，排除后去重排序
+        # threshold == -2 marks a leaf node; exclude those, then de-duplicate and sort
         raw = tree.threshold[tree.feature != -2]
         return sorted(set(float(t) for t in raw))
 
@@ -2056,9 +2077,11 @@ class MonotoneWOEBinner:
                               target_col: str, edges: list,
                               eps: float, direction: Optional[int] = None) -> list:
         """
-        在给定 edges 分箱后，若 WOE 不单调，贪心合并 WOE 方向反转的相邻箱，
-        直到单调为止。direction=None 时自动判断升/降（旧行为：以首个非零
-        差值的符号为主方向）；+1/-1 时强制按指定方向合并（G09）。
+        Greedily merge adjacent bins at WOE direction reversals until the WOE is monotone.
+
+        Applies when the WOE is not monotone after binning by the given edges. With direction=None the
+        increasing/decreasing direction is detected automatically (legacy behavior: the sign of the first
+        non-zero difference is the main direction); +1/-1 forces merging toward the given direction (G09).
         """
         import math as _math
 
@@ -2092,7 +2115,7 @@ class MonotoneWOEBinner:
             woes = _woe_seq(cur)
             if len(woes) <= 1 or _is_mono(woes):
                 break
-            # 找第一个方向反转位置（direction 未指定时按首个非零差值的符号）
+            # Find the first direction reversal (when direction is not given, use the sign of the first non-zero difference)
             main_sign = direction if direction is not None else (
                 np.sign(woes[1] - woes[0]) if len(woes) > 1 else 0
             )
@@ -2100,7 +2123,7 @@ class MonotoneWOEBinner:
                 if main_sign == 0:
                     main_sign = np.sign(woes[i+1] - woes[i])
                 if main_sign != 0 and np.sign(woes[i+1] - woes[i]) not in (main_sign, 0):
-                    # 合并第 i 和 i+1 箱（移除 cur[i]）
+                    # Merge bins i and i+1 (remove cur[i])
                     cur = [e for j, e in enumerate(cur) if j != i]
                     break
         return cur
@@ -2116,41 +2139,42 @@ class MonotoneWOEBinner:
         max_depth: Optional[int] = None,
     ) -> "MonotoneWOEBinner":
         """
-        在已有贪心分箱结果的基础上，用决策树重新划定分割点。
+        Re-draw the cut points with a decision tree, on top of existing greedy binning results.
 
-        与 refine_chi2 的区别
-        ---------------------
-        - refine_chi2  : 在现有 edges 上做后合并（只减少箱数）
-        - refine_dtree : 用决策树从头找最优分割点（可改变箱的位置和数量），
-                         适合需要基于信息增益而非 IV 单调性重新划分的场景
+        Differences from refine_chi2
+        ----------------------------
+        - refine_chi2  : merges bins on the existing edges (can only reduce the number of bins)
+        - refine_dtree : finds the cut points from scratch with a decision tree (can change the position
+                         and number of bins); suited to cases where the bins should be re-drawn
+                         based on information gain rather than on IV monotonicity
 
-        算法
-        ----
-        1. 对每个特征的普通行拟合 DecisionTreeClassifier
+        Algorithm
+        ---------
+        1. Fit a DecisionTreeClassifier on the ordinary rows of each feature
            (max_leaf_nodes=max_bins, min_samples_leaf=min_samples_leaf)
-        2. 提取树的内部阈值作为新 edges
-        3. 若 monotone=True，贪心合并 WOE 方向反转的相邻箱，直到 WOE 单调
-        4. 重新计算 woe_table / iv / n_bins，写回 self._results
+        2. Take the internal thresholds of the tree as the new edges
+        3. If monotone=True, greedily merge adjacent bins at WOE direction reversals until the WOE is monotone
+        4. Recompute woe_table / iv / n_bins and write them back to self._results
 
         Parameters
         ----------
-        df               : 训练集 DataFrame（与 fit() 时相同）
-        features         : 特征子集；默认 None 表示所有已拟合特征
-        max_bins         : 决策树最大叶节点数（即分箱上限），默认 6
-        min_samples_leaf : 决策树每个叶节点的最小样本占比（0~1）或绝对数（≥1），
-                           默认 0.05（5%），用于防止过细分箱
-        monotone         : 是否在决策树分箱后强制 WOE 单调，默认 True
-        n_jobs           : 并行进程数，默认 1；-1 使用所有 CPU 核心
+        df               : training DataFrame (same as in fit())
+        features         : subset of features; default None means all fitted features
+        max_bins         : maximum number of leaf nodes of the decision tree (i.e. the upper limit on the number of bins), default 6
+        min_samples_leaf : minimum sample share (0~1) or absolute count (>= 1) per decision-tree leaf node,
+                           default 0.05 (5%); prevents overly fine bins
+        monotone         : whether to force a monotone WOE after the decision-tree binning, default True
+        n_jobs           : number of parallel processes, default 1; -1 uses all CPU cores
 
         Returns
         -------
-        self（支持链式调用）
+        self (supports chaining)
 
         Examples
         --------
         >>> binner.fit(train_df)
         >>> binner.refine_dtree(train_df, max_bins=5, min_samples_leaf=0.05)
-        >>> # 先贪心分箱，再决策树重新划分，再 chi2 后合并
+        >>> # greedy binning first, then re-draw with a decision tree, then chi2 merging
         >>> binner.fit(train_df).refine_dtree(train_df).refine_chi2(train_df, chi2_p=0.95)
         """
         self._check_fitted()
@@ -2158,26 +2182,26 @@ class MonotoneWOEBinner:
             from sklearn.tree import DecisionTreeClassifier  # noqa
         except ImportError:
             raise ImportError(
-                "refine_dtree() 需要 scikit-learn，请先安装: pip install scikit-learn"
+                "refine_dtree() requires scikit-learn; install it first: pip install scikit-learn"
             )
         if n_jobs == 0:
-            raise ValueError("n_jobs 不能为 0；请使用正整数或 -1（全部核心）")
+            raise ValueError("n_jobs cannot be 0; use a positive integer or -1 (all cores)")
 
         target_feats = features if features is not None else list(self._results.keys())
-        # 类别特征不适用决策树重分箱，自动剔除（避免把类别编码当数值切分）
+        # Decision-tree re-binning does not apply to categorical features; drop them automatically (avoids cutting category codes as if they were numbers)
         _cate_in = [f for f in target_feats if self._results.get(f, {}).get("is_categorical")]
         if _cate_in:
-            logger.info(f"[refine_dtree] 跳过 {len(_cate_in)} 个类别特征（不适用决策树重分箱）")
+            logger.info(f"[refine_dtree] Skipping {len(_cate_in)} categorical feature(s) (decision-tree re-binning does not apply)")
         target_feats = [f for f in target_feats
                         if not self._results.get(f, {}).get("is_categorical")]
         missing_feats = [f for f in target_feats if f not in self._results]
         if missing_feats:
-            raise ValueError(f"以下特征尚未拟合，无法做 dtree 重分箱: {missing_feats}")
+            raise ValueError(f"These features have not been fitted yet, so dtree re-binning cannot run: {missing_feats}")
         if self.target_col not in df.columns:
-            raise ValueError(f"目标列 '{self.target_col}' 不在 DataFrame 中")
+            raise ValueError(f"Target column '{self.target_col}' not found in the DataFrame")
 
         logger.info(
-            f"[refine_dtree] 对 {len(target_feats)} 个特征做决策树重分箱 "
+            f"[refine_dtree] Re-binning {len(target_feats)} features with a decision tree "
             f"(max_bins={max_bins}, min_samples_leaf={min_samples_leaf}, "
             f"monotone={monotone}, n_jobs={n_jobs}) ..."
         )
@@ -2202,7 +2226,7 @@ class MonotoneWOEBinner:
 
         def _apply_and_log(feat, ok, err):
             if err is not None:
-                logger.info(f"  ✗ {feat}: dtree 重分箱失败 — {err[0]}")
+                logger.info(f"  ✗ {feat}: dtree re-binning failed - {err[0]}")
                 print(err[1])
             else:
                 old_nb, update, status = ok
@@ -2222,9 +2246,9 @@ class MonotoneWOEBinner:
                 feat, ok, err = _refine_one(feat)
                 _apply_and_log(feat, ok, err)
         else:
-            # ── 多进程并行（ProcessPoolExecutor）──────────────────────────
-            # worker 必须使用模块级函数；Windows/Jupyter 的 spawn 语义无法
-            # pickle refine_dtree() 内部定义的局部函数。
+            # ── Multiprocess parallelism (ProcessPoolExecutor) ──────────────────────────
+            # The worker must be a module-level function; the spawn semantics of Windows/Jupyter cannot
+            # pickle a local function defined inside refine_dtree().
             max_workers = n_jobs if n_jobs > 0 else None
             n_workers   = max_workers or os.cpu_count() or 1
             chunk_size  = max(1, math.ceil(len(target_feats) / n_workers))
@@ -2262,7 +2286,7 @@ class MonotoneWOEBinner:
                     exc, tb = feat_err[feat]
                     if isinstance(exc, BinningPolicyViolation):
                         raise exc
-                    logger.info(f"  ✗ {feat}: dtree 重分箱失败 — {exc}")
+                    logger.info(f"  ✗ {feat}: dtree re-binning failed - {exc}")
                     print(tb)
                 elif feat in feat_ok:
                     upd, status = feat_ok[feat]
@@ -2278,7 +2302,7 @@ class MonotoneWOEBinner:
                         f"| IV={upd['iv']:.4f} | mono={upd['is_monotonic']}"
                     )
 
-        logger.info(f"[refine_dtree] 完成，{len(target_feats)} 个特征处理完毕")
+        logger.info(f"[refine_dtree] Done, {len(target_feats)} features processed")
         return self
 
     # ── refine_cate ──────────────────────────────────────────────────────────
@@ -2292,23 +2316,25 @@ class MonotoneWOEBinner:
         min_bins: int = 1,
     ) -> Optional[Dict[str, Any]]:
         """
-        对单个类别特征，按坏率(bad rate)做凝聚式(agglomerative)聚类：
-        把坏率相近的类别合并成同一箱，直到箱数 ≤ max_bins。
+        Cluster the categories of a single categorical feature by bad rate (agglomerative clustering):
+        merge categories with similar bad rates into the same bin until the number of bins is <= max_bins.
 
-        合并规则（每轮择一执行，直到无可合并）：
-          1. min_bin_size 优先（稳定性）：存在样本占比 < min_bin_size 的箱时，
-             先把最小的违例箱并入坏率更接近的相邻箱（忽略 badrate_tol）。
-          2. 否则若箱数 > max_bins：合并坏率差最小的相邻箱对；
-             若设了 badrate_tol 且最小坏率差 > badrate_tol，则停止
-             （剩余相邻箱坏率差异都过大，不再强行合并）。
+        Merge rules (one is applied per round, until nothing can be merged):
+          1. min_bin_size takes priority (stability): when a bin has a sample share < min_bin_size,
+             the smallest violating bin is first merged into the adjacent bin with the closer
+             bad rate (badrate_tol is ignored).
+          2. Otherwise, if the number of bins is > max_bins: merge the adjacent pair with the smallest
+             bad-rate gap; if badrate_tol is set and the smallest gap is > badrate_tol, stop
+             (the remaining adjacent bins differ too much in bad rate and are not forced together).
 
-        合并仅发生在按坏率排序后的相邻箱之间，因此最终各箱坏率严格有序，
-        WOE 天然单调。仅用已拟合的每类别计数(woe_table)，无需重读原始数据。
+        Merging only happens between adjacent bins after sorting by bad rate, so the final bad rates are
+        strictly ordered and the WOE is monotone by construction. Only the fitted per-category counts
+        (woe_table) are used, so the raw data does not need to be re-read.
 
         Returns
         -------
-        update dict（woe_table / iv / is_monotonic / n_bins / categories），
-        若无需聚类则返回 None。
+        update dict (woe_table / iv / is_monotonic / n_bins / categories),
+        or None if no clustering is needed.
         """
         wt  = vr["woe_table"]
         eps = self.eps
@@ -2319,7 +2345,7 @@ class MonotoneWOEBinner:
         total_good = float(wt["good"].sum())
         total_n    = float(wt["n"].sum())
 
-        # 初始：每个（已有）箱作为一个组，保留成员类别与标签
+        # Initial state: each (existing) bin is one group, keeping its member categories and label
         groups = []
         for _, r in wt.iterrows():
             if "cat_members" in wt.columns and isinstance(r["cat_members"], (list, tuple)):
@@ -2345,7 +2371,7 @@ class MonotoneWOEBinner:
         groups.sort(key=_br)
 
         def _merge(i):
-            """合并相邻 groups[i] 与 groups[i+1]。"""
+            """Merge the adjacent groups[i] and groups[i+1]."""
             a, b = groups[i], groups[i + 1]
             groups[i:i + 2] = [dict(
                 members = a["members"] + b["members"],
@@ -2366,8 +2392,8 @@ class MonotoneWOEBinner:
                  if g["n"] / (total_n + eps) < min_bin_size]
                 if min_bin_size > 0 else []
             )
-            # G08：类别分组的最小坏/好样本数治理。fit 与显式
-            # refine_cate 共用本 merge 核心；warn/raise 由 fit 前置处理。
+            # G08: minimum bad/good count governance for categorical groups. fit and explicit
+            # refine_cate calls share this merge core; warn/raise are handled up front by fit.
             if not too_small and self.small_bin_policy == "merge":
                 too_small = [
                     i for i, g in enumerate(groups)
@@ -2375,7 +2401,7 @@ class MonotoneWOEBinner:
                     or (self.min_good_count is not None and g["good"] < self.min_good_count)
                 ]
             if too_small:
-                # 把最小的违例箱并入坏率更接近的相邻箱
+                # merge the smallest violating bin into the adjacent bin with the closer bad rate
                 i = min(too_small, key=lambda k: groups[k]["n"])
                 if i == 0:
                     j = 0
@@ -2393,7 +2419,7 @@ class MonotoneWOEBinner:
                     for i in range(len(groups) - 1)
                 )
                 if badrate_tol is not None and gap > badrate_tol:
-                    break   # 剩余相邻箱坏率差异都过大，停止合并
+                    break   # the remaining adjacent bins differ too much in bad rate: stop merging
                 _merge(mi); changed = True
                 continue
             break
@@ -2401,7 +2427,7 @@ class MonotoneWOEBinner:
         if not changed:
             return None
 
-        # 重算各组 WOE/IV，按坏率升序编号（WOE 天然单调）
+        # Recompute WOE/IV for each group and number the bins by ascending bad rate (WOE is monotone by construction)
         groups.sort(key=_br)
         records = []
         for i, g in enumerate(groups):
@@ -2443,50 +2469,53 @@ class MonotoneWOEBinner:
         badrate_tol: Optional[float] = None,
     ) -> "MonotoneWOEBinner":
         """
-        对已拟合的**类别特征(cate_feats)**按坏率(bad rate)做凝聚式聚类，
-        把坏率相近的类别合并成同一箱，降低箱数、提升稳定性。
+        Cluster the fitted **categorical features (cate_feats)** by bad rate (agglomerative clustering),
+        merging categories with similar bad rates into the same bin to reduce the number of bins and improve stability.
 
-        与 refine_chi2 / refine_dtree 的关系
-        ------------------------------------
-        - refine_chi2 / refine_dtree : 只作用于**数值**特征（类别特征自动跳过）
-        - refine_cate                : 只作用于**类别**特征（数值特征自动跳过）
+        Relation to refine_chi2 / refine_dtree
+        --------------------------------------
+        - refine_chi2 / refine_dtree : apply to **numeric** features only (categorical features are skipped automatically)
+        - refine_cate                : applies to **categorical** features only (numeric features are skipped automatically)
 
-        说明
-        ----
-        - 仅使用 fit() 已算好的每类别计数(woe_table)，**无需重新传入 df**，速度极快。
-        - 合并按坏率排序后的相邻类别进行，因此结果各箱坏率有序、WOE 天然单调。
-        - 合并只会降低或维持 IV（信息合并不会增加 IV），换取更少的箱与更好的泛化。
-        - [Missing] 箱不参与聚类，沿用 fit() 的结果。
-        - 可重复调用（在已聚类结果上继续合并）。
+        Notes
+        -----
+        - Uses only the per-category counts (woe_table) already computed by fit(); **df does not need to be passed
+          again**, so it is very fast.
+        - Merging happens between adjacent categories after sorting by bad rate, so the resulting bin bad rates are
+          ordered and the WOE is monotone by construction.
+        - Merging can only lower or keep the IV (merging information never increases IV), in exchange for fewer
+          bins and better generalization.
+        - The [Missing] bin does not take part in the clustering and keeps its fit() result.
+        - Can be called repeatedly (keeps merging on top of an already clustered result).
 
         Parameters
         ----------
-        features     : 需要聚类的类别特征列表；默认 None = 所有已拟合的类别特征。
-                       传入数值特征会被自动跳过。
-        max_bins     : 聚类后每个特征的最大箱数，默认 5。
-        min_bin_size : 每箱最小样本占比(0~1)，默认 0.0（关闭）。> 0 时，样本占比
-                       低于该阈值的箱会被强制并入坏率最接近的相邻箱（优先于 max_bins，
-                       且忽略 badrate_tol）。
-        badrate_tol  : 坏率差阈值，默认 None（不启用）。设为正数时，当所有相邻箱的
-                       坏率差都 > badrate_tol 时停止按 max_bins 合并，避免把坏率差异
-                       很大的类别为了凑箱数而强行合并。
+        features     : list of categorical features to cluster; default None = all fitted categorical features.
+                       Numeric features that are passed in are skipped automatically.
+        max_bins     : maximum number of bins per feature after clustering, default 5.
+        min_bin_size : minimum sample share per bin (0~1), default 0.0 (off). When > 0, bins whose sample share
+                       is below this threshold are forcibly merged into the adjacent bin with the closest bad rate
+                       (takes priority over max_bins and ignores badrate_tol).
+        badrate_tol  : bad-rate gap threshold, default None (disabled). When set to a positive number, merging toward
+                       max_bins stops once the bad-rate gaps of all adjacent bins are > badrate_tol, which avoids
+                       forcing together categories with very different bad rates just to reach the bin count.
 
         Returns
         -------
-        self（支持链式调用）
+        self (supports chaining)
 
         Examples
         --------
         >>> binner = MonotoneWOEBinner(feature_cols=["score"], target_col="is_bad",
         ...                            cate_feats=["city", "industry"])
         >>> binner.fit(df)
-        >>> binner.refine_cate(max_bins=5)                       # 全部类别特征聚类
-        >>> binner.refine_cate(features=["city"], max_bins=4,    # 仅 city，带约束
+        >>> binner.refine_cate(max_bins=5)                       # cluster all categorical features
+        >>> binner.refine_cate(features=["city"], max_bins=4,    # city only, with constraints
         ...                    min_bin_size=0.02, badrate_tol=0.03)
         """
         self._check_fitted()
         if max_bins < 1:
-            raise ValueError(f"max_bins 必须 ≥ 1，收到: {max_bins}")
+            raise ValueError(f"max_bins must be >= 1, got: {max_bins}")
 
         all_cate = [f for f in self._results if self._results[f].get("is_categorical")]
         if features is None:
@@ -2495,19 +2524,19 @@ class MonotoneWOEBinner:
             _num_in = [f for f in features
                        if f in self._results and not self._results[f].get("is_categorical")]
             if _num_in:
-                logger.info(f"[refine_cate] 跳过 {len(_num_in)} 个非类别特征（仅适用类别特征）")
+                logger.info(f"[refine_cate] Skipping {len(_num_in)} non-categorical feature(s) (only applies to categorical features)")
             target_feats = [f for f in features
                             if self._results.get(f, {}).get("is_categorical")]
             missing_feats = [f for f in features if f not in self._results]
             if missing_feats:
-                raise ValueError(f"以下特征尚未拟合，无法做类别聚类: {missing_feats}")
+                raise ValueError(f"These features have not been fitted yet, so category clustering cannot run: {missing_feats}")
 
         if not target_feats:
-            logger.info("[refine_cate] 无类别特征可聚类（需先 fit 含 cate_feats 的特征）")
+            logger.info("[refine_cate] No categorical features to cluster (fit features that include cate_feats first)")
             return self
 
         logger.info(
-            f"[refine_cate] 对 {len(target_feats)} 个类别特征按坏率聚类 "
+            f"[refine_cate] Clustering {len(target_feats)} categorical features by bad rate "
             f"(max_bins={max_bins}, min_bin_size={min_bin_size}, badrate_tol={badrate_tol}) ..."
         )
 
@@ -2518,11 +2547,11 @@ class MonotoneWOEBinner:
                 update = self._cluster_cate_one(vr, max_bins, min_bin_size, badrate_tol)
             except Exception as exc:
                 import traceback as _tb
-                logger.info(f"  ✗ {feat}: 类别聚类失败 — {exc}")
+                logger.info(f"  ✗ {feat}: category clustering failed - {exc}")
                 print(_tb.format_exc())
                 continue
             if update is None:
-                logger.info(f"  - {feat:40s} | {old_nb} 箱无需聚类")
+                logger.info(f"  - {feat:40s} | {old_nb} bin(s), no clustering needed")
                 continue
             vr.update(update)
             logger.info(
@@ -2530,17 +2559,17 @@ class MonotoneWOEBinner:
                 f"| IV={update['iv']:.4f} | mono={update['is_monotonic']}"
             )
 
-        logger.info(f"[refine_cate] 完成，{len(target_feats)} 个类别特征处理完毕")
+        logger.info(f"[refine_cate] Done, {len(target_feats)} categorical features processed")
         return self
 
     @staticmethod
     def _bin_label(edges: list, bin_idx: int, n_bins: int,
                    decimals: Optional[int] = None) -> str:
-        """生成普通分箱区间字符串，bin_idx 为 0-based。
+        """Build the interval string of an ordinary bin; bin_idx is 0-based.
 
-        decimals=None  → 使用 .8g（8 位有效数字），保持历史可见输出；
-                         精确 round-trip 元数据存于 DataFrame.attrs。
-        decimals=N     → 使用 :.Nf（固定 N 位小数），便于人工阅读。
+        decimals=None  → use .8g (8 significant digits), keeping the historical visible output;
+                         exact round-trip metadata is stored in DataFrame.attrs.
+        decimals=N     → use :.Nf (fixed N decimals), easier for humans to read.
         """
         def _fmt(v: float) -> str:
             return f"{v:.{decimals}f}" if decimals is not None else f"{v:.8g}"
@@ -2616,8 +2645,8 @@ class MonotoneWOEBinner:
         return hashlib.sha256(pickle.dumps(payload, protocol=4)).hexdigest()
 
     def _format_a_sv_decisions(self, vr: Dict) -> Optional[Dict[str, Any]]:
-        """拟合时的 SV 决策（逐行 sv_policy_applied + 平滑参数）；表里没有 sv_policy_applied 列
-        （未启用 SV 治理、也没有 unseen_at_fit 占位箱）时为 None。"""
+        """Return the fit-time SV decisions (per-row sv_policy_applied + smoothing parameters), or None when the
+        table has no sv_policy_applied column (SV governance is off and there is no unseen_at_fit placeholder bin)."""
         sv_table = vr.get("sv_table", pd.DataFrame())
         if len(sv_table) == 0 or "sv_policy_applied" not in sv_table.columns:
             return None
@@ -2631,7 +2660,7 @@ class MonotoneWOEBinner:
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
         if not math.isfinite(alpha):
-            # 无法可靠往返的平滑参数：不写决策（加载后按无决策处理），绝不让导出失败
+            # Smoothing parameters that cannot be round-tripped reliably: write no decisions (treated as having none after loading) and never let the export fail
             return None
         return {
             "policies": [str(policy) for policy in sv_table["sv_policy_applied"]],
@@ -2642,8 +2671,8 @@ class MonotoneWOEBinner:
     def _restore_format_a_sv_decisions(
         self, metadata: Dict[str, Any], n_sv_rows: int
     ) -> Optional[tuple]:
-        """校验并取回 Format-A attrs 中的 SV 决策，返回 (policies, 平滑参数)；
-        缺失、被改动或取值非法时返回 None（按无决策处理）。"""
+        """Validate and retrieve the SV decisions in the Format-A attrs; return (policies, smoothing parameters),
+        or None when they are missing, altered or invalid (treated as having no decisions)."""
         try:
             decisions = metadata.get("sv_decisions")
             if not isinstance(decisions, dict):
@@ -2676,11 +2705,11 @@ class MonotoneWOEBinner:
     # ── 1. get_final_bins ────────────────────────────────────────────
 
     def get_direction_summary(self) -> pd.DataFrame:
-        """G09：每个特征的最终 WOE 方向、方向依据与单调性。
+        """G09: the final WOE direction, direction basis and monotonicity of each feature.
 
         Returns
         -------
-        DataFrame 列: feat | direction | direction_basis | is_monotonic
+        DataFrame with columns: feat | direction | direction_basis | is_monotonic
         """
         self._check_fitted()
         rows = []
@@ -2703,28 +2732,28 @@ class MonotoneWOEBinner:
 
     def get_final_bins(self) -> Dict[str, pd.DataFrame]:
         """
-        返回每个特征的最终分箱区间 + WOE 明细（含特殊值箱）。
+        Return the final bin intervals + WOE details of every feature (special-value bins included).
 
-        特殊值箱追加在普通箱之后，bin_no 继续编号，bin_label 为 '[sv=xxx]'。
+        Special-value bins are appended after the ordinary bins, bin_no keeps counting on, and bin_label is '[sv=xxx]'.
 
         Returns
         -------
         dict: {feature_name -> pd.DataFrame}
-            DataFrame 列: bin_no | bin_label | n | bad | good |
-                          bad_rate | pct_n | lift |
-                          pct_bad | pct_good | woe | iv | cumiv
-                          is_special (bool, True=特殊值箱)
+            DataFrame columns: bin_no | bin_label | n | bad | good |
+                               bad_rate | pct_n | lift |
+                               pct_bad | pct_good | woe | iv | cumiv
+                               is_special (bool, True = special-value bin)
 
-            精确数值边界、稀疏箱号、missing_woe、类别成员，以及启用 SV 治理时
-            逐行的 sv_policy_applied 与平滑参数保存在
-            DataFrame.attrs 中；直接传递或 pickle 往返可精确恢复。CSV/Excel
-            不保留 attrs，回载时以可见 bin_label（默认 .8g）为准。
+            The exact numeric edges, sparse bin ids, missing_woe, category members, and (when SV governance is
+            enabled) the per-row sv_policy_applied and smoothing parameters are stored in
+            DataFrame.attrs; passing the frames directly or a pickle round trip restores them exactly. CSV/Excel
+            do not keep attrs, so on reloading the visible bin_label (default .8g) is the source of truth.
 
-            其中:
-              pct_n    = 该箱样本量 / 所有箱样本量之和（含特殊值箱）
-              lift     = 该箱 bad_rate / 全局平均 bad_rate
-                         全局 bad_rate 取 self._bad_rate（fit 时记录）；
-                         若未 fit 则退化为所有箱 bad 之和 / n 之和
+            where:
+              pct_n    = the bin's sample count / the sum of the sample counts of all bins (special-value bins included)
+              lift     = the bin's bad_rate / the global average bad_rate
+                         the global bad_rate is self._bad_rate (recorded at fit time);
+                         if fit() was never called, it falls back to the sum of bad over all bins / the sum of n
         """
         self._check_fitted()
         result = {}
@@ -2735,7 +2764,7 @@ class MonotoneWOEBinner:
 
             wt["bin_no"]    = wt["bin"] + 1
             if vr.get("is_categorical"):
-                # 类别特征：箱标签即类别取值本身，已存于 woe_table，无需重建
+                # Categorical feature: the bin label is the category value itself, already stored in woe_table, no need to rebuild it
                 if "bin_label" not in wt.columns:
                     wt["bin_label"] = wt["bin"].astype(str)
             else:
@@ -2747,7 +2776,7 @@ class MonotoneWOEBinner:
             wt["cumiv"]     = wt["iv"].cumsum()
             wt["is_special"] = False
 
-            # 追加特殊值箱
+            # Append the special-value bins
             sv_table = vr.get("sv_table", pd.DataFrame())
             if len(sv_table) > 0:
                 sv_rows = []
@@ -2772,9 +2801,9 @@ class MonotoneWOEBinner:
                 sv_df = pd.DataFrame(sv_rows)
                 wt = pd.concat([wt, sv_df], ignore_index=True)
 
-            # ── 计算 pct_n 和 lift ──
+            # ── Compute pct_n and lift ──
             total_n = float(wt["n"].sum())
-            # 全局 bad_rate：优先用 fit() 时记录的，否则从分箱数据反推
+            # Global bad_rate: prefer the one recorded at fit() time, otherwise derive it from the binning data
             avg_bad_rate = getattr(self, "_bad_rate", None)
             if avg_bad_rate is None or avg_bad_rate == 0:
                 total_bad_all  = float(wt["bad"].sum())
@@ -2790,15 +2819,15 @@ class MonotoneWOEBinner:
             else:
                 wt["lift"] = 0.0
 
-            # ── 补全可能缺失或 NaN 的列（格式 B 加载时 woe_table 无这些列，
-            #    pd.concat 后普通箱行为 NaN）──
+            # ── Fill in columns that may be missing or NaN (with format B loading, woe_table lacks these columns,
+            #    so the ordinary-bin rows are NaN after pd.concat) ──
             _eps = self.eps
             if "good" not in wt.columns or wt["good"].isna().any():
                 wt["good"] = wt["good"].fillna(0)
             if "bad_rate" not in wt.columns or wt["bad_rate"].isna().any():
                 g = wt["good"].fillna(0) if "good" in wt.columns else 0
                 wt["bad_rate"] = wt["bad"] / (wt["bad"] + g + _eps)
-            # pct_bad / pct_good：只对普通箱（non-special）重算；sv 行保持 0.0
+            # pct_bad / pct_good: recomputed for ordinary (non-special) bins only; sv rows stay at 0.0
             _need_pct = (
                 "pct_bad"  not in wt.columns or wt["pct_bad"].isna().any() or
                 "pct_good" not in wt.columns or wt["pct_good"].isna().any()
@@ -2856,10 +2885,11 @@ class MonotoneWOEBinner:
             format_a_meta["metadata_digest"] = self._format_a_metadata_digest(
                 format_a_meta
             )
-            # SV 治理决策单独存放、单独校验：不进 metadata_digest，旧版本加载器
-            # 对新键无感知且仍能验证原有字段；表里没有 sv_policy_applied 列（未启用 SV 治理
-            # 且无 unseen_at_fit 占位箱）时不写，attrs 与旧版一致。含 unseen_at_fit 的决策
-            # 会被 0.8.1 加载器整体拒收（其合法取值表里没有该值），打分不受影响
+            # SV governance decisions are stored and checksummed separately: they stay out of metadata_digest, so older
+            # loaders are unaware of the new keys and can still verify the original fields; when the table has no
+            # sv_policy_applied column (SV governance off and no unseen_at_fit placeholder bin) nothing is written
+            # and the attrs match the old version. Decisions containing unseen_at_fit are rejected as a whole
+            # by the 0.8.1 loader (its set of valid values lacks it), and scoring is unaffected
             sv_decisions = self._format_a_sv_decisions(vr)
             if sv_decisions is not None:
                 format_a_meta["sv_decisions"] = sv_decisions
@@ -2874,23 +2904,23 @@ class MonotoneWOEBinner:
 
     def get_bin_edges(self) -> Dict[str, List[float]]:
         """
-        返回每个特征的完整分箱边界列表（含 ±inf 端点），可直接用于
-        ``pd.cut``、``get_gains_table`` 等下游函数。
+        Return the complete bin-edge list of every feature (including the ±inf end points), ready to be used by
+        downstream functions such as ``pd.cut`` and ``get_gains_table``.
 
-        返回的边界列表与 ``get_final_bins()`` 中的普通箱 bin_label
-        一一对应：若边界为 ``[-inf, 1.5, 3.0, inf]``，则对应的三个
-        普通箱分别为 ``(-∞, 1.5]``、``(1.5, 3.0]``、``(3.0, +∞)``。
+        The returned edge lists correspond one-to-one to the ordinary-bin bin_label values in
+        ``get_final_bins()``: for edges ``[-inf, 1.5, 3.0, inf]`` the three ordinary bins are
+        ``(-∞, 1.5]``, ``(1.5, 3.0]`` and ``(3.0, +∞)``.
 
-        **注意**：特殊值箱（如 ``[sv=-1]``、``[Missing]``）不包含在
-        边界列表中 — 它们独立于普通分箱，由 ``MonotoneWOEBinner``
-        在 ``apply_woe()`` 时自动处理。类别特征（``cate_feats``）同样
-        不包含在内（无数值边界），其 WOE 映射由 ``apply_woe()`` 直接按取值查表。
+        **Note**: special-value bins (such as ``[sv=-1]`` and ``[Missing]``) are not included in the edge
+        lists - they are independent of the ordinary bins and are handled automatically by
+        ``MonotoneWOEBinner`` in ``apply_woe()``. Categorical features (``cate_feats``) are likewise not
+        included (they have no numeric edges); their WOE mapping is a direct value lookup in ``apply_woe()``.
 
         Returns
         -------
         dict: ``{feature_name: [-inf, cut1, cut2, ..., inf]}``
-            每个特征的完整分箱边界列表，首尾固定为 ``-np.inf``
-            和 ``np.inf``。
+            The complete bin-edge list of each feature, always starting with ``-np.inf``
+            and ending with ``np.inf``.
 
         Example
         -------
@@ -2899,7 +2929,7 @@ class MonotoneWOEBinner:
         >>> binner.get_bin_edges()
         {'score': [-inf, 450.0, 520.0, 600.0, 680.0, inf]}
 
-        >>> # 可直接用于下游分箱
+        >>> # can be used directly for downstream binning
         >>> edges = binner.get_bin_edges()["score"]
         >>> df["score_bin"] = pd.cut(df["score"], bins=edges, labels=False)
         """
@@ -2907,7 +2937,7 @@ class MonotoneWOEBinner:
         result = {}
         for feat, vr in self._results.items():
             if vr.get("is_categorical"):
-                # 类别特征无数值边界，不适用 pd.cut，跳过
+                # Categorical features have no numeric edges and pd.cut does not apply: skip
                 continue
             edges = [float(e) for e in vr["edges"]]
             result[feat] = [-np.inf] + edges + [np.inf]
@@ -2917,74 +2947,76 @@ class MonotoneWOEBinner:
 
     def load_woe_bins(self, bins_dict: dict) -> "MonotoneWOEBinner":
         """
-        直接加载已有的分箱结果，跳过 fit()。支持两种输入格式：
+        Load existing binning results directly, skipping fit(). Two input formats are supported:
 
-        格式 A — get_final_bins() 的输出：
+        Format A - the output of get_final_bins():
             {feature_name -> DataFrame}
-            DataFrame 必须包含列: bin_label | n | bad | woe | iv
-            （可含 is_special 列；无则假设全为普通箱）
-            SMF 生成且 checksum/行身份校验通过的 DataFrame.attrs 优先用于
-            精确恢复（含 SV 治理决策，另有独立 checksum）；attrs 缺失或失效时退回
-            可见 bin_label。CSV/Excel 会丢失 attrs，因此不能恢复超出可见文本精度的信息。
-            类别特征自动识别：若普通箱 bin_label 不是数值区间格式（如 "(-∞, 1.5]"），
-            则按类别特征加载，apply_woe 时按取值直接查表。
+            The DataFrame must contain the columns: bin_label | n | bad | woe | iv
+            (an is_special column is optional; without it all bins are assumed to be ordinary)
+            A DataFrame.attrs produced by SMF that passes the checksum / row-identity checks is used first
+            for exact restoration (including the SV governance decisions, which have their own checksum);
+            when attrs are missing or invalid it falls back to the visible bin_label. CSV/Excel lose attrs,
+            so information beyond the precision of the visible text cannot be restored.
+            Categorical features are detected automatically: if the ordinary-bin bin_label is not in a numeric
+            interval format (e.g. "(-∞, 1.5]"), the feature is loaded as a categorical feature and
+            apply_woe looks up the WOE directly by value.
 
-        格式 B — 训练流水线 woe_results 格式：
-            {feature_name -> dict}，dict 包含：
-              edges        : list，含 ±inf 端点，如 [-inf, 1.5, 3.0, inf]
+        Format B - the training-pipeline woe_results format:
+            {feature_name -> dict}, where the dict contains:
+              edges        : list, including the ±inf end points, e.g. [-inf, 1.5, 3.0, inf]
               woe_map      : {bin_index -> woe_value}
               missing_woe  : float
-              bin_df       : DataFrame，含列 b | n | nb | br | woe | pct
-              total_iv     : float（可选；若无则从 bin_df 推算）
-              n_bins       : int（可选）
+              bin_df       : DataFrame with the columns b | n | nb | br | woe | pct
+              total_iv     : float (optional; derived from bin_df if absent)
+              n_bins       : int (optional)
 
-        两种格式可在同一个 bins_dict 中混合使用。
+        The two formats can be mixed in the same bins_dict.
 
         Returns
         -------
-        self (支持链式调用)
+        self (supports chaining)
         """
         self._results = {}
         self._unseen_special_at_fit = {}
 
         for feat, payload in bins_dict.items():
 
-            # ── 判断格式 ──────────────────────────────────────────────
+            # ── Detect the format ──────────────────────────────────────────────
             if isinstance(payload, pd.DataFrame):
-                # 格式 A（直接是 DataFrame）
+                # Format A (a bare DataFrame)
                 fmt = "A"
                 df_bin = payload
             elif isinstance(payload, dict) and "woe_map" in payload:
-                # 格式 B（dict with edges / woe_map / bin_df）
+                # Format B (dict with edges / woe_map / bin_df)
                 fmt = "B"
             elif isinstance(payload, dict):
-                # 格式 A 包在 dict 里（不常见，兼容）；DataFrame 不能用 `or` 取值（真值有歧义）
+                # Format A wrapped in a dict (uncommon, supported for compatibility); a DataFrame cannot be picked with `or` (its truth value is ambiguous)
                 fmt = "A"
                 df_bin = payload.get("bin_df")
                 if df_bin is None:
                     df_bin = payload.get("df")
                 if df_bin is None:
                     raise ValueError(
-                        f"特征 '{feat}': dict 格式既无 'woe_map' 也无 'bin_df'，无法识别格式"
+                        f"Feature '{feat}': the dict has neither 'woe_map' nor 'bin_df', so its format cannot be recognized"
                     )
                 if not isinstance(df_bin, pd.DataFrame):
                     raise ValueError(
-                        f"特征 '{feat}': dict 包装的分箱表必须是 DataFrame，"
-                        f"收到 {type(df_bin).__name__}"
+                        f"Feature '{feat}': a bin table wrapped in a dict must be a DataFrame, "
+                        f"got {type(df_bin).__name__}"
                     )
             else:
                 raise ValueError(
-                    f"特征 '{feat}': 不支持的类型 {type(payload)}，"
-                    "期望 DataFrame 或含 woe_map 的 dict"
+                    f"Feature '{feat}': unsupported type {type(payload)}, "
+                    "expected a DataFrame or a dict containing woe_map"
                 )
 
-            # 类别特征标记（格式 A 自动识别；格式 B 暂不支持类别特征）
+            # Categorical-feature flag (detected automatically for format A; format B does not support categorical features yet)
             is_categorical = False
-            # 拟合时的 SV 平滑参数（仅格式 A 且 attrs 校验通过时恢复）
+            # SV smoothing parameters from fit time (restored only for format A when the attrs validation passes)
             sv_smoothing = None
 
             # ════════════════════════════════════════════════════════
-            # 格式 A 处理路径
+            # Format A processing path
             # ════════════════════════════════════════════════════════
             if fmt == "A":
                 try:
@@ -2998,7 +3030,7 @@ class MonotoneWOEBinner:
                 required_cols = {"bin_label", "n", "bad", "woe", "iv"}
                 missing = required_cols - set(df_bin.columns)
                 if missing:
-                    raise ValueError(f"特征 '{feat}' 的分箱表缺少列: {missing}")
+                    raise ValueError(f"The bin table of feature '{feat}' is missing columns: {missing}")
 
                 try:
                     df_bin = df_bin.copy().reset_index(drop=True)
@@ -3244,16 +3276,16 @@ class MonotoneWOEBinner:
                     missing_woe = 0.0
 
             # ════════════════════════════════════════════════════════
-            # 格式 B 处理路径
+            # Format B processing path
             # ════════════════════════════════════════════════════════
             else:  # fmt == "B"
-                raw_edges   = list(payload["edges"])   # 含首尾 ±inf
+                raw_edges   = list(payload["edges"])   # includes the leading and trailing ±inf
                 woe_map     = payload["woe_map"]       # {int -> float}
                 missing_woe = float(payload.get("missing_woe", 0.0))
                 bin_df      = payload.get("bin_df", pd.DataFrame())
                 total_iv    = float(payload.get("total_iv", 0.0))
 
-                # edges：去掉首尾 ±inf，只保留内部切割点
+                # edges: drop the leading and trailing ±inf and keep only the internal cut points
                 import math as _math
                 edges = [
                     float(e) for e in raw_edges
@@ -3262,10 +3294,10 @@ class MonotoneWOEBinner:
 
                 n_bins = len(woe_map)
 
-                # 构建 woe_table（与格式 A 的 woe_table 列对齐）
+                # Build woe_table (columns aligned with the woe_table of format A)
                 if len(bin_df) > 0:
                     bdf = bin_df.copy().reset_index(drop=True)
-                    # 列名映射：bin_df 用 b/nb/br/pct，woe_table 用 bin/bad/bad_rate/pct_n
+                    # Column-name mapping: bin_df uses b/nb/br/pct, woe_table uses bin/bad/bad_rate/pct_n
                     rename_map = {}
                     if "b"  in bdf.columns and "bin" not in bdf.columns:
                         rename_map["b"]   = "bin"
@@ -3277,15 +3309,15 @@ class MonotoneWOEBinner:
                         rename_map["pct"] = "pct_n"
                     bdf = bdf.rename(columns=rename_map)
 
-                    # 确保有 woe 列（用 woe_map 覆盖，保证精度一致）
+                    # Make sure a woe column exists (overwritten from woe_map so that the precision is consistent)
                     bdf["woe"] = bdf["bin"].map({int(k): float(v)
                                                  for k, v in woe_map.items()})
 
-                    # 补充 good 列（若缺）
+                    # Add the good column (if missing)
                     if "good" not in bdf.columns:
                         bdf["good"] = 0
 
-                    # 补充 iv 列（若缺）
+                    # Add the iv column (if missing)
                     if "iv" not in bdf.columns:
                         total_bad  = bdf["bad"].sum()
                         total_good = bdf["good"].sum() if "good" in bdf.columns else 0
@@ -3302,14 +3334,14 @@ class MonotoneWOEBinner:
                         if total_iv == 0.0:
                             total_iv = float(bdf["iv"].sum())
 
-                    # 确保有 bin_label 列（从 edges 生成）
+                    # Make sure a bin_label column exists (generated from edges)
                     if "bin_label" not in bdf.columns:
                         labels = self._make_bin_labels(edges, n_bins, self.bin_label_decimals)
                         bdf["bin_label"] = labels[: len(bdf)]
 
                     woe_table = bdf.copy()
                 else:
-                    # bin_df 缺失，从 woe_map + edges 最小化构建
+                    # bin_df is missing: build a minimal table from woe_map + edges
                     labels = self._make_bin_labels(edges, n_bins)
                     woe_table = pd.DataFrame({
                         "bin":       list(range(n_bins)),
@@ -3325,9 +3357,9 @@ class MonotoneWOEBinner:
 
                 woes = np.array([float(woe_map[k]) for k in sorted(woe_map)])
 
-                # ── 根据 self.special_values 自动构建 sv_table ──
-                # 格式 B 没有 sv 的统计数据，但有 missing_woe；
-                # 用 missing_woe 作为 WOE，n/bad/good 等统计量置为 0（占位）。
+                # ── Build sv_table automatically from self.special_values ──
+                # Format B carries no statistics for the special values, but it has missing_woe;
+                # use missing_woe as the WOE and set statistics such as n/bad/good to 0 (placeholders).
                 sv_rows = []
                 for sv_val in (self.special_values or []):
                     import math as _math2
@@ -3348,7 +3380,7 @@ class MonotoneWOEBinner:
                     })
                 sv_table = pd.DataFrame(sv_rows) if sv_rows else pd.DataFrame()
 
-            # ── 写入 _results ─────────────────────────────────────────
+            # ── Write into _results ─────────────────────────────────────
             res = dict(
                 edges        = edges,
                 woe_table    = woe_table,
@@ -3368,25 +3400,25 @@ class MonotoneWOEBinner:
                 )
             self._results[feat] = res
 
-        # 同步 feature_cols
+        # Sync feature_cols
         existing = set(self.feature_cols)
         for feat in bins_dict:
             if feat not in existing:
                 self.feature_cols.append(feat)
 
         self._is_fitted = True
-        logger.info(f"[load_woe_bins] 加载完成: {len(self._results)} 个特征")
+        logger.info(f"[load_woe_bins] Loading finished: {len(self._results)} features")
         return self
 
     @staticmethod
     def _make_bin_labels(edges: List[float], n_bins: int,
                          decimals: Optional[int] = None) -> List[str]:
         """
-        从内部切割点 edges（不含 ±inf）生成 bin_label 字符串列表。
-        例如 edges=[1.5, 3.0], n_bins=3 →
+        Generate the list of bin_label strings from the internal cut points edges (excluding ±inf).
+        For example edges=[1.5, 3.0], n_bins=3 →
             ["(-∞, 1.5]", "(1.5, 3.0]", "(3.0, +∞)"]
 
-        decimals=None → :.8g；decimals=N → :.Nf（固定 N 位小数）。
+        decimals=None → :.8g; decimals=N → :.Nf (fixed N decimal places).
         """
         def _fmt(v: float) -> str:
             return f"{v:.{decimals}f}" if decimals is not None else f"{v:.8g}"
@@ -3425,13 +3457,13 @@ class MonotoneWOEBinner:
             try:
                 return float(compact)
             except ValueError as exc:
-                raise ValueError(f"无法解析数值分箱端点: {token!r}") from exc
+                raise ValueError(f"Cannot parse numeric bin endpoint: {token!r}") from exc
 
         indices: List[int] = []
         for label in bin_labels:
             match = interval.match(str(label).strip())
             if match is None:
-                raise ValueError(f"无法解析数值分箱区间: {label!r}")
+                raise ValueError(f"Cannot parse numeric bin interval: {label!r}")
             lower = _endpoint(match.group(1))
             upper = _endpoint(match.group(2))
             if np.isposinf(upper):
@@ -3441,10 +3473,10 @@ class MonotoneWOEBinner:
                     idx = edges.index(float(upper))
                 except ValueError as exc:
                     raise ValueError(
-                        f"数值分箱右端点 {upper!r} 不在重建边界中"
+                        f"Right endpoint {upper!r} of the numeric bin is not among the reconstructed edges"
                     ) from exc
             else:
-                raise ValueError(f"数值分箱右端点必须有限或 +inf: {label!r}")
+                raise ValueError(f"The right endpoint of a numeric bin must be finite or +inf: {label!r}")
 
             expected_lower = -float("inf") if idx == 0 else float(edges[idx - 1])
             lower_matches = (
@@ -3454,20 +3486,20 @@ class MonotoneWOEBinner:
             )
             if not lower_matches:
                 raise ValueError(
-                    f"数值分箱区间 {label!r} 与重建边界不连续"
+                    f"Numeric bin interval {label!r} is not contiguous with the reconstructed edges"
                 )
             indices.append(idx)
 
         if any(right <= left for left, right in zip(indices, indices[1:])):
-            raise ValueError("数值分箱区间必须按边界严格递增且不能重复")
+            raise ValueError("Numeric bin intervals must be strictly increasing by edge and must not repeat")
         return indices
 
     @staticmethod
     def _reconstruct_edges(bin_labels: List[str]) -> List[float]:
         """
-        从 bin_label 列表反向推断切割点 edges。
-        例如 ["(-∞, 1.5]", "(1.5, 3.0]", "(3.0, +∞)"] → [1.5, 3.0]
-        若解析失败则返回空列表。
+        Infer the cut points edges back from a list of bin_label strings.
+        For example ["(-∞, 1.5]", "(1.5, 3.0]", "(3.0, +∞)"] → [1.5, 3.0]
+        Return an empty list if parsing fails.
         """
         import re
         edges = []
@@ -3490,10 +3522,10 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _looks_like_interval(label: str) -> bool:
-        """判断 bin_label 是否为数值区间格式，如 (-∞, 1.5] / (1.5, 3] / (3, +∞)。
+        """Return whether bin_label is in a numeric interval format, such as (-∞, 1.5] / (1.5, 3] / (3, +∞).
 
-        用于 load_woe_bins 区分数值特征与类别特征：类别特征的 bin_label 是
-        类别取值本身（任意字符串），不符合该区间格式。
+        Used by load_woe_bins to tell numeric features from categorical ones: the bin_label of a categorical feature is
+        the category value itself (an arbitrary string), which does not match this interval format.
         """
         import re
         _num = r"(?:[+-]?∞|[+-]?inf|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
@@ -3501,7 +3533,7 @@ class MonotoneWOEBinner:
 
     @staticmethod
     def _infer_cat_value(label):
-        """从 bin_label 还原类别原始取值：能转 int 则 int，能转 float 则 float，否则原字符串。"""
+        """Recover the category value from bin_label (int if it converts, else float if it converts, else the string itself)."""
         s = str(label)
         try:
             f = float(s)
@@ -3521,25 +3553,26 @@ class MonotoneWOEBinner:
         varlist: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
-        将 data 中的特征原始数值转换为 WOE 值，添加 *_woe 列。
+        Convert the raw feature values in data to WOE values and add the *_woe columns.
 
-        特殊值处理：
-          - 若某值在 sv_table 中有箱，直接查 sv_table 获取对应 WOE（含
-            unseen_special_policy='neutral' 的 unseen_at_fit 占位箱 → missing_woe）
-          - NaN：若 nan 在 special_values 中则查 sv_table；否则填 missing_woe
-          - 普通值：按 edges 做 pd.cut，然后查 woe_table；声明了、但拟合样本里没出现
-            且表里无箱的特殊值同样按普通数值归箱（normal_bin），并记录 / 告警
+        Special-value handling:
+          - If a value has a bin in sv_table, look up its WOE directly in sv_table (including the
+            unseen_at_fit placeholder bin of unseen_special_policy='neutral' → missing_woe)
+          - NaN: if nan is in special_values, look it up in sv_table; otherwise fill with missing_woe
+          - Ordinary values: bin by edges with pd.cut, then look up woe_table; a special value that was declared but
+            did not occur in the fit sample and has no bin in the table is likewise binned as an ordinary number
+            (normal_bin), and is logged / warned about
 
-        类别特征(cate_feats)处理：
-          - 按取值直接查表取 WOE（不做区间切分）
-          - NaN → [Missing] 箱 WOE（若 fit 时存在缺失），否则 missing_woe
-          - 训练时未出现过的新类别 → missing_woe（中性）
+        Categorical-feature (cate_feats) handling:
+          - Look up the WOE directly by value (no interval cutting)
+          - NaN → WOE of the [Missing] bin (if missing values existed at fit time), otherwise missing_woe
+          - New categories not seen in training → missing_woe (neutral)
 
         Parameters
         ----------
-        data    : 含原始特征列的 DataFrame
-        suffix  : WOE 列后缀，默认 "_woe"
-        inplace : 是否在原 DataFrame 上操作（False = 返回副本）
+        data    : DataFrame containing the raw feature columns
+        suffix  : suffix of the WOE columns, default "_woe"
+        inplace : whether to operate on the original DataFrame (False = return a copy)
         unseen_category_policy : {"warn", "raise", "silent"}, optional
             How to handle transform-time categorical values not seen at fit
             time. Default in 0.5.0 is ``"warn"``, which fills the unseen
@@ -3587,7 +3620,7 @@ class MonotoneWOEBinner:
 
         Returns
         -------
-        DataFrame，新增 {feat}{suffix} 列
+        DataFrame with the new {feat}{suffix} columns added
         """
         if unseen_category_policy not in {"warn", "raise", "silent"}:
             raise ValueError(
@@ -3627,23 +3660,23 @@ class MonotoneWOEBinner:
                 logger.info(f"  [WARN] '{feat}' was not fitted, skipping")
                 continue
             if feat not in df.columns:
-                logger.info(f"  [WARN] '{feat}' 不在 data 中，跳过")
+                logger.info(f"  [WARN] '{feat}' is not in data, skipping")
                 continue
 
             sv_table    = vr.get("sv_table", pd.DataFrame())
             woe_col     = feat + suffix
-            # 优先使用 _results 中存储的 per-feature missing_woe（格式 B 加载时设置）
+            # Prefer the per-feature missing_woe stored in _results (set when format B is loaded)
             feat_missing_woe = float(vr.get("missing_woe", self.missing_woe))
 
             series = df[feat]
 
-            # 构建特殊值 → WOE 映射（数值/类别特征通用，主要用于 NaN/[Missing]）
+            # Build the special value → WOE mapping (shared by numeric and categorical features, mainly for NaN/[Missing])
             sv_woe_map: Dict = {}
             if len(sv_table) > 0 and "bin_label" in sv_table.columns:
                 for _, svrow in sv_table.iterrows():
                     lbl = svrow["bin_label"]
                     sv_woe_val = float(svrow["woe"])
-                    # 解析 bin_label 还原特殊值
+                    # Parse bin_label to recover the special value
                     if lbl == "[Missing]":
                         sv_woe_map["__nan__"] = sv_woe_val
                     else:
@@ -3656,18 +3689,20 @@ class MonotoneWOEBinner:
                             except (ValueError, OverflowError):
                                 sv_woe_map[raw] = sv_woe_val
                             else:
-                                # 只用 float 键：整数值的 int 与 float 本就是同一个 dict 键；
-                                # 0.8.1 及之前额外加 int(float) 键，会把非整数特殊值截断成
-                                # 普通取值（如 0.5 → 0）。非有限值照旧保留原文键
+                                # Use only the float key: an int and a float of the same integer value are already
+                                # the same dict key; 0.8.1 and earlier also added an int(float) key, which truncated
+                                # non-integer special values into ordinary values (e.g. 0.5 → 0).
+                                # Non-finite values keep the raw-text key as before
                                 sv_woe_map[numeric] = sv_woe_val
                                 if not math.isfinite(numeric):
                                     sv_woe_map[raw] = sv_woe_val
 
-            # ── 类别特征：按取值直接查 WOE，不做区间切分 ──
+            # ── Categorical feature: look up the WOE directly by value, no interval cutting ──
             if vr.get("is_categorical"):
                 wt = vr["woe_table"]
-                # 原始取值 → WOE（fit 路径，精确匹配；int/float 由 dict 等价性兼容）
-                # refine_cate 聚类后，一个箱含多个类别(cat_members)；逐成员展开建表
+                # Raw value → WOE (fit path, exact match; int/float are compatible through dict equivalence)
+                # After refine_cate clustering one bin can hold several categories (cat_members);
+                # expand member by member to build the table
                 cat_woe_map: Dict = {}
                 cat_woe_map_str: Dict = {}
                 for _, r in wt.iterrows():
@@ -3684,8 +3719,8 @@ class MonotoneWOEBinner:
                     for cv in members:
                         if self._is_missing_category(cv):
                             continue
-                        cat_woe_map[cv]            = woe_v   # 精确匹配
-                        cat_woe_map_str[str(cv)]   = woe_v   # 类型不一致时回退匹配
+                        cat_woe_map[cv]            = woe_v   # exact match
+                        cat_woe_map_str[str(cv)]   = woe_v   # fallback match when the types differ
                 nan_woe = float(sv_woe_map.get("__nan__", feat_missing_woe))
                 missing_mask = series.isna()
                 if cat_woe_map:
@@ -3819,7 +3854,7 @@ class MonotoneWOEBinner:
                 continue
 
 
-            # ── 数值特征：按 edges 做 bin 查找 ──
+            # ── Numeric feature: bin lookup by edges ──
             edges  = [float(e) for e in vr["edges"]]
             wt_map = vr["woe_table"].set_index("bin")["woe"].to_dict()
 
@@ -3841,7 +3876,8 @@ class MonotoneWOEBinner:
                     out[mask] = float(sv_woe)
                     special_mask |= mask
 
-            # 声明了、但拟合样本里没出现的数值特殊值：只记录 / 告警，映射结果不变
+            # Numeric special values that were declared but did not occur in the fit sample:
+            # only log / warn, the mapping result is unchanged
             unseen_hits = self._unseen_special_hits(series, sv_table)
             if unseen_hits is not None:
                 n_rows = int(len(series))
@@ -3857,7 +3893,8 @@ class MonotoneWOEBinner:
                 if unseen_category_policy != "silent":
                     placeholder_woe = ", ".join(f"{w:g}" for w in unseen_hits["neutral_woe"])
                     outcome = {
-                        # 按拟合表的实际处理描述，不引用本实例的参数（加载的表可能来自另一种策略）
+                        # Describe what the fitted table actually did; do not refer to the parameters of this instance
+                        # (a loaded table may come from another policy)
                         "normal_bin": "they were binned as ordinary numbers "
                                       "(the fitted table has no special bin for them)",
                         "neutral": f"they were scored with the placeholder WOE {placeholder_woe} "
@@ -3921,17 +3958,17 @@ class MonotoneWOEBinner:
 
     def export_woe_report(self, report_path: str) -> None:
         """
-        将所有特征的分箱结果输出为 Excel 报告（使用 SuperModelingFactory
-        的 ExcelMaster 工具包写入）。
+        Export the binning results of all features as an Excel report (written with the ExcelMaster
+        toolkit of SuperModelingFactory).
 
-        Sheet 列表
+        Sheet list
         ----------
-        Sheet 1 「WOE分箱明细」: 汇总表 + 逐特征明细（含特殊值箱，紫色标注）
-        Sheet 2 「WOE分箱图」  : 每个特征嵌入整体 WOE 图
+        Sheet 1 "WOE Bin Details": summary table + per-feature details (special-value bins included, marked in purple)
+        Sheet 2 "WOE Bin Charts" : the overall WOE chart embedded for each feature
 
         Parameters
         ----------
-        report_path : 输出路径，如 "woe_report.xlsx"
+        report_path : output path, e.g. "woe_report.xlsx"
         """
         self._check_fitted()
         from ExcelMaster.ExcelMaster import ExcelMaster
@@ -3940,57 +3977,57 @@ class MonotoneWOEBinner:
         os.makedirs(os.path.dirname(os.path.abspath(report_path)), exist_ok=True)
 
         em = ExcelMaster(report_path, verbose=False, gap_number=1)
-        wb = em.workbook   # 底层 xlsxwriter workbook，用于自定义数字 / 颜色格式
+        wb = em.workbook   # underlying xlsxwriter workbook, used for custom number / color formats
 
-        # 自定义单元格格式（set_cell_format 可直接接受 format 对象）
+        # Custom cell formats (set_cell_format accepts format objects directly)
         _base    = {"border": 1, "align": "center", "valign": "vcenter",
                     "font_name": "Calibri", "font_size": 9}
         fmt_pct  = wb.add_format({**_base, "num_format": "0.00%"})
         fmt_num4 = wb.add_format({**_base, "num_format": "0.0000"})
         fmt_num2 = wb.add_format({**_base, "num_format": "0.00"})
-        # 特殊值行：仅叠加紫底紫字（与上面的数字格式叠加生效）
+        # Special-value rows: only overlay a purple background and purple font (stacks with the number formats above)
         fmt_sv   = wb.add_format({"bg_color": "#E8D5F5",
                                   "font_color": "#5B2C6F", "bold": True})
 
         # ═══════════════════════════════════════════════════════════════
-        # Sheet 1: WOE分箱明细
+        # Sheet 1: WOE Bin Details
         # ═══════════════════════════════════════════════════════════════
-        ws = em.add_worksheet("WOE分箱明细")
+        ws = em.add_worksheet("WOE Bin Details")
 
-        # 顶部总标题
-        em.merge_col(ws, ncols=13, text="各特征 WOE 分箱明细", cformat="BLUE_H1")
+        # Top-level title
+        em.merge_col(ws, ncols=13, text="WOE Bin Details by Feature", cformat="BLUE_H1")
 
-        # ── 汇总表 ──
+        # ── Summary table ──
         summary_rows = []
         for i, (feat, vr) in enumerate(self._results.items(), 1):
             wt   = vr["woe_table"]
             sv_t = vr.get("sv_table", pd.DataFrame())
             woes = wt.sort_values("bin")["woe"].values if len(wt) > 0 else np.array([])
             if vr.get("is_categorical"):
-                direction = "类别"
+                direction = "Categorical"
             else:
-                direction = "↑ 递增" if (len(woes) >= 2 and woes[-1] > woes[0]) else "↓ 递减"
+                direction = "↑ Increasing" if (len(woes) >= 2 and woes[-1] > woes[0]) else "↓ Decreasing"
             summary_rows.append({
-                "序号": i, "特征名": feat, "普通箱数": vr["n_bins"],
-                "特殊值箱数": len(sv_t) if len(sv_t) > 0 else 0,
-                "总IV值": round(float(vr["iv"]), 4),
-                "WOE方向": direction,
-                "是否单调": "✓" if vr["is_monotonic"] else "✗",
+                "No.": i, "Feature": feat, "Normal Bins": vr["n_bins"],
+                "Special Bins": len(sv_t) if len(sv_t) > 0 else 0,
+                "Total IV": round(float(vr["iv"]), 4),
+                "Direction": direction,
+                "Monotone": "✓" if vr["is_monotonic"] else "✗",
             })
         summary_df = pd.DataFrame(summary_rows)
-        em.write_dataframe(ws, summary_df, title="▌ 汇总：各特征 IV 一览",
+        em.write_dataframe(ws, summary_df, title="▌ Summary: IV of each feature",
                            index=False, header=True)
 
-        # ── 逐特征明细 ──
+        # ── Per-feature details ──
         col_rename = {
-            "bin_no": "分箱编号", "bin_label": "分箱区间", "n": "样本量",
-            "bad": "坏样本数", "good": "好样本数", "bad_rate": "箱内坏样本率",
-            "pct_n": "样本占比", "lift": "Lift", "pct_bad": "坏件分布占比",
-            "pct_good": "好件分布占比", "woe": "WOE值", "iv": "IV贡献", "cumiv": "累计IV",
+            "bin_no": "Bin No.", "bin_label": "Bin Interval", "n": "Sample Count",
+            "bad": "Bad Count", "good": "Good Count", "bad_rate": "Bad Rate",
+            "pct_n": "Sample Share", "lift": "Lift", "pct_bad": "Bad Share",
+            "pct_good": "Good Share", "woe": "WOE", "iv": "Bin IV", "cumiv": "Cum. IV",
         }
         order   = list(col_rename.keys())
-        pct_cn  = {"箱内坏样本率", "样本占比", "坏件分布占比", "好件分布占比"}
-        num4_cn = {"WOE值", "IV贡献", "累计IV"}
+        pct_cn  = {"Bad Rate", "Sample Share", "Bad Share", "Good Share"}
+        num4_cn = {"WOE", "Bin IV", "Cum. IV"}
         num2_cn = {"Lift"}
 
         for seq, (feat, wt_df) in enumerate(bins_dict.items(), 1):
@@ -4001,20 +4038,20 @@ class MonotoneWOEBinner:
             sv_mask = (wt_df["is_special"].astype(bool).tolist()
                        if "is_special" in wt_df.columns else [False] * len(wt_df))
             n_normal = vr["n_bins"]
-            sv_hint  = f"   |   特殊值箱={sum(sv_mask)}" if any(sv_mask) else ""
+            sv_hint  = f"   |   Special bins={sum(sv_mask)}" if any(sv_mask) else ""
             title = (f"  [{seq:02d}] {feat}   |   IV={vr['iv']:.4f}   "
-                     f"|   普通箱={vr['n_bins']}{sv_hint}   "
-                     f"|   单调={'✓' if vr['is_monotonic'] else '✗'}")
+                     f"|   Normal bins={vr['n_bins']}{sv_hint}   "
+                     f"|   Monotone={'✓' if vr['is_monotonic'] else '✗'}")
 
             loc = em.write_dataframe(ws, ddf, title=title, index=False,
                                      header=True, titleformat="BLUE_H4",
                                      retCellRange="value")
             r0, c0, r1, c1 = loc
-            data_r0 = r0 + 2          # 跳过 title(1) + header(1)
+            data_r0 = r0 + 2          # skip title(1) + header(1)
             data_r1 = r1
             colpos  = {name: c0 + idx for idx, name in enumerate(ddf.columns)}
 
-            # 列数字格式
+            # Column number formats
             for cn, fmt in ([(c, fmt_pct)  for c in pct_cn]
                             + [(c, fmt_num4) for c in num4_cn]
                             + [(c, fmt_num2) for c in num2_cn]):
@@ -4022,11 +4059,12 @@ class MonotoneWOEBinner:
                     cc = colpos[cn]
                     em.set_cell_format(ws, [data_r0, cc, data_r1, cc], fmt)
 
-            # WOE / Lift 列色阶（仅普通箱行，避免特殊值极端值干扰色阶）
+            # Color scales of the WOE / Lift columns (ordinary-bin rows only, so that extreme
+            # special-value numbers do not distort the scale)
             if n_normal > 0:
                 nb_r1 = data_r0 + n_normal - 1
-                if "WOE值" in colpos:
-                    cc = colpos["WOE值"]
+                if "WOE" in colpos:
+                    cc = colpos["WOE"]
                     em.set_color_scale(ws, [data_r0, cc, nb_r1, cc],
                                        colors=("#F4B183", "#FFFFFF", "#A9D08E"))
                 if "Lift" in colpos:
@@ -4034,26 +4072,26 @@ class MonotoneWOEBinner:
                     em.set_color_scale(ws, [data_r0, cc, nb_r1, cc],
                                        colors=("#9DC3E6", "#FFFFFF", "#F4B183"))
 
-            # 特殊值行整行紫色（叠加在数字格式之上）
+            # Fill whole special-value rows purple (overlaid on top of the number formats)
             for ri, is_sv in enumerate(sv_mask):
                 if is_sv:
                     rr = data_r0 + ri
                     em.set_cell_format(ws, [rr, c0, rr, c1], fmt_sv)
 
-            # 特殊值图例注释
+            # Special-value legend note
             if any(sv_mask):
                 em.merge_col(ws, ncols=13,
-                             text="  ★ 紫色行为特殊值独立分箱，WOE 独立计算，不参与单调约束",
+                             text="  ★ Purple rows: special-value bins with independent WOE, not subject to the monotone constraint",
                              cformat="TEXT_ITALIC")
 
         # ═══════════════════════════════════════════════════════════════
-        # Sheet 2: WOE分箱图（每个特征嵌入整体 WOE 图）
+        # Sheet 2: WOE Bin Charts (the overall WOE chart embedded for each feature)
         # ═══════════════════════════════════════════════════════════════
-        ws2 = em.add_worksheet("WOE分箱图")
-        em.merge_col(ws2, ncols=11, text="各特征 WOE 分箱图（整体）", cformat="BLUE_H1")
+        ws2 = em.add_worksheet("WOE Bin Charts")
+        em.merge_col(ws2, ncols=11, text="WOE Bin Charts by Feature (Overall)", cformat="BLUE_H1")
 
-        # 注意: xlsxwriter 的 insert_image 延迟到 close 时才读取图片文件，
-        #       因此 close_workbook() 必须在 tempdir 仍存活时调用。
+        # Note: xlsxwriter's insert_image defers reading the image file until close,
+        #       so close_workbook() must be called while tempdir is still alive.
         with tempfile.TemporaryDirectory() as tmpdir:
             for feat_idx, (feat, wt_df) in enumerate(bins_dict.items()):
                 vr        = self._results[feat]
@@ -4062,7 +4100,7 @@ class MonotoneWOEBinner:
                 sv_df     = (wt_df[wt_df["is_special"].astype(bool)]
                              if "is_special" in wt_df.columns else pd.DataFrame())
 
-                # 渲染整体 WOE 图并落盘（insert_image 需要文件路径）
+                # Render the overall WOE chart and write it to disk (insert_image needs a file path)
                 img_buf   = self._render_woe_chart(
                     feat, normal_df, sv_df, vr, dpi=120, figsize=(9, 4.5),
                 )
@@ -4071,23 +4109,23 @@ class MonotoneWOEBinner:
                 with open(img_path, "wb") as f:
                     f.write(img_buf.getbuffer())
 
-                # 特征标题
+                # Feature title
                 em.merge_col(
                     ws2, ncols=11,
                     text=(f"  [{feat_idx+1:02d}] {feat}   |   IV={vr['iv']:.4f}   "
-                          f"|   普通箱={vr['n_bins']}   "
-                          f"|   单调={'✓' if vr['is_monotonic'] else '✗'}"
-                          + (f"   |   特殊值箱={len(sv_df)}" if len(sv_df) > 0 else "")),
+                          f"|   Normal bins={vr['n_bins']}   "
+                          f"|   Monotone={'✓' if vr['is_monotonic'] else '✗'}"
+                          + (f"   |   Special bins={len(sv_df)}" if len(sv_df) > 0 else "")),
                     cformat="BLUE_H4",
                 )
-                # 插入图片（缩放到合适大小）
+                # Insert the image (scaled to a suitable size)
                 em.insert_image(ws2, figPath=img_path, figScale=(0.62, 0.62),
                                 skipby="row")
 
             em.close_workbook()
 
-        logger.info(f"[export_woe_report] 报告已保存至: {report_path}  "
-                    f"(ExcelMaster, 含图片Sheet)")
+        logger.info(f"[export_woe_report] Report saved to: {report_path}  "
+                    f"(ExcelMaster, including the chart sheet)")
 
     def _render_woe_chart(
         self,
@@ -4099,16 +4137,16 @@ class MonotoneWOEBinner:
         figsize: tuple = (9, 4.5),
     ) -> io.BytesIO:
         """
-        渲染单个特征的 WOE 复合图，返回 BytesIO（PNG 格式）。
-        普通箱：stacked 柱图 + WOE 折线 + 标注框
-        特殊值箱：独立虚线柱（右侧追加）+ 标注框，使用不同颜色
+        Render the composite WOE chart of a single feature and return a BytesIO (PNG format).
+        Ordinary bins: stacked bars + WOE line + annotation boxes
+        Special-value bins: separate dashed-outline bars (appended on the right) + annotation boxes in a different color
         """
         GOOD_COLOR = "#5BBCD6"
         BAD_COLOR  = "#F4856A"
         WOE_COLOR  = "#2E75B6"
-        SV_GOOD    = "#A8D8A8"   # 特殊值箱好样本（浅绿）
-        SV_BAD     = "#F7B7A3"   # 特殊值箱坏样本（浅橙）
-        SV_WOE     = "#8E44AD"   # 特殊值箱 WOE 线（紫）
+        SV_GOOD    = "#A8D8A8"   # good samples of the special-value bins (light green)
+        SV_BAD     = "#F7B7A3"   # bad samples of the special-value bins (light orange)
+        SV_WOE     = "#8E44AD"   # WOE line of the special-value bins (purple)
 
         n_normal = len(normal_df)
         n_sv     = len(sv_df)
@@ -4130,7 +4168,7 @@ class MonotoneWOEBinner:
         x_sv     = np.arange(n_normal, n_total)
         x_all    = np.arange(n_total)
 
-        # ── 普通箱柱图 ──
+        # ── Ordinary-bin bars ──
         pct_bad_n  = normal_df["pct_bad"].values  if n_normal > 0 else np.array([])
         pct_good_n = normal_df["pct_good"].values if n_normal > 0 else np.array([])
         if n_normal > 0:
@@ -4139,7 +4177,7 @@ class MonotoneWOEBinner:
             ax_bar.bar(x_normal, pct_bad_n, bottom=pct_good_n, color=BAD_COLOR,
                        alpha=0.85, label="1 (Bad)", width=0.6, zorder=2)
 
-        # ── 特殊值箱柱图（虚边框区分）──
+        # ── Special-value-bin bars (distinguished by a dashed outline) ──
         pct_bad_sv  = sv_df["pct_bad"].values  if n_sv > 0 else np.array([])
         pct_good_sv = sv_df["pct_good"].values if n_sv > 0 else np.array([])
         if n_sv > 0:
@@ -4150,21 +4188,21 @@ class MonotoneWOEBinner:
                        alpha=0.85, width=0.6, zorder=2, edgecolor="#888",
                        linewidth=1.2, linestyle="--", label="1 (sv)")
 
-            # 特殊值箱分隔线（用数据坐标，避免 bbox_inches='tight' 拉伸）
+            # Divider line before the special-value bins (in data coordinates, to avoid stretching with bbox_inches='tight')
             ax_bar.axvline(x=n_normal - 0.5, color="#888", linewidth=1.2,
                            linestyle=":", zorder=3, label="_nolegend_")
             ax_bar.text(n_normal - 0.35, 0.93, "Special",
                         fontsize=7.5, color="#8E44AD", va="top",
                         transform=ax_bar.transData)
 
-        # ── 普通箱 WOE 线 ──
+        # ── WOE line of the ordinary bins ──
         woe_n   = normal_df["woe"].values  if n_normal > 0 else np.array([])
         br_n    = normal_df["bad_rate"].values if n_normal > 0 else np.array([])
         if n_normal > 0:
             ax_woe.plot(x_normal, woe_n, color=WOE_COLOR, marker="o",
                         linewidth=2, markersize=6, zorder=5, label="WOE (normal)")
 
-        # ── 特殊值箱 WOE 线（断开，虚线）──
+        # ── WOE line of the special-value bins (disconnected, dashed) ──
         woe_sv  = sv_df["woe"].values  if n_sv > 0 else np.array([])
         br_sv   = sv_df["bad_rate"].values if n_sv > 0 else np.array([])
         if n_sv > 0:
@@ -4172,7 +4210,7 @@ class MonotoneWOEBinner:
                         linewidth=1.5, markersize=6, linestyle="--",
                         zorder=5, label="WOE (special)")
 
-        # ── 标注框（普通箱）──
+        # ── Annotation boxes (ordinary bins) ──
         bar_ylim_max = 1.0
         label_offset = 0.04
         label_margin = 0.02
@@ -4210,7 +4248,7 @@ class MonotoneWOEBinner:
                 zip(woe_n, br_n, pct_good_n, pct_bad_n, lift_n, pct_n_n)):
             _annotate(ax_bar, ax_woe, xi, wv, br, pg, pb, lift=lv, pct_n=pn)
 
-        # 特殊值箱标注（紫色，复用 _annotate）
+        # Annotations of the special-value bins (purple, reusing _annotate)
         lift_sv  = sv_df["lift"].values  if "lift"  in sv_df.columns and n_sv > 0 else [None]*n_sv
         pct_n_sv = sv_df["pct_n"].values if "pct_n" in sv_df.columns and n_sv > 0 else [None]*n_sv
         for i, (xi, wv, br, pg, pb, lv, pn) in enumerate(
@@ -4218,7 +4256,7 @@ class MonotoneWOEBinner:
             _annotate(ax_bar, ax_woe, xi, wv, br, pg, pb,
                       lift=lv, pct_n=pn, fc="#F5EEF8", ec="#8E44AD")
 
-        # ── 轴格式 ──
+        # ── Axis formatting ──
         all_labels = (
             [str(b) for b in normal_df["bin_label"]]
             + ([str(b) for b in sv_df["bin_label"]] if n_sv > 0 else [])
@@ -4241,18 +4279,19 @@ class MonotoneWOEBinner:
         ax_bar.grid(axis="y", alpha=0.3, zorder=0)
         ax_bar.set_axisbelow(True)
 
-        # 图例定位策略：
-        # 有 sv 时：两个 legend 合并放在 special 区域内当前最右一个 sv 笔的正上方（y=1.0 上边界）
-        # 无 sv 时：Target legend 放右上角
+        # Legend placement strategy:
+        # With sv bins: merge the two legends and place them right above the rightmost sv bar inside the
+        # special region (at the y=1.0 upper boundary)
+        # Without sv bins: put the Target legend in the upper right corner
         handles, labels = ax_bar.get_legend_handles_labels()
         if n_sv > 0:
-            # 合并 bar 和 woe 的全部句柄 → 一个 legend
+            # Merge all handles of bar and woe → a single legend
             woe_handles = [l for l in ax_woe.get_lines()
                            if not l.get_label().startswith("_")]
             all_handles = handles + woe_handles
             all_labels  = labels + [l.get_label() for l in woe_handles]
-            # 锚点在最右 sv bin 的中心 x, y=1.0（ax_bar 上边界）
-            anchor_x = n_total - 1.0   # 最右一个 bin 的 x
+            # Anchor at the center x of the rightmost sv bin, y=1.0 (upper boundary of ax_bar)
+            anchor_x = n_total - 1.0   # x of the rightmost bin
             ax_bar.legend(all_handles, all_labels,
                           loc="upper right",
                           bbox_to_anchor=(anchor_x, 1.0),
@@ -4288,42 +4327,45 @@ class MonotoneWOEBinner:
         bar_mode: str = "clustered",
     ) -> None:
         """
-        为每个特征绘制复合图（线图 + Stack 柱图），保存到 graph_path 目录。
+        Draw a composite chart (line chart + stacked bar chart) for each feature and save it to the graph_path directory.
 
-        整体图（group_name=None）：
-          - 普通箱 stacked 柱图 + WOE 折线 + 标注框
-          - 若有特殊值箱，追加在右侧（虚边框 + 紫色标注）
-          - 标题："{feat}:  IV={iv:.3f}"
+        Overall chart (group_name=None):
+          - Ordinary-bin stacked bars + WOE line + annotation boxes
+          - Special-value bins, if any, are appended on the right (dashed outline + purple annotations)
+          - Title: "{feat}:  IV={iv:.3f}"
 
-        分组图（group_name 不为 None）：每个 group 一条 WOE 折线（仅普通箱），
-        柱图样式由 bar_mode 控制：
-          - "pooled"          : 单套柱，全量好坏占比（占全量样本）
-          - "clustered"       : 每个箱位置并排各组柱，柱高=占【该组】总样本（默认）
-          - "small_multiples" : 每个 group 一个子图 panel，各画该组组内占比柱
-                                + 该组 WOE 线（WOE y 轴跨 panel 统一，便于对比）
-          - 标题："{feat}:  IV_range={min}−{max}"
-          - 各组 IV（图例 / 子图标题）：组内口径——以该组自身 bad/good 为分母，
-            含特殊值 / 缺失箱并沿用拟合时的 SV 治理决策；组内只有单一类别且未经 laplace
-            平滑的箱不计入（iv_guard 口径），详见 _group_iv_for_plot
-          - 各组 WOE 折线：以全量 bad/good 为基准（对两类齐全的箱 = 组内 WOE + 常数
-            ln(该组 bad 占全量 bad 的比例 / 该组 good 占全量 good 的比例)），便于跨组比较水平
+        By-group chart (group_name is not None): one WOE line per group (ordinary bins only),
+        the bar style is controlled by bar_mode:
+          - "pooled"          : one set of bars showing the good/bad share of the full sample (as a share of all samples)
+          - "clustered"       : side-by-side bars of every group at each bin position, bar height = share of the group's own
+                                total samples (default)
+          - "small_multiples" : one subplot panel per group, each drawing the in-group share bars of that group
+                                + the WOE line of that group (the WOE y-axis is shared across panels for easy comparison)
+          - Title: "{feat}:  IV_range={min}-{max}"
+          - Group IV (legend / subplot title): within-group basis - the group's own bad/good counts are the denominators,
+            special-value / missing bins are included and reuse the SV governance decisions made at fit time; a bin
+            that holds only one class inside the group and was not laplace-smoothed is excluded (iv_guard basis),
+            see _group_iv_for_plot
+          - Group WOE lines: based on the full-sample bad/good (for a bin with both classes = within-group WOE + the constant
+            ln(group's share of all bad / group's share of all good)), which makes the levels comparable across groups
 
         Parameters
         ----------
-        graph_path     : 图片保存目录（自动创建）
-        group_name     : 分组列名（如 "month"），None = 画整体图
-        _df_for_group  : 含原始特征+target+group_name 的 DataFrame（group 模式必填）
-        dpi            : 图片分辨率，默认 150；clustered by-group 模式固定为 200
-        figsize        : 图片尺寸，默认 (9, 6)；clustered by-group 模式固定为 (16, 6)。
-                         small_multiples 模式下为单个 panel 的基准尺寸，整图按子图网格自动放大
-        bar_mode       : 分组图柱样式，"pooled" | "clustered" | "small_multiples"，
-                         默认 "clustered"。group_name=None（整体图）时此参数忽略
+        graph_path     : directory in which the images are saved (created automatically)
+        group_name     : name of the grouping column (e.g. "month"); None = draw the overall chart
+        _df_for_group  : DataFrame with the raw features + target + group_name (required in group mode)
+        dpi            : image resolution, default 150; fixed to 200 in clustered by-group mode
+        figsize        : image size, default (9, 6); fixed to (16, 6) in clustered by-group mode.
+                         In small_multiples mode it is the base size of a single panel; the whole figure is scaled up
+                         automatically with the subplot grid
+        bar_mode       : bar style of the by-group chart, "pooled" | "clustered" | "small_multiples",
+                         default "clustered". Ignored when group_name=None (overall chart)
         """
         self._check_fitted()
         _valid_bar_modes = {"pooled", "clustered", "small_multiples"}
         if bar_mode not in _valid_bar_modes:
             raise ValueError(
-                f"bar_mode 必须是 {_valid_bar_modes} 之一，收到: {bar_mode!r}"
+                f"bar_mode must be one of {_valid_bar_modes}, got: {bar_mode!r}"
             )
         is_clustered_group = group_name is not None and bar_mode == "clustered"
         plot_figsize = (16, 6) if is_clustered_group else figsize
@@ -4342,7 +4384,7 @@ class MonotoneWOEBinner:
             vr = self._results[feat]
             edges  = [float(e) for e in vr["edges"]]
 
-            # 分离普通箱和特殊值箱
+            # Separate the ordinary bins from the special-value bins
             if "is_special" in wt_df.columns:
                 normal_df = wt_df[~wt_df["is_special"].astype(bool)].copy()
                 sv_df     = wt_df[wt_df["is_special"].astype(bool)].copy()
@@ -4354,14 +4396,15 @@ class MonotoneWOEBinner:
             n_sv      = len(sv_df)
             n_total   = n_normal + n_sv
             iv_overall = vr["iv"]
-            # 普通箱真实箱号（拟合箱号可能不连续，如 [0, 2, 3]）：分组统计按箱号取行、按位置画
+            # Actual bin ids of the ordinary bins (fitted bin ids may be non-contiguous, e.g. [0, 2, 3]):
+            # group statistics fetch rows by bin id and are drawn by position
             normal_bin_ids = [int(b) - 1 for b in normal_df["bin_no"]]
 
             x_normal = np.arange(n_normal)
             x_sv     = np.arange(n_normal, n_total)
             x_all    = np.arange(n_total)
 
-            # ── small_multiples 独立路径：每组一个子图，自建多子图 figure ──
+            # ── small_multiples has its own path: one subplot per group, builds its own multi-subplot figure ──
             if group_name is not None and bar_mode == "small_multiples":
                 self._plot_feat_small_multiples(
                     feat, normal_df, sv_df,
@@ -4380,7 +4423,7 @@ class MonotoneWOEBinner:
             pct_good_sv = sv_df["pct_good"].values if n_sv > 0 else np.array([])
 
             if group_name is None:
-                # ── 整体图 ──
+                # ── Overall chart ──
                 if n_normal > 0:
                     ax_bar.bar(x_normal, pct_good_n, color=GOOD_COLOR,
                                alpha=0.85, label="0", width=0.6, zorder=2)
@@ -4397,26 +4440,26 @@ class MonotoneWOEBinner:
                                linewidth=1.2, linestyle="--")
                     ax_bar.axvline(x=n_normal - 0.5, color="#888",
                                    linewidth=1.2, linestyle=":", zorder=3)
-                    # 注意: 用数据坐标而非 get_xaxis_transform()，避免 bbox_inches='tight' 拉伸
+                    # Note: data coordinates, not get_xaxis_transform(), to avoid stretching with bbox_inches='tight'
                     ax_bar.text(n_normal - 0.35, 0.93, "Special",
                                 fontsize=8, color=SV_WOE, va="top",
                                 transform=ax_bar.transData)
 
-                # WOE 线（普通箱）
+                # WOE line (ordinary bins)
                 woe_n  = normal_df["woe"].values  if n_normal > 0 else np.array([])
                 br_n   = normal_df["bad_rate"].values if n_normal > 0 else np.array([])
                 if n_normal > 0:
                     ax_woe.plot(x_normal, woe_n, color=WOE_COLOR_OVERALL,
                                 marker="o", linewidth=2, markersize=6, zorder=5)
 
-                # WOE 线（特殊值箱）
+                # WOE line (special-value bins)
                 woe_sv = sv_df["woe"].values  if n_sv > 0 else np.array([])
                 br_sv  = sv_df["bad_rate"].values if n_sv > 0 else np.array([])
                 if n_sv > 0:
                     ax_woe.plot(x_sv, woe_sv, color=SV_WOE, marker="D",
                                 linewidth=1.5, markersize=6, linestyle="--", zorder=5)
 
-                # 标注框（普通箱）
+                # Annotation boxes (ordinary bins)
                 bar_ylim_max = 1.0
                 label_offset = 0.04
                 label_margin = 0.02
@@ -4448,7 +4491,7 @@ class MonotoneWOEBinner:
                         arrowprops=dict(arrowstyle="-", color="black", lw=0.8),
                     )
 
-                # 标注框（特殊值箱，紫色）
+                # Annotation boxes (special-value bins, purple)
                 lift_sv2  = sv_df["lift"].values  if "lift"  in sv_df.columns and n_sv > 0 else [None]*n_sv
                 pct_n_sv2 = sv_df["pct_n"].values if "pct_n" in sv_df.columns and n_sv > 0 else [None]*n_sv
                 for xi, (wv, br, pg, pb, lv, pn) in enumerate(
@@ -4478,7 +4521,7 @@ class MonotoneWOEBinner:
                         arrowprops=dict(arrowstyle="-", color=SV_WOE, lw=0.8),
                     )
 
-                # Legend: sv 区域右上角内部，有 sv 时合并两个 legend
+                # Legend: inside the upper right of the sv region; with sv bins the two legends are merged
                 bar_handles, bar_labels = ax_bar.get_legend_handles_labels()
                 if n_sv > 0:
                     woe_handles2 = [l for l in ax_woe.get_lines()
@@ -4502,28 +4545,28 @@ class MonotoneWOEBinner:
                 title = f"{feat}:  IV={iv_overall:.3f}"
 
             else:
-                # ── By-group 图 ──
+                # ── By-group chart ──
                 if _df_for_group is None:
-                    logger.info(f"  [WARN] group_name='{group_name}' 需要传入 _df_for_group，跳过 {feat}")
+                    logger.info(f"  [WARN] group_name='{group_name}' requires _df_for_group, skipping {feat}")
                     plt.close(fig)
                     continue
                 if group_name not in _df_for_group.columns or feat not in _df_for_group.columns:
-                    logger.info(f"  [WARN] group '{group_name}' 或 feature '{feat}' 不在 DataFrame 中")
+                    logger.info(f"  [WARN] group '{group_name}' or feature '{feat}' is not in the DataFrame")
                     plt.close(fig)
                     continue
 
-                # ── 用拟合好的 edges 对各 group 分别分箱 ──
+                # ── Bin each group separately with the fitted edges ──
                 fitted_edges = list(vr["edges"])
                 eps = self.eps
 
                 groups   = sorted(_df_for_group[group_name].dropna().unique())
                 n_groups = len(groups)
-                # tab10 调色板，最多 10 种颜色循环
+                # tab10 palette, cycling through at most 10 colors
                 cmap_colors = plt.cm.tab10(np.linspace(0, 0.9, min(max(n_groups,1), 10)))
                 group_ivs = []
 
-                # WOE 基准：全量 total_bad / total_good（各组 WOE 相对全量，保证跨组可比；
-                # 组 IV 另按组内口径计算，见 _group_iv_for_plot）
+                # WOE baseline: full-sample total_bad / total_good (each group's WOE is relative to the full sample, so groups are
+                # comparable; the group IV is computed separately on the within-group basis, see _group_iv_for_plot)
                 all_normal_df, all_sv_groups = self._split_special_for_plot(_df_for_group, feat, vr)
                 all_normal_sub = all_normal_df[[feat, self.target_col]].dropna(subset=[feat]).copy()
                 all_normal_sub["_bin"] = self._assign_normal_bins(
@@ -4532,9 +4575,9 @@ class MonotoneWOEBinner:
                 all_total_bad  = float(all_normal_sub[self.target_col].sum())
                 all_total_good = float((all_normal_sub[self.target_col] == 0).sum())
 
-                # ── 柱图模式：pooled（全量单套柱）vs clustered（各组并排柱）──
+                # ── Bar mode: pooled (one set of full-sample bars) vs clustered (side-by-side bars per group) ──
                 if bar_mode == "pooled":
-                    # 全量普通箱比例（分母 = 全量普通行数）
+                    # Full-sample share of the ordinary bins (denominator = number of ordinary rows in the full sample)
                     all_n_full = len(all_normal_sub)
                     pct_good_n_grp = np.zeros(n_normal)
                     pct_bad_n_grp  = np.zeros(n_normal)
@@ -4544,7 +4587,7 @@ class MonotoneWOEBinner:
                         good_b = float((grp_b[self.target_col] == 0).sum())
                         pct_good_n_grp[xi] = good_b / (all_n_full + eps) if all_n_full > 0 else 0.0
                         pct_bad_n_grp[xi]  = bad_b  / (all_n_full + eps) if all_n_full > 0 else 0.0
-                    # 全量特殊值箱比例（分母 = 全量行数）
+                    # Full-sample share of the special-value bins (denominator = number of rows in the full sample)
                     all_sv_n = len(_df_for_group)
                     pct_good_sv_grp = np.zeros(n_sv)
                     pct_bad_sv_grp  = np.zeros(n_sv)
@@ -4558,7 +4601,7 @@ class MonotoneWOEBinner:
                             if matched_sv_df is not None and len(matched_sv_df) > 0:
                                 pct_good_sv_grp[si] = float((matched_sv_df[self.target_col] == 0).sum()) / (all_sv_n + eps)
                                 pct_bad_sv_grp[si]  = float(matched_sv_df[self.target_col].sum()) / (all_sv_n + eps)
-                    # 画全量单套柱
+                    # Draw the single set of full-sample bars
                     if n_normal > 0:
                         ax_bar.bar(x_normal, pct_good_n_grp, color=GOOD_COLOR,
                                    alpha=0.45, width=0.6, zorder=2)
@@ -4571,11 +4614,11 @@ class MonotoneWOEBinner:
                         ax_bar.bar(x_sv, pct_bad_sv_grp, bottom=pct_good_sv_grp,
                                    color=SV_BAD, alpha=0.35, width=0.6, zorder=2,
                                    edgecolor="#888", linewidth=1.0, linestyle="--")
-                else:  # clustered：每个箱位置并排 n_groups 根柱，柱宽均分簇宽
-                    cluster_w = 0.8                       # 每个箱簇占据的总宽度
+                else:  # clustered: n_groups bars side by side per bin position, bar width = cluster width / n_groups
+                    cluster_w = 0.8                       # total width taken by each bin cluster
                     bar_w     = cluster_w / max(n_groups, 1)
 
-                # 特殊值分隔线 + 标注（pooled / clustered 公共）
+                # Special-value divider line + label (shared by pooled / clustered)
                 if n_sv > 0:
                     ax_bar.axvline(x=n_normal - 0.5, color="#888",
                                    linewidth=1.0, linestyle=":", zorder=3)
@@ -4583,20 +4626,21 @@ class MonotoneWOEBinner:
                                 fontsize=8, color=SV_WOE, va="top",
                                 transform=ax_bar.transData)
 
-                # 逐组：算 WOE 折线（clustered 时另画该组组内占比柱）
+                # Per group: compute the WOE line (for clustered, also draw the in-group share bars of that group)
                 for gi, grp_val in enumerate(groups):
                     grp_df_full = _df_for_group[_df_for_group[group_name] == grp_val]
                     n_grp = len(grp_df_full)
                     tr    = grp_df_full[self.target_col].mean() if n_grp > 0 else 0.0
                     clr   = cmap_colors[gi % len(cmap_colors)]
 
-                    # 分离该组的特殊值与普通行，并按 edges/类别取值分箱
+                    # Separate the special values of the group from its ordinary rows, and bin by edges / category values
                     grp_normal_df, grp_sv_groups = self._split_special_for_plot(grp_df_full, feat, vr)
                     grp_sub = grp_normal_df[[feat, self.target_col]].dropna(subset=[feat]).copy()
                     grp_sub["_bin"] = self._assign_normal_bins(grp_sub, feat, vr, fitted_edges)
                     grp_sub = grp_sub[grp_sub["_bin"].notna()]
 
-                    # 普通箱：组内占比（分母=该组总样本 n_grp）+ WOE（相对全量基准）
+                    # Ordinary bins: in-group share (denominator = total samples of the group, n_grp)
+                    # + WOE (relative to the full-sample baseline)
                     pct_good_n_g = np.zeros(n_normal)
                     pct_bad_n_g  = np.zeros(n_normal)
                     grp_woe = []
@@ -4614,7 +4658,7 @@ class MonotoneWOEBinner:
                         woe_b = math.log((pct_bad_w + eps) / (pct_good_w + eps))
                         grp_woe.append(woe_b)
 
-                    # ── clustered：画该组组内占比柱（边框用组色，与 WOE 折线对应）──
+                    # ── clustered: draw the group's in-group share bars (outline in the group color, matching its WOE line) ──
                     if bar_mode == "clustered":
                         x_off      = -cluster_w / 2 + bar_w * (gi + 0.5)
                         x_normal_g = x_normal + x_off
@@ -4648,7 +4692,7 @@ class MonotoneWOEBinner:
                                        color=SV_BAD, alpha=0.5, width=bar_w, zorder=2,
                                        edgecolor=clr, linewidth=0.8, linestyle="--")
 
-                    # ── 画该组 WOE 折线（画在箱中心 x_normal，便于跨组对齐对比）──
+                    # ── Draw the group's WOE line (at the bin centers x_normal, so groups line up for comparison) ──
                     if n_grp < 5 or grp_df_full[self.target_col].nunique() < 2:
                         group_ivs.append(0.0)
                         lbl = f"{grp_val}  N={n_grp:,}  TR={tr:.1%}  IV=0.000"
@@ -4656,7 +4700,8 @@ class MonotoneWOEBinner:
                                     color=clr, linewidth=1.5, marker="o",
                                     markersize=4, zorder=5, label=lbl)
                     else:
-                        # 组 IV 取组内口径（含特殊值箱）；WOE 折线仍相对全量基准
+                        # The group IV uses the within-group basis (including special-value bins);
+                        # the WOE line stays relative to the full-sample baseline
                         grp_iv = sum(self._group_iv_for_plot(grp_df_full, feat, vr, fitted_edges))
                         group_ivs.append(round(grp_iv, 4))
                         lbl = f"{grp_val}  N={n_grp:,}  TR={tr:.1%}  IV={grp_iv:.3f}"
@@ -4664,7 +4709,8 @@ class MonotoneWOEBinner:
                                     linewidth=1.5, marker="o", markersize=4,
                                     zorder=5, label=lbl)
 
-                # Legend: 所有条目合并，放坐标轴右侧外部（更靠右，避免遮挡 WOE y轴标题）
+                # Legend: merge all entries and place it outside the right of the axes
+                # (further right, so that it does not cover the WOE y-axis title)
                 _bar_desc   = "pooled %" if bar_mode == "pooled" else "in-group %"
                 dummy_good  = plt.Rectangle((0,0),1,1, color=GOOD_COLOR, alpha=0.6)
                 dummy_bad   = plt.Rectangle((0,0),1,1, color=BAD_COLOR,  alpha=0.6)
@@ -4687,7 +4733,7 @@ class MonotoneWOEBinner:
                 title = f"{feat}:  IV_range={iv_range}"
                 ax_woe.set_ylabel("WOE", fontsize=9, color="#333")
 
-            # ── 通用轴格式 ──
+            # ── Common axis formatting ──
             all_labels = (
                 [str(b) for b in normal_df["bin_label"]]
                 + ([str(b) for b in sv_df["bin_label"]] if n_sv > 0 else [])
@@ -4695,8 +4741,8 @@ class MonotoneWOEBinner:
             ax_bar.set_xlim(-0.5, n_total - 0.5)
             ax_bar.set_ylim(0, 1.0)
 
-            # ── 动态计算 WOE y 轴范围（避免折线超出坐标轴）──
-            # 收集所有已绘制折线上的有效 WOE 值
+            # ── Compute the WOE y-axis range dynamically (so that lines do not run outside the axes) ──
+            # Collect the valid WOE values of all lines drawn
             _all_woe_pts = []
             for _line in ax_woe.get_lines():
                 _yd = np.array(_line.get_ydata(), dtype=float)
@@ -4704,12 +4750,12 @@ class MonotoneWOEBinner:
             if _all_woe_pts:
                 _woe_min = min(_all_woe_pts)
                 _woe_max = max(_all_woe_pts)
-                # padding: 15% of span, 最少 ±0.1 的绝对余量
+                # padding: 15% of span, with an absolute margin of at least ±0.1
                 _span   = max(_woe_max - _woe_min, 0.2)
                 _pad    = max(_span * 0.15, 0.1)
                 _y_lo   = _woe_min - _pad
                 _y_hi   = _woe_max + _pad
-                # 至少覆盖 [-0.5, 0.5]，且 0 刻度要在范围内
+                # Cover at least [-0.5, 0.5], and keep the 0 tick inside the range
                 _y_lo   = min(_y_lo, -0.5)
                 _y_hi   = max(_y_hi,  0.5)
             else:
@@ -4731,7 +4777,8 @@ class MonotoneWOEBinner:
 
             plt.title(title, fontsize=11, fontweight="bold", pad=10)
             if group_name is not None:
-                # by-group 模式：legend 在右侧外，预留右边空间（含 IV 文字，留更多右边距）
+                # by-group mode: the legend sits outside on the right, so reserve space on the right
+                # (the IV text is included, leave a larger right margin)
                 plt.tight_layout(rect=[0, 0, 0.78, 1])
             else:
                 plt.tight_layout()
@@ -4743,7 +4790,7 @@ class MonotoneWOEBinner:
             plt.close(fig)
             logger.info(f"  [plot_woe_graph] {out_file}")
 
-        logger.info(f"[plot_woe_graph] 全部图表已保存至: {graph_path}")
+        logger.info(f"[plot_woe_graph] All charts saved to: {graph_path}")
 
     def _plot_feat_small_multiples(
         self, feat, normal_df, sv_df,
@@ -4751,25 +4798,28 @@ class MonotoneWOEBinner:
         group_name, _df_for_group, graph_path, dpi, figsize,
         GOOD_COLOR, BAD_COLOR, SV_GOOD, SV_BAD, SV_WOE,
     ):
-        """small_multiples 模式：每个 group 一个子图 panel。
+        """small_multiples mode: one subplot panel per group.
 
-        - 柱高 = 该箱样本 / 该组总样本（组内占比），good/bad 堆叠，含特殊值箱
-        - WOE 相对全量基准计算；WOE y 轴范围跨全部 panel 统一，便于横向对比
-        - 子图标题中的 IV 为组内口径（见 _group_iv_for_plot；组内单一类别且未经平滑的箱不计入）
-        - 文件名后缀 _by_{group_name}，与 pooled / clustered 模式一致
+        - Bar height = samples in the bin / total samples of the group (in-group share), good/bad stacked,
+          special-value bins included
+        - WOE is computed relative to the full-sample baseline; the WOE y-axis range is shared by all panels
+          for easy side-by-side comparison
+        - The IV in the subplot title is on the within-group basis (see _group_iv_for_plot; bins with a single class
+          inside the group that were not smoothed are excluded)
+        - File-name suffix _by_{group_name}, consistent with the pooled / clustered modes
         """
-        # ── guard（与单图路径一致）──
+        # ── guard (consistent with the single-figure path) ──
         if _df_for_group is None:
-            logger.info(f"  [WARN] group_name='{group_name}' 需要传入 _df_for_group，跳过 {feat}")
+            logger.info(f"  [WARN] group_name='{group_name}' requires _df_for_group, skipping {feat}")
             return
         if group_name not in _df_for_group.columns or feat not in _df_for_group.columns:
-            logger.info(f"  [WARN] group '{group_name}' 或 feature '{feat}' 不在 DataFrame 中")
+            logger.info(f"  [WARN] group '{group_name}' or feature '{feat}' is not in the DataFrame")
             return
 
         vr = self._results[feat]
         fitted_edges = list(vr["edges"])
         eps = self.eps
-        # 普通箱真实箱号（可能不连续）：按箱号取行、按位置画
+        # Actual bin ids of the ordinary bins (possibly non-contiguous): fetch rows by bin id, draw by position
         normal_bin_ids = [int(b) - 1 for b in normal_df["bin_no"]]
 
         all_labels = (
@@ -4777,7 +4827,7 @@ class MonotoneWOEBinner:
             + ([str(b) for b in sv_df["bin_label"]] if n_sv > 0 else [])
         )
 
-        # WOE 基准：全量 total_bad / total_good（组 IV 另按组内口径，见 _group_iv_for_plot）
+        # WOE baseline: full-sample total_bad / total_good (the group IV uses the within-group basis, see _group_iv_for_plot)
         all_normal_df, _ = self._split_special_for_plot(_df_for_group, feat, vr)
         all_normal_sub = all_normal_df[[feat, self.target_col]].dropna(subset=[feat]).copy()
         all_normal_sub["_bin"] = self._assign_normal_bins(
@@ -4789,10 +4839,10 @@ class MonotoneWOEBinner:
         groups   = sorted(_df_for_group[group_name].dropna().unique())
         n_groups = len(groups)
         if n_groups == 0:
-            logger.info(f"  [WARN] group '{group_name}' 无有效取值，跳过 {feat}")
+            logger.info(f"  [WARN] group '{group_name}' has no valid values, skipping {feat}")
             return
 
-        # 子图网格：最多 3 列
+        # Subplot grid: at most 3 columns
         ncols = min(n_groups, 3)
         nrows = math.ceil(n_groups / ncols)
         fig, axes = plt.subplots(
@@ -4820,11 +4870,11 @@ class MonotoneWOEBinner:
             grp_sub["_bin"] = self._assign_normal_bins(grp_sub, feat, vr, fitted_edges)
             grp_sub = grp_sub[grp_sub["_bin"].notna()]
 
-            # 普通箱：组内占比 + 组内 bad_rate + WOE（相对全量基准）
+            # Ordinary bins: in-group share + in-group bad_rate + WOE (relative to the full-sample baseline)
             pct_good_n_g = np.zeros(n_normal)
             pct_bad_n_g  = np.zeros(n_normal)
             grp_woe = []
-            grp_br  = []      # 各箱组内 bad_rate（用于数据标签）
+            grp_br  = []      # in-group bad_rate of each bin (used for the data labels)
             for xi, b in enumerate(normal_bin_ids):
                 bin_rows = grp_sub[grp_sub["_bin"] == b]
                 bad_b  = float(bin_rows[self.target_col].sum())
@@ -4841,7 +4891,7 @@ class MonotoneWOEBinner:
                 woe_b = math.log((pct_bad_w + eps) / (pct_good_w + eps))
                 grp_woe.append(woe_b)
 
-            # 特殊值箱：组内占比 + WOE（相对全量基准）+ 组内 bad_rate
+            # Special-value bins: in-group share + WOE (relative to the full-sample baseline) + in-group bad_rate
             pct_good_sv_g = np.zeros(n_sv)
             pct_bad_sv_g  = np.zeros(n_sv)
             sv_woe = [np.nan] * n_sv
@@ -4863,7 +4913,7 @@ class MonotoneWOEBinner:
                         _pg = sv_good_i / (all_total_good + eps)
                         sv_woe[si] = math.log((_pb + eps) / (_pg + eps))
 
-            # 柱（单套，good 下 bad 上）
+            # Bars (a single set, good below and bad on top)
             if n_normal > 0:
                 ax_bar.bar(x_normal, pct_good_n_g, color=GOOD_COLOR,
                            alpha=0.85, width=0.6, zorder=2, label="0")
@@ -4882,14 +4932,15 @@ class MonotoneWOEBinner:
                             fontsize=7, color=SV_WOE, va="top",
                             transform=ax_bar.transData)
 
-            # WOE 折线（单色；范围统一在循环后设置）
+            # WOE line (single color; the range is set uniformly after the loop)
             if n_grp < 5 or grp_df_full[self.target_col].nunique() < 2:
                 group_ivs.append(0.0)
                 iv_disp = 0.0
                 ax_woe.plot(x_normal, [np.nan] * n_normal, color="#2E75B6",
                             linewidth=1.8, marker="o", markersize=5, zorder=5)
             else:
-                # 组 IV 取组内口径（含特殊值箱）；WOE 折线仍相对全量基准
+                # The group IV uses the within-group basis (including special-value bins);
+                # the WOE line stays relative to the full-sample baseline
                 grp_iv = sum(self._group_iv_for_plot(grp_df_full, feat, vr, fitted_edges))
                 group_ivs.append(round(grp_iv, 4))
                 iv_disp = grp_iv
@@ -4897,15 +4948,15 @@ class MonotoneWOEBinner:
                             linewidth=1.8, marker="o", markersize=5, zorder=5)
                 all_woe_pts.extend([w for w in grp_woe if not np.isnan(w)])
 
-                # 数据标签框（WOE / BR / Lift | 组内占比），仅普通箱有效点
-                # lift 基准 = 该组整体 bad_rate (tr)，每张小图自洽
+                # Data label boxes (WOE / BR / Lift | in-group share), only at the valid points of ordinary bins
+                # lift baseline = bad_rate (tr) of the whole group, self-consistent in every small plot
                 _ylim_max = 1.0
                 for xi in range(n_normal):
                     wv = grp_woe[xi]
                     if np.isnan(wv):
                         continue
                     br = grp_br[xi]
-                    pn = pct_good_n_g[xi] + pct_bad_n_g[xi]    # 组内占比 = 柱高
+                    pn = pct_good_n_g[xi] + pct_bad_n_g[xi]    # in-group share = bar height
                     lv = br / (tr + eps) if tr > 0 else None
                     lines_txt = [f"WOE: {wv:.3f}", f"BR: {br:.2%}"]
                     lines_txt.append(f"Lift: {lv:.2f}x | {pn:.1%}"
@@ -4927,14 +4978,15 @@ class MonotoneWOEBinner:
                         arrowprops=dict(arrowstyle="-", color="#888", lw=0.6),
                     )
 
-                # 特殊值箱：紫色数据标签框（贴柱顶，含 WOE/BR/Lift|占比）
-                # 不画 WOE 点、不纳入统一 y 轴，避免极端 sv WOE 压平普通折线
+                # Special-value bins: purple data-label boxes (placed at the bar top, with WOE/BR/Lift | share)
+                # No WOE point is drawn and they are left out of the shared y-axis, so that an extreme sv WOE
+                # does not flatten the ordinary line
                 for si in range(n_sv):
                     if np.isnan(sv_woe[si]):
                         continue
                     xi_abs = n_normal + si
                     br = sv_br[si]
-                    pn = pct_good_sv_g[si] + pct_bad_sv_g[si]    # 组内占比 = 柱高
+                    pn = pct_good_sv_g[si] + pct_bad_sv_g[si]    # in-group share = bar height
                     lv = br / (tr + eps) if tr > 0 else None
                     lines_sv = [f"WOE: {sv_woe[si]:.3f}", f"BR: {br:.2%}"]
                     lines_sv.append(f"Lift: {lv:.2f}x | {pn:.1%}"
@@ -4955,7 +5007,7 @@ class MonotoneWOEBinner:
                         arrowprops=dict(arrowstyle="-", color=SV_WOE, lw=0.6),
                     )
 
-            # panel 轴格式
+            # panel axis formatting
             ax_bar.set_title(f"{grp_val}   N={n_grp:,}  TR={tr:.1%}  IV={iv_disp:.3f}",
                              fontsize=9, fontweight="bold")
             ax_bar.set_xlim(-0.5, n_total - 0.5)
@@ -4973,7 +5025,7 @@ class MonotoneWOEBinner:
             ax_bar.grid(axis="y", alpha=0.3, zorder=0)
             ax_bar.set_axisbelow(True)
 
-        # 统一 WOE y 轴范围（跨 panel 可比）
+        # Shared WOE y-axis range (comparable across panels)
         if all_woe_pts:
             _woe_min, _woe_max = min(all_woe_pts), max(all_woe_pts)
             _span = max(_woe_max - _woe_min, 0.2)
@@ -4986,7 +5038,7 @@ class MonotoneWOEBinner:
             axw.set_ylim(_y_lo, _y_hi)
             axw.axhline(0, color="gray", linewidth=0.6, linestyle="--", zorder=1)
 
-        # 隐藏多余空 panel
+        # Hide the surplus empty panels
         for j in range(n_groups, nrows * ncols):
             axes_flat[j].axis("off")
 
@@ -5004,12 +5056,12 @@ class MonotoneWOEBinner:
         logger.info(f"  [plot_woe_graph] {out_file}")
 
     # ─────────────────────────────────────────────────────────────────
-    # 便捷属性
+    # Convenience properties
     # ─────────────────────────────────────────────────────────────────
 
     @property
     def iv_summary(self) -> pd.DataFrame:
-        """返回所有特征的 IV 汇总 DataFrame，按 IV 降序排列。"""
+        """Return the IV summary DataFrame of all features, sorted by IV in descending order."""
         self._check_fitted()
         rows = [
             {"feature": feat, "iv": vr["iv"],
@@ -5033,7 +5085,7 @@ class MonotoneWOEBinner:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 快速使用示例 / 自测
+# Quick usage example / self-test
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
@@ -5052,7 +5104,7 @@ if __name__ == "__main__":
     })
     df_demo["is_bad"] = ((df_demo["score"] < 580) & (rng.random(N) < 0.35)).astype(int)
 
-    # 类别特征：已离散化的「城市等级」，与坏率挂钩（D/C 坏率更高）
+    # Categorical feature: a discretized "city grade", tied to the bad rate (D/C have higher bad rates)
     grade_pool = np.array(["A", "B", "C", "D"])
     df_demo["city_grade"] = np.where(
         df_demo["is_bad"].values == 1,
@@ -5060,40 +5112,40 @@ if __name__ == "__main__":
         rng.choice(grade_pool, N, p=[0.35, 0.30, 0.20, 0.15]),
     )
 
-    # 人工注入特殊值
+    # Inject special values by hand
     sv_idx = rng.choice(N, 280, replace=False)
-    df_demo.loc[sv_idx[:100], "score"]  = -1       # 特殊值 -1（无信用记录）
-    df_demo.loc[sv_idx[100:150], "income"] = -100  # 特殊值 -100
-    df_demo.loc[sv_idx[150:230], "tenure"] = np.nan   # NaN 单独分箱
-    df_demo.loc[sv_idx[230:], "city_grade"] = np.nan  # 类别特征的缺失 → [Missing] 箱
+    df_demo.loc[sv_idx[:100], "score"]  = -1       # special value -1 (no credit record)
+    df_demo.loc[sv_idx[100:150], "income"] = -100  # special value -100
+    df_demo.loc[sv_idx[150:230], "tenure"] = np.nan   # NaN gets its own bin
+    df_demo.loc[sv_idx[230:], "city_grade"] = np.nan  # missing categorical value → [Missing] bin
 
     feats      = ["score", "income", "tenure", "age"]
     cate_feats = ["city_grade"]
 
-    # ── 1. 正常 fit（含特殊值参数 + 类别特征）
+    # ── 1. Regular fit (with special-value parameters + categorical features)
     binner = MonotoneWOEBinner(
         feature_cols=feats,
         target_col="is_bad",
         n_init_bins=20,
         min_bin_size=0.03,
-        special_values=[-1, -100, float("nan")],   # ← 仅作用于数值特征
-        cate_feats=cate_feats,                      # ← 新增：类别特征，直接算 WOE/IV
+        special_values=[-1, -100, float("nan")],   # ← applies to numeric features only
+        cate_feats=cate_feats,                      # ← new: categorical features, WOE/IV computed directly
     )
     binner.fit(df_demo)
 
-    logger.info("\n=== get_final_bins() — city_grade (类别特征，4 个类别 + [Missing]) ===")
+    logger.info("\n=== get_final_bins() — city_grade (categorical feature, 4 categories + [Missing]) ===")
     logger.info(binner.get_final_bins()["city_grade"].to_string(index=False))
 
-    # 1b. refine_cate：按坏率聚类合并类别（演示 max_bins=2，把 4 个类别并成 2 箱）
+    # 1b. refine_cate: cluster and merge categories by bad rate (demo with max_bins=2, merging the 4 categories into 2 bins)
     binner.refine_cate(features=["city_grade"], max_bins=2)
-    logger.info("\n=== refine_cate(max_bins=2) — city_grade 聚类后 ===")
+    logger.info("\n=== refine_cate(max_bins=2) — city_grade after clustering ===")
     logger.info(binner.get_final_bins()["city_grade"].to_string(index=False))
     logger.info("\n=== iv_summary ===")
     logger.info(binner.iv_summary.to_string(index=False))
 
-    # 2. get_final_bins（含特殊值箱）
+    # 2. get_final_bins (including the special-value bins)
     bins = binner.get_final_bins()
-    logger.info("\n=== get_final_bins() — score (含特殊值箱) ===")
+    logger.info("\n=== get_final_bins() — score (including special-value bins) ===")
     logger.info(bins["score"].to_string(index=False))
 
     # 3. apply_woe
@@ -5102,27 +5154,27 @@ if __name__ == "__main__":
     woe_cols = [f + "_woe" for f in feats + cate_feats]
     logger.info(df_woe[woe_cols].head())
 
-    # 4. export_woe_report（含图片 Sheet）
+    # 4. export_woe_report (including the chart sheet)
     binner.export_woe_report("/tmp/demo_woe_report_v2.xlsx")
-    logger.info("报告已生成: /tmp/demo_woe_report_v2.xlsx")
+    logger.info("Report generated: /tmp/demo_woe_report_v2.xlsx")
 
-    # 5. plot_woe_graph（整体图，含特殊值箱）
+    # 5. plot_woe_graph (overall chart, including special-value bins)
     binner.plot_woe_graph("/tmp/demo_woe_charts_v2/")
 
-    # 5b. plot_woe_graph（分组图，按 month；类别特征 city_grade 同样支持）
+    # 5b. plot_woe_graph (by-group chart, grouped by month; the categorical feature city_grade is supported as well)
     binner.plot_woe_graph("/tmp/demo_woe_charts_v2_bymonth/", group_name="month",
                           _df_for_group=df_demo, bar_mode="clustered")
 
-    # 6. load_woe_bins — 跳过 fit，直接加载
+    # 6. load_woe_bins — skip fit and load directly
     binner2 = MonotoneWOEBinner(feature_cols=[], target_col="is_bad")
     binner2.load_woe_bins(bins)
     df_woe2 = binner2.apply_woe(df_demo)
     logger.info("\n=== load_woe_bins + apply_woe() — first 5 rows ===")
     logger.info(df_woe2[woe_cols].head())
 
-    # 验证两者 WOE 输出一致
+    # Verify that the two WOE outputs are consistent
     for col in woe_cols:
         diff = (df_woe[col] - df_woe2[col]).abs().max()
         logger.info(f"  {col}: max_diff={diff:.6f} {'✓' if diff < 1e-4 else '✗ MISMATCH'}")
 
-    logger.info("\n✓ 全部测试完成")
+    logger.info("\n✓ All tests finished")
