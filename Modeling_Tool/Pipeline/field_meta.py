@@ -25,6 +25,48 @@ class FieldMeta:
 
     The metadata is intentionally dependency-free so that GUI applications can
     introspect SMF configs without importing Streamlit or any frontend package.
+
+    Parameters
+    ----------
+    label : str
+        Short display name of the field.
+    description : str
+        Help text for the field. For fields without curated text it repeats ``label``.
+    widget : {"text", "number", "select", "multiselect", "toggle", "slider", "textarea", "json", "hidden"}, default "text"
+        Suggested form control. ``"hidden"`` marks code-only objects (DataFrames, callables, connections).
+    options : list or None, default None
+        Allowed values for the ``"select"`` and ``"multiselect"`` widgets.
+    min_val : float or None, default None
+        Lower bound hint for numeric controls such as sliders.
+    max_val : float or None, default None
+        Upper bound hint for numeric controls such as sliders.
+    step : float or None, default None
+        Step hint for numeric controls such as sliders.
+    required : bool, default False
+        Whether a form should ask for this field. It comes from a fixed list per Pipeline and does not mean that the
+        dataclass field has no default.
+    group : str, default "Basic settings"
+        Name of the suggested form section.
+    depends_on : dict or None, default None
+        Display condition ``{field_name: value}``: show this field only while the other field has that value.
+    since_version : str or None, default None
+        Version that introduced the field, when recorded.
+    is_dict_subkey : bool, default False
+        True when the metadata describes a key inside a dictionary-valued config field (see ``nested_fields``).
+    parent_field : str or None, default None
+        Name of the dictionary-valued field that owns this sub-key.
+    yaml_serializable : bool, default True
+        False for objects that cannot be written to YAML/JSON (DataFrames, callables, connections, artifacts).
+    gui_editable : bool, default True
+        False for fields that a GUI should not render (the same code-only objects).
+    advanced : bool, default False
+        Hint to collapse the field under an "advanced" section.
+    expert_only : bool, default False
+        Hint that the field is meant for expert users only.
+    placeholder : str or None, default None
+        Example text for an empty input control.
+    nested_fields : list of FieldMeta, default empty list
+        Metadata of the known keys of a dictionary-valued field (for example ``test_size`` in ``split_config``).
     """
 
     label: str
@@ -48,11 +90,44 @@ class FieldMeta:
     nested_fields: list["FieldMeta"] = dataclass_field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the metadata as a plain dictionary (nested fields become dictionaries too)."""
         return asdict(self)
 
 
 @dataclass
 class PipelineRegistryEntry:
+    """One high-level Pipeline in the registry: card text, classes and how to call it.
+
+    Parameters
+    ----------
+    key : str
+        Registry key, for example ``"credit_model"``.
+    display_name : str
+        Title for a Pipeline card.
+    description : str
+        What the Pipeline does.
+    use_case : str
+        When to use it.
+    audience : list of str
+        Reader roles the Pipeline is meant for.
+    pipeline_class : type
+        The Pipeline class.
+    config_class : type
+        The Config dataclass the Pipeline takes.
+    result_class : type
+        The result dataclass that ``run`` returns.
+    module_path : str
+        Dotted path of the module that defines the classes.
+    import_path : str, default "Modeling_Tool.Pipeline"
+        Package that exports the classes; generated code imports from here.
+    run_requires_data : bool, default True
+        False when ``run()`` takes no DataFrame.
+    run_method : str, default "run(data=your_dataframe)"
+        The call to show on a card.
+    result_attrs : list of str, default empty list
+        Headline attributes of the result object.
+    """
+
     key: str
     display_name: str
     description: str
@@ -68,6 +143,20 @@ class PipelineRegistryEntry:
     result_attrs: list[str] = dataclass_field(default_factory=list)
 
     def to_dict(self, include_classes: bool = False) -> dict[str, Any]:
+        """Return the entry as a plain dictionary.
+
+        Parameters
+        ----------
+        include_classes : bool, default False
+            When True, also include the ``pipeline_class``, ``config_class`` and ``result_class`` objects. Otherwise
+            only their class names are present and the dictionary is JSON/YAML-friendly.
+
+        Returns
+        -------
+        dict
+            The entry fields; the classes appear as ``pipeline_class_name``, ``config_class_name`` and
+            ``result_class_name``.
+        """
         payload = {
             "key": self.key,
             "display_name": self.display_name,
@@ -829,9 +918,14 @@ def get_pipeline_registry(include_classes: bool = True) -> dict[str, Any]:
 
     Parameters
     ----------
-    include_classes
+    include_classes : bool, default True
         When True, each entry includes actual class objects. Set False for a
         JSON/YAML-friendly registry payload.
+
+    Returns
+    -------
+    dict
+        Registry key to entry dictionary (see ``PipelineRegistryEntry.to_dict``).
     """
 
     return {
@@ -841,7 +935,13 @@ def get_pipeline_registry(include_classes: bool = True) -> dict[str, Any]:
 
 
 def get_pipeline_registry_schema() -> dict[str, Any]:
-    """Return a JSON-serializable registry summary without class objects."""
+    """Return a JSON-serializable registry summary without class objects.
+
+    Returns
+    -------
+    dict
+        Registry key to entry dictionary, with class names instead of class objects.
+    """
 
     return get_pipeline_registry(include_classes=False)
 
@@ -866,7 +966,24 @@ def _resolve_entry(pipeline_or_config: str | type | Any) -> PipelineRegistryEntr
 
 
 def get_config_field_meta(config_class_or_key: str | type | Any) -> dict[str, FieldMeta]:
-    """Return FieldMeta objects keyed by config field name."""
+    """Return FieldMeta objects keyed by config field name.
+
+    Parameters
+    ----------
+    config_class_or_key : str, type or object
+        A registry key (for example ``"credit_model"``), the name of a Config, Pipeline or result class, one of those
+        classes, or an instance of one of them.
+
+    Returns
+    -------
+    dict
+        Field name to ``FieldMeta``. The result is a deep copy, so editing it does not change the registry.
+
+    Raises
+    ------
+    KeyError
+        If the reference does not match a registered Pipeline.
+    """
 
     entry = _resolve_entry(config_class_or_key)
     meta = getattr(entry.config_class, "__smf_field_meta__", None)
@@ -898,7 +1015,26 @@ def _field_schema(config_class: type, f: Any, field_type: Any, default_value: An
 
 
 def extract_config_schema(config_class_or_key: str | type | Any) -> dict[str, Any]:
-    """Extract a GUI-friendly schema for one Pipeline Config class."""
+    """Extract a GUI-friendly schema for one Pipeline Config class.
+
+    Parameters
+    ----------
+    config_class_or_key : str, type or object
+        A registry key (for example ``"credit_model"``), the name of a Config, Pipeline or result class, one of those
+        classes, or an instance of one of them.
+
+    Returns
+    -------
+    dict
+        The registry card of the Pipeline (``PipelineRegistryEntry.to_dict(include_classes=False)``) plus ``"fields"``,
+        a list with one dictionary per config field: the ``FieldMeta`` keys and ``name``, ``type``, ``default`` and
+        ``has_default``.
+
+    Raises
+    ------
+    KeyError
+        If the reference does not match a registered Pipeline.
+    """
 
     entry = _resolve_entry(config_class_or_key)
     config_class = entry.config_class
@@ -919,6 +1055,18 @@ def extract_pipeline_schema(pipeline_key: str | type | Any | None = None) -> dic
     """Extract one schema or all pipeline schemas.
 
     Passing None returns ``{"pipelines": {...}}`` for all registered pipelines.
+
+    Parameters
+    ----------
+    pipeline_key : str, type, object or None, default None
+        A registry key, a Config, Pipeline or result class (or its name), or an instance of one of them. None selects
+        every registered Pipeline.
+
+    Returns
+    -------
+    dict
+        The result of ``extract_config_schema`` for one Pipeline, or ``{"pipelines": {key: schema}}`` when
+        ``pipeline_key`` is None.
     """
 
     if pipeline_key is None:
@@ -927,7 +1075,19 @@ def extract_pipeline_schema(pipeline_key: str | type | Any | None = None) -> dic
 
 
 def extract_schema(config_class_or_key: str | type | Any) -> list[dict[str, Any]]:
-    """Compatibility helper returning just the list of field schemas."""
+    """Compatibility helper returning just the list of field schemas.
+
+    Parameters
+    ----------
+    config_class_or_key : str, type or object
+        A registry key (for example ``"credit_model"``), the name of a Config, Pipeline or result class, one of those
+        classes, or an instance of one of them.
+
+    Returns
+    -------
+    list of dict
+        The ``"fields"`` entry of ``extract_config_schema``.
+    """
 
     return extract_config_schema(config_class_or_key)["fields"]
 
@@ -973,6 +1133,27 @@ def config_to_dict(
 
     Non-serializable object fields (DataFrame, callable, sqlrunner, artifacts)
     are skipped by default, which is the safest behavior for GUI/YAML export.
+
+    Parameters
+    ----------
+    config : dataclass instance
+        A Pipeline Config object.
+    include_non_serializable : bool, default False
+        When False, fields flagged as not YAML-serializable and values that cannot be converted are skipped, and the
+        other values are converted to plain data (tuples and ranges become lists, paths become strings). When True,
+        every field is kept: convertible values are stored unchanged and the others are replaced by their ``repr()``.
+    exclude_none : bool, default False
+        Skip fields whose value is None.
+
+    Returns
+    -------
+    dict
+        Field name to value.
+
+    Raises
+    ------
+    TypeError
+        If ``config`` is not a dataclass instance.
     """
 
     if not is_dataclass(config):
@@ -1002,7 +1183,28 @@ def config_from_dict(
     *,
     strict: bool = True,
 ) -> Any:
-    """Instantiate a Pipeline Config from a dict or GUI/YAML payload."""
+    """Instantiate a Pipeline Config from a dict or GUI/YAML payload.
+
+    Parameters
+    ----------
+    config_class_or_key : str or type
+        A registry key, a Config, Pipeline or result class name, or one of those classes.
+    payload : dict
+        Field values. A mapping that has a ``"config"`` key (the layout written by ``config_to_yaml``) is read from
+        that key.
+    strict : bool, default True
+        When True, unknown field names raise ``KeyError``. When False, they are dropped silently.
+
+    Returns
+    -------
+    object
+        An instance of the Config class; fields that are not in ``payload`` keep their defaults.
+
+    Raises
+    ------
+    KeyError
+        For an unknown reference, or for unknown field names when ``strict`` is True.
+    """
 
     entry = _resolve_entry(config_class_or_key)
     config_class = entry.config_class
@@ -1035,7 +1237,27 @@ def config_to_yaml(
     pipeline_key: str | None = None,
     include_non_serializable: bool = False,
 ) -> str:
-    """Serialize a Pipeline Config dataclass to a GUI-friendly YAML payload."""
+    """Serialize a Pipeline Config dataclass to a GUI-friendly YAML payload.
+
+    Parameters
+    ----------
+    config : dataclass instance
+        A Pipeline Config object.
+    pipeline_key : str or None, default None
+        Registry key of the Pipeline. When None it is inferred from the class of ``config``.
+    include_non_serializable : bool, default False
+        Passed to ``config_to_dict``.
+
+    Returns
+    -------
+    str
+        YAML text with the keys ``pipeline``, ``pipeline_class``, ``config_class``, ``smf_version`` and ``config``.
+
+    Raises
+    ------
+    ImportError
+        If PyYAML is not installed.
+    """
 
     yaml = _yaml_module()
     entry = _entry_for_config(config, pipeline_key)
@@ -1056,7 +1278,32 @@ def config_to_yaml(
 
 
 def config_from_yaml(config_class_or_key: str | type | None, yaml_text: str, *, strict: bool = True) -> Any:
-    """Deserialize a Pipeline Config from a YAML payload."""
+    """Deserialize a Pipeline Config from a YAML payload.
+
+    Parameters
+    ----------
+    config_class_or_key : str, type or None
+        A registry key or a Config class. When None, the ``pipeline`` (or ``config_class``) entry of the YAML
+        payload selects the class.
+    yaml_text : str
+        YAML text, for example the output of ``config_to_yaml``.
+    strict : bool, default True
+        When True, unknown field names raise ``KeyError``; when False, they are dropped.
+
+    Returns
+    -------
+    object
+        An instance of the Config class.
+
+    Raises
+    ------
+    ImportError
+        If PyYAML is not installed.
+    TypeError
+        If the YAML text is not a mapping.
+    KeyError
+        If no Pipeline can be determined, or for unknown field names when ``strict`` is True.
+    """
 
     yaml = _yaml_module()
     payload = yaml.safe_load(yaml_text) or {}
@@ -1073,6 +1320,25 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
 
     The Pipeline ``run`` methods remain the authoritative runtime validation,
     but this helper catches common form mistakes before code generation.
+
+    Parameters
+    ----------
+    pipeline_key : str
+        A registry key (or the name of a Config, Pipeline or result class).
+    values : dict or Config instance
+        The form values. A key that is left out counts as unset: required keys are reported as empty and the others
+        fall back to the Config default. Unknown keys are not reported.
+
+    Returns
+    -------
+    list of str
+        Error messages first, then warnings, each warning prefixed with ``"WARNING: "``. An empty list means that
+        nothing was found.
+
+    Raises
+    ------
+    KeyError
+        If ``pipeline_key`` does not match a registered Pipeline.
     """
 
     entry = _resolve_entry(pipeline_key)
@@ -1179,7 +1445,26 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
 
 
 def generate_pipeline_code(pipeline_key: str, values: dict[str, Any]) -> str:
-    """Generate a minimal Python snippet for a configured Pipeline."""
+    """Generate a minimal Python snippet for a configured Pipeline.
+
+    Parameters
+    ----------
+    pipeline_key : str
+        A registry key (or the name of a Config, Pipeline or result class).
+    values : dict
+        Field name to value. Each value is written with ``repr()``, so it must be a literal that Python can read back.
+
+    Returns
+    -------
+    str
+        Code that imports the Pipeline and Config classes, builds the Config from ``values``, and calls
+        ``run(data=your_dataframe)`` (or ``run()`` for a Pipeline that takes no data).
+
+    Raises
+    ------
+    KeyError
+        If ``pipeline_key`` does not match a registered Pipeline.
+    """
 
     entry = _resolve_entry(pipeline_key)
     config_cls = entry.config_class.__name__
