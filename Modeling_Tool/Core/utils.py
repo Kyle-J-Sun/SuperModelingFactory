@@ -22,15 +22,25 @@ from .sample_weight_utils import (
 def bucket_by_cond(df: pd.DataFrame, cond_dict: dict, colname: str, 
                    drop_unmatched: bool = True, default=np.nan) -> pd.DataFrame:
     """
-    根据 query 条件字典对数据分组打标签。
+    Bucket the rows of a DataFrame by a dictionary of query conditions and tag each bucket with its label.
     
     Parameters
     ----------
-    df : 原始 DataFrame
-    cond_dict : {标签: query条件字符串}
-    colname : 新增的标签列名
-    drop_unmatched : True=丢弃未命中行(原逻辑), False=保留全量
-    default : 未命中行的默认值（仅 drop_unmatched=False 时生效）
+    df : pandas.DataFrame
+        Original data.
+    cond_dict : dict
+        Mapping of ``{label: query condition string}``.
+    colname : str
+        Name of the new label column.
+    drop_unmatched : bool, default True
+        If True, drop rows that match no condition (original behavior); if False, keep all rows.
+    default : scalar, default np.nan
+        Value assigned to unmatched rows (only used when ``drop_unmatched=False``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Data with the new label column.
     """
     if drop_unmatched:
         res_list = []
@@ -49,21 +59,21 @@ def bucket_by_cond(df: pd.DataFrame, cond_dict: dict, colname: str,
 
 def cut2pieces(varlist, n = 4):
     """
-    将列表切分为多个子列表。
+    Split a list into several sub-lists.
     
-    根据指定的切分数量，将列表均匀地切分为多个子列表。
+    Split the list evenly into the requested number of sub-lists.
     
     Parameters
     ----------
     varlist : list
-        需要切分的列表
+        List to split.
     n : int, default 4
-        切分的子列表数量
+        Number of sub-lists.
     
     Returns
     -------
     list
-        切分后的子列表
+        The resulting sub-lists.
     
     Examples
     --------
@@ -93,19 +103,19 @@ def cut2pieces(varlist, n = 4):
 
 def check_colname_exist(data, colname):
     """
-    检查列名是否存在于DataFrame中。
+    Check whether a column name exists in a DataFrame.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     colname : str
-        需要检查的列名
+        Column name to check.
     
     Returns
     -------
     bool
-        如果列名存在返回True，否则返回False
+        True if the column name exists, False otherwise.
     
     Examples
     --------
@@ -119,39 +129,39 @@ def check_colname_exist(data, colname):
 
 def get_curr_abs_path(path):
     """
-    获取当前模块目录下指定路径的绝对路径。
+    Get the absolute path of a path relative to the current module's directory.
     
     Parameters
     ----------
     path : str
-        相对路径
+        Relative path.
     
     Returns
     -------
     str
-        绝对路径字符串
+        Absolute path string.
     """
     return os.path.dirname(os.path.abspath(__file__)) + "/" + path
 
 
 def get_curr_datetime(sep=''):
     """
-    获取当前日期时间字符串。
+    Get the current date and time as a string.
     
     Parameters
     ----------
     sep : str, default ''
-        日期和时间之间的分隔符
+        Separator between the date and the time.
     
     Returns
     -------
     str
-        格式化后的日期时间字符串，格式为YYYYMMDD{sep}HHMMSS
+        Formatted date-time string in the format YYYYMMDD{sep}HHMMSS.
     
     Examples
     --------
-    >>> get_curr_datetime()  # 返回类似 '20250330143624'
-    >>> get_curr_datetime('-')  # 返回类似 '20250330-143624'
+    >>> get_curr_datetime()  # returns something like '20250330143624'
+    >>> get_curr_datetime('-')  # returns something like '20250330-143624'
     """
     import datetime as dt
     return dt.datetime.now().strftime(f"%Y%m%d{sep}%H%M%S")
@@ -159,17 +169,17 @@ def get_curr_datetime(sep=''):
 
 def get_buffer_date(start_date):
     """
-    获取起始日期前4周（28天）的日期。
+    Get the date 4 weeks (28 days) before the start date.
     
     Parameters
     ----------
     start_date : str
-        起始日期，格式为'YYYY-MM-DD'
+        Start date in the format 'YYYY-MM-DD'.
     
     Returns
     -------
     str
-        起始日期前4周的日期，格式为'YYYY-MM-DD'
+        Date 4 weeks before the start date, in the format 'YYYY-MM-DD'.
     
     Examples
     --------
@@ -184,17 +194,17 @@ def get_buffer_date(start_date):
 
 def get_quarter(strDate):
     """
-    从日期字符串获取季度值。
+    Get the quarter from a date string.
     
     Parameters
     ----------
     strDate : str
-        日期字符串，格式为'YYYYMM'或'YYYYMMDD'
+        Date string in the format 'YYYYMM' or 'YYYYMMDD'.
     
     Returns
     -------
     int
-        季度值（1-4）
+        Quarter (1-4).
     
     Examples
     --------
@@ -208,16 +218,16 @@ def get_quarter(strDate):
 
 def get_last_vintage():
     """
-    获取上一个月的年月字符串。
+    Get the year-month string of the previous month.
     
     Returns
     -------
     str
-        上一年月的字符串，格式为'YYYYMM'
+        Year-month string of the previous month, in the format 'YYYYMM'.
     
     Examples
     --------
-    >>> get_last_vintage()  # 如果当前是2025年3月，返回'202502'
+    >>> get_last_vintage()  # returns '202502' if the current month is March 2025
     """
     import datetime
     todayDate = datetime.date.today()
@@ -227,21 +237,21 @@ def get_last_vintage():
 
 def read_csv(path, *args, **kwargs):
     """
-    读取CSV文件并返回kDataFrame对象。
+    Read a CSV file and return a kDataFrame.
     
     Parameters
     ----------
     path : str
-        CSV文件路径
+        Path to the CSV file.
     *args
-        pandas.read_csv的其他位置参数
+        Additional positional arguments passed to pandas.read_csv.
     **kwargs
-        pandas.read_csv的其他关键字参数
+        Additional keyword arguments passed to pandas.read_csv.
     
     Returns
     -------
     kDataFrame
-        包含数据的kDataFrame对象
+        kDataFrame containing the data.
     
     Examples
     --------
@@ -253,17 +263,17 @@ def read_csv(path, *args, **kwargs):
 
 def df_to_h2oframe(data):
     """
-    将DataFrame转换为H2OFrame。
+    Convert a DataFrame to an H2OFrame.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     
     Returns
     -------
     h2o.H2OFrame
-        H2OFrame对象
+        The H2OFrame object.
     
     Examples
     --------
@@ -278,30 +288,30 @@ def df_to_h2oframe(data):
 
 def move_column(data, colname, idx, return_kDF = True, h2o_frame = False):
     """
-    将指定列移动到DataFrame的特定位置。
+    Move the given column to a specific position in a DataFrame.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     colname : str
-        需要移动的列名
+        Name of the column to move.
     idx : int
-        目标位置索引
+        Target position index.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     h2o_frame : bool, default False
-        输入是否为H2OFrame
+        Whether the input is an H2OFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        列顺序调整后的数据表
+        Data with the columns reordered.
     
     Examples
     --------
     >>> df = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
-    >>> move_column(df, 'c', 0)  # 将'c'列移到第一列
+    >>> move_column(df, 'c', 0)  # move column 'c' to the first position
     """
     import h2o
     if h2o_frame:
@@ -319,23 +329,23 @@ def move_column(data, colname, idx, return_kDF = True, h2o_frame = False):
 
 def convert_to_vintage(data, vintage_colname = 'VINTAGE', by = 'TRAN_TMS', return_kDF = True):
     """
-    根据时间列生成Vintage列。
+    Generate a vintage column from a time column.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     vintage_colname : str, default 'VINTAGE'
-        生成的Vintage列名
+        Name of the generated vintage column.
     by : str, default 'TRAN_TMS'
-        时间列名
+        Name of the time column.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        添加了Vintage列的数据表
+        Data with the vintage column added.
     
     Examples
     --------
@@ -356,25 +366,25 @@ def convert_to_vintage(data, vintage_colname = 'VINTAGE', by = 'TRAN_TMS', retur
 
 def col_filter_regex(data, regex = ".*?of_co_at_12m", case_sensitive = True, h2o_frame=False, return_kDF = True):
     """
-    使用正则表达式过滤DataFrame的列名。
+    Filter the columns of a DataFrame by matching the column names against a regular expression.
     
     Parameters
     ----------
     data : pandas.DataFrame or h2o.H2OFrame
-        输入数据表
+        Input data.
     regex : str, default ".*?of_co_at_12m"
-        正则表达式模式
+        Regular expression pattern.
     case_sensitive : bool, default True
-        是否区分大小写
+        Whether matching is case-sensitive.
     h2o_frame : bool, default False
-        输入是否为H2OFrame
+        Whether the input is an H2OFrame.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        过滤后的数据表（只包含匹配的列）
+        Filtered data (only the matching columns).
     
     Examples
     --------
@@ -398,27 +408,27 @@ def col_filter_regex(data, regex = ".*?of_co_at_12m", case_sensitive = True, h2o
 def row_filter_regex(data, col, regex, case_sensitive = True,
                      as_index = False, return_kDF = True):
     """
-    使用正则表达式过滤DataFrame的行。
+    Filter the rows of a DataFrame by matching one column against a regular expression.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     col : str
-        用于过滤的列名
+        Name of the column to filter on.
     regex : str
-        正则表达式模式
+        Regular expression pattern.
     case_sensitive : bool, default True
-        是否区分大小写
+        Whether matching is case-sensitive.
     as_index : bool, default False
-        是否将过滤列作为索引
+        Whether to use the filter column as the index.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        过滤后的数据表
+        Filtered data.
     
     Examples
     --------
@@ -435,21 +445,21 @@ def row_filter_regex(data, col, regex, case_sensitive = True,
 
 def convert_colnames(data, how = "lowercase", return_kDF = True):
     """
-    统一DataFrame列名的格式。
+    Convert the column names of a DataFrame to a uniform case.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     how : str, default "lowercase"
-        转换方式，可选值：'lower'/'lowercase', 'upper'/'uppercase', 'cap'/'capitalize'
+        Conversion method. One of 'lower'/'lowercase', 'upper'/'uppercase', 'cap'/'capitalize'.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        列名统一后的数据表
+        Data with the converted column names.
     
     Examples
     --------
@@ -471,21 +481,21 @@ def convert_colnames(data, how = "lowercase", return_kDF = True):
 
 def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
     """
-    实现SAS的PROC FREQ功能，计算频数和百分比。
+    Compute frequencies and percentages, mimicking SAS PROC FREQ.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     var : str
-        需要统计的列名
+        Name of the column to tabulate.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame
-        包含frequency, percent, cumFrequency, cumPercent的统计表
+        Statistics table with the columns frequency, percent, cumFrequency and cumPercent.
     
     Examples
     --------
@@ -506,21 +516,21 @@ def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
 
 def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]):
     """
-    实现SAS的PROC MEANS功能，计算描述性统计量。
+    Compute descriptive statistics, mimicking SAS PROC MEANS.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     varlist : list, optional
-        需要统计的列名列表，默认为所有列
+        List of columns to summarize; defaults to all columns.
     quantiles : list, default [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]
-        分位数列表
+        List of quantiles.
     
     Returns
     -------
     pandas.DataFrame
-        包含统计量的数据表，包括count, mean, std, min, max及指定分位数
+        Statistics table with count, mean, std, min, max and the requested quantiles.
     
     Examples
     --------
@@ -545,23 +555,23 @@ def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0
 
 def capping_score(data, pb_score: str, multiplier = 1, df_type: str = 'DataFrame'):
     """
-    对模型分数进行缩放和上限处理。
+    Scale model scores and cap them at an upper limit.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     pb_score : str
-        分数列名
+        Name of the score column.
     multiplier : float, default 1
-        分数缩放倍数
+        Score scaling multiplier.
     df_type : str, default 'DataFrame'
-        数据类型，'DataFrame'或'h2o'
+        Data type, 'DataFrame' or 'h2o'.
     
     Returns
     -------
     pandas.Series or h2o.H2OFrame
-        处理后的分数
+        Processed scores.
     
     Examples
     --------
@@ -579,19 +589,19 @@ def capping_score(data, pb_score: str, multiplier = 1, df_type: str = 'DataFrame
 
 def get_filenames(path: str, regex: str) -> [str]:
     """
-    获取指定路径下匹配正则表达式的文件名列表。
+    Get the names of the files under a path that match a regular expression.
     
     Parameters
     ----------
     path : str
-        文件夹路径
+        Folder path.
     regex : str
-        正则表达式模式
+        Regular expression pattern.
     
     Returns
     -------
     list
-        匹配的文件名列表
+        List of matching file names.
     
     Examples
     --------
@@ -609,17 +619,17 @@ def get_filenames(path: str, regex: str) -> [str]:
 
 def sas_to_csv_by_folder(folder_path: str):
     """
-    将指定文件夹中的所有SAS数据集转换为CSV文件。
+    Convert all SAS datasets in a folder to CSV files.
     
     Parameters
     ----------
     folder_path : str
-        包含SAS文件的文件夹路径
+        Path of the folder containing the SAS files.
     
     Returns
     -------
     int
-        执行状态码（0表示成功）
+        Execution status code (0 means success).
     
     Examples
     --------
@@ -640,17 +650,17 @@ def sas_to_csv_by_folder(folder_path: str):
 
 def _last_modified_date(filename):
     """
-    获取文件的最后修改日期。
+    Get the last modification date of a file.
     
     Parameters
     ----------
     filename : str
-        文件名
+        File name.
     
     Returns
     -------
     str
-        文件的最后修改日期字符串
+        Last modification date string of the file.
     """
     proc = subprocess.Popen(["date", "-r", filename, '"+%m-%d-%Y %H:%M:%S"'], stdout=subprocess.PIPE, shell=True)
     (out, err) = proc.communicate()
@@ -659,19 +669,19 @@ def _last_modified_date(filename):
 
 def read_attr_list(path: str = "pe_attr_list.txt", lower = False):
     """
-    读取属性列表文件（每行一个属性）。
+    Read an attribute list file (one attribute per line).
     
     Parameters
     ----------
     path : str, default "pe_attr_list.txt"
-        文件路径
+        File path.
     lower : bool, default False
-        是否转换为小写
+        Whether to convert the attributes to lower case.
     
     Returns
     -------
     list
-        属性列表
+        List of attributes.
     
     Examples
     --------
@@ -691,18 +701,18 @@ def read_attr_list(path: str = "pe_attr_list.txt", lower = False):
 
 def write_attr_list(var_list: list, path: str = "_vls_results.txt", sep="\n", quote='double'):
     """
-    将变量列表写入文件。
+    Write a list of variables to a file.
     
     Parameters
     ----------
     var_list : list
-        要写入的变量列表
+        List of variables to write.
     path : str, default "_vls_results.txt"
-        输出文件路径
+        Output file path.
     sep : str, default "\n"
-        分隔符
+        Separator.
     quote : str, default 'double'
-        引号类型，'double', 'single', 或 'none'
+        Quote type: 'double', 'single' or 'none'.
     
     Returns
     -------
@@ -726,19 +736,19 @@ def write_attr_list(var_list: list, path: str = "_vls_results.txt", sep="\n", qu
 
 def list_filter_regex(ls, regex):
     """
-    使用正则表达式过滤列表元素。
+    Filter list elements by a regular expression.
     
     Parameters
     ----------
     ls : list
-        输入列表
+        Input list.
     regex : str
-        正则表达式模式
+        Regular expression pattern.
     
     Returns
     -------
     list
-        匹配的元素列表
+        List of matching elements.
     
     Examples
     --------
@@ -755,19 +765,19 @@ def list_filter_regex(ls, regex):
 
 def list_to_h2oFrame(val: str or float or int, length: int):
     """
-    将值转换为指定长度的H2O Frame。
+    Convert a value to an H2O Frame of the given length.
     
     Parameters
     ----------
     val : str or float or int
-        值
+        Value to repeat.
     length : int
-        长度
+        Length of the frame.
     
     Returns
     -------
     h2o.H2OFrame
-        包含重复值的H2OFrame
+        H2OFrame containing the repeated value.
     
     Examples
     --------
@@ -780,25 +790,25 @@ def list_to_h2oFrame(val: str or float or int, length: int):
 
 def odds_score(pb_score, event_ratio = 15, margin_point = 20, score_point = 500):
     """
-    根据概率分数计算Odds分数。
+    Compute the odds score from a probability score.
     
-    用于将概率值转换为信用分数刻度。
+    Used to convert a probability into a credit score scale.
     
     Parameters
     ----------
     pb_score : float
-        预测概率（0到1之间）
+        Predicted probability (between 0 and 1).
     event_ratio : float, default 15
-        事件比例
+        Event ratio.
     margin_point : float, default 20
-        分数点差
+        Score point difference.
     score_point : float, default 500
-        基础分数点
+        Base score point.
     
     Returns
     -------
     float
-        Odds分数
+        Odds score.
     
     Examples
     --------
@@ -812,21 +822,21 @@ def odds_score(pb_score, event_ratio = 15, margin_point = 20, score_point = 500)
 
 def last_Month_Vintage(year: int, month: int, day: int) -> str:
     """
-    获取上一个月的年月字符串。
+    Get the year-month string of the previous month.
     
     Parameters
     ----------
     year : int
-        年份
+        Year.
     month : int
-        月份
+        Month.
     day : int
-        日期
+        Day.
     
     Returns
     -------
     str
-        上一个月的年月字符串，格式为'YYYYMM'
+        Year-month string of the previous month, in the format 'YYYYMM'.
     
     Examples
     --------
@@ -842,19 +852,19 @@ def last_Month_Vintage(year: int, month: int, day: int) -> str:
 
 def read_sas_file(file_path_name=''):
     """
-    读取SAS数据集文件。
+    Read a SAS dataset file.
     
-    使用latin-1编码读取SAS文件，这是SAS Studio和SAS Grid的默认编码。
+    The SAS file is read with latin-1 encoding, which is the default encoding of SAS Studio and SAS Grid.
     
     Parameters
     ----------
     file_path_name : str
-        SAS文件路径
+        Path to the SAS file.
     
     Returns
     -------
     kDataFrame
-        包含数据的kDataFrame对象
+        kDataFrame containing the data.
     
     Examples
     --------
@@ -867,21 +877,21 @@ def read_sas_file(file_path_name=''):
 
 def sas_to_csv(fileNameWithPath, outputFileNameWithPath, timecounter = True):
     """
-    将SAS数据集转换为CSV文件。
+    Convert a SAS dataset to a CSV file.
     
     Parameters
     ----------
     fileNameWithPath : str
-        输入SAS文件路径
+        Path to the input SAS file.
     outputFileNameWithPath : str
-        输出CSV文件路径
+        Path to the output CSV file.
     timecounter : bool, default True
-        是否打印执行时间
+        Whether to report the execution time.
     
     Returns
     -------
     int
-        执行状态码（0表示成功）
+        Execution status code (0 means success).
     
     Examples
     --------
@@ -902,23 +912,23 @@ def sas_to_csv(fileNameWithPath, outputFileNameWithPath, timecounter = True):
 
 def merge_all_data(*args, on = "APPLICATION_ID", how = "left", return_kDF = True):
     """
-    合并多个数据集。
+    Merge multiple datasets.
     
     Parameters
     ----------
     *args
-        要合并的DataFrame列表
+        The DataFrames to merge, passed as positional arguments.
     on : str, default "APPLICATION_ID"
-        连接键列名
+        Name of the join key column.
     how : str, default "left"
-        连接方式，'left', 'right', 'inner', 'outer'
+        Join type: 'left', 'right', 'inner' or 'outer'.
     return_kDF : bool, default True
-        是否返回kDataFrame对象
+        Whether to return a kDataFrame.
     
     Returns
     -------
     pandas.DataFrame or kDataFrame
-        合并后的数据表
+        Merged data.
     
     Examples
     --------
@@ -937,19 +947,19 @@ def merge_all_data(*args, on = "APPLICATION_ID", how = "left", return_kDF = True
 
 def get_valid_vintages(sVintage, eVintage):
     """
-    获取指定范围内的有效Vintage列表。
+    Get the list of valid vintages within the given range.
     
     Parameters
     ----------
     sVintage : int
-        起始Vintage（格式YYYYMM）
+        Start vintage (format YYYYMM).
     eVintage : int
-        结束Vintage（格式YYYYMM）
+        End vintage (format YYYYMM).
     
     Returns
     -------
     list
-        有效的Vintage列表
+        List of valid vintages.
     
     Examples
     --------
@@ -965,17 +975,17 @@ def get_valid_vintages(sVintage, eVintage):
 
 def set_non_number_str(h2o_tbl_path):
     """
-    导入文件为H2OFrame并将所有非数值列设置为字符串类型。
+    Import a file as an H2OFrame and set all non-numeric columns to string type.
     
     Parameters
     ----------
     h2o_tbl_path : str
-        H2O表路径
+        Path to the H2O table.
     
     Returns
     -------
     h2o.H2OFrame
-        处理后的H2OFrame
+        The processed H2OFrame.
     
     Examples
     --------
@@ -993,23 +1003,23 @@ def set_non_number_str(h2o_tbl_path):
 
 def list_to_SQL(ls, excl=[], prefix = '', wquote=False):
     """
-    将列表转换为SQL格式的字符串。
+    Convert a list to a SQL-formatted string.
     
     Parameters
     ----------
     ls : list
-        输入列表
+        Input list.
     excl : list, default []
-        要排除的元素列表
+        List of elements to exclude.
     prefix : str, default ''
-        列名前缀（如表别名）
+        Column-name prefix (such as a table alias).
     wquote : bool, default False
-        是否用引号包裹元素
+        Whether to wrap each element in quotes.
     
     Returns
     -------
     str
-        SQL格式的字符串
+        SQL-formatted string.
     
     Examples
     --------
@@ -1038,17 +1048,17 @@ def list_to_SQL(ls, excl=[], prefix = '', wquote=False):
 
 def bool_to_str(data):
     """
-    将DataFrame中的布尔类型列转换为字符串类型。
+    Convert the boolean columns of a DataFrame to string type.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     
     Returns
     -------
     pandas.DataFrame
-        转换后的数据表
+        Converted data.
     
     Examples
     --------
@@ -1064,21 +1074,21 @@ def bool_to_str(data):
 
 def get_dtypes_file(data, outputFile = None, ck_format=False):
     """
-    获取DataFrame各列的数据类型。
+    Get the data type of each column of a DataFrame.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     outputFile : str, optional
-        输出文件路径
+        Output file path.
     ck_format : bool, default False
-        是否使用自定义格式
+        Whether to use a custom format.
     
     Returns
     -------
     pandas.DataFrame
-        包含列名和数据类型的DataFrame
+        DataFrame with the column names and data types.
     
     Examples
     --------
@@ -1102,19 +1112,19 @@ def get_dtypes_file(data, outputFile = None, ck_format=False):
 
 def add_path_suffix(file, suffix = "_cut"):
     """
-    为文件路径添加后缀。
+    Add a suffix to a file path (before the file extension).
     
     Parameters
     ----------
     file : str
-        文件路径
+        File path.
     suffix : str, default "_cut"
-        要添加的后缀
+        Suffix to add.
     
     Returns
     -------
     str
-        添加后缀后的文件路径
+        File path with the suffix added.
     
     Examples
     --------
@@ -1132,21 +1142,21 @@ def add_path_suffix(file, suffix = "_cut"):
 
 def h2o_apply_regex(data, colname, func):
     """
-    对H2O Frame的列应用正则表达式转换函数。
+    Apply a regular-expression transformation function to a column of an H2O Frame.
     
     Parameters
     ----------
     data : h2o.H2OFrame
-        输入数据
+        Input data.
     colname : str
-        列名
+        Column name.
     func : callable
-        应用函数
+        Function to apply.
     
     Returns
     -------
     h2o.H2OFrame
-        转换后的H2OFrame
+        The transformed H2OFrame.
     
     Examples
     --------
@@ -1163,23 +1173,23 @@ def h2o_apply_regex(data, colname, func):
 
 def get_summary_rpt(means_rpt, iv_psi_rpt, corr_rpt):
     """
-    合并生成特征汇总报告。
+    Merge reports into a feature summary report.
     
-    将Means报告、IV/PSI报告和相关性报告合并为一个综合报告。
+    Combine the Means report, the IV/PSI report and the correlation report into one comprehensive report.
     
     Parameters
     ----------
     means_rpt : pandas.DataFrame
-        Means统计报告
+        Means statistics report.
     iv_psi_rpt : pandas.DataFrame
-        IV/PSI报告
+        IV/PSI report.
     corr_rpt : pandas.DataFrame
-        相关性报告
+        Correlation report.
     
     Returns
     -------
     pandas.DataFrame
-        合并后的汇总报告
+        Merged summary report.
     
     Examples
     --------
@@ -1198,19 +1208,19 @@ def get_summary_rpt(means_rpt, iv_psi_rpt, corr_rpt):
 
 def flatten_json_attr(data, jsonColname= "data"):
     """
-    展开JSON格式的模型属性列。
+    Flatten a column of JSON-format model attributes.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含JSON列的数据表
+        DataFrame containing the JSON column.
     jsonColname : str, default "data"
-        JSON列名
+        Name of the JSON column.
     
     Returns
     -------
     pandas.DataFrame
-        展开后的数据表
+        The flattened DataFrame.
     
     Examples
     --------
@@ -1230,17 +1240,17 @@ def flatten_json_attr(data, jsonColname= "data"):
 
 def parse_odps_schema(schema_list):   
     """
-    解析ODPS Schema。
+    Parse an ODPS schema.
     
     Parameters
     ----------
     schema_list : list
-        ODPS Schema列表
+        List of ODPS schema entries.
     
     Returns
     -------
     dict
-        字段名到数据类型的字典
+        Dictionary mapping field names to data types.
     
     Examples
     --------
@@ -1258,17 +1268,17 @@ def parse_odps_schema(schema_list):
 
 def npnan2none(df):
     """
-    将DataFrame中的np.nan和np.nat转换为None值。
+    Convert np.nan and np.nat values in a DataFrame to None.
     
     Parameters
     ----------
     df : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     
     Returns
     -------
     pandas.DataFrame
-        转换后的数据表
+        Converted data.
     
     Examples
     --------
@@ -1290,19 +1300,19 @@ def npnan2none(df):
 
 def drop_tmp_cols(df, drop_list = ['py_inserttime']):
     """
-    删除DataFrame中的临时列。
+    Drop temporary columns from a DataFrame.
     
     Parameters
     ----------
     df : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     drop_list : list, default ['py_inserttime']
-        要删除的临时列列表
+        List of temporary columns to drop.
     
     Returns
     -------
     pandas.DataFrame
-        删除临时列后的数据表
+        Data with the temporary columns dropped.
     
     Examples
     --------
@@ -1325,19 +1335,19 @@ def drop_tmp_cols(df, drop_list = ['py_inserttime']):
 
 def mkdir_if_not_exist(folder_path, replace = False):
     """
-    如果目录不存在则创建目录。
+    Create a directory if it does not exist.
     
     Parameters
     ----------
     folder_path : str
-        文件夹路径
+        Folder path.
     replace : bool, default False
-        如果目录已存在是否替换
+        Whether to replace the directory if it already exists.
     
     Returns
     -------
     int
-        状态码：0表示成功，1表示目录已存在
+        Status code: 0 means success, 1 means the directory already exists.
     
     Examples
     --------
@@ -1367,41 +1377,41 @@ def mkdir_if_not_exist(folder_path, replace = False):
 
 def _remove_comments(sql):
     """
-    移除SQL查询中的所有注释。
+    Remove all comments from a SQL query.
 
     Parameters
     ----------
     sql : str
-        SQL查询字符串
+        SQL query string.
 
     Returns
     -------
     str
-        移除注释后的SQL字符串
+        SQL string with the comments removed.
     """
     """ Remove all comments from the SQL query. """
     import re
     # =========================================================================
-    # 正则分组 (按优先级排列，左起优先匹配):
-    #   group 1: 单引号字符串 '...'  (支持 SQL 标准 '' 转义)   — 保留
-    #   group 2: 双引号字符串/标识符 "..."                      — 保留
-    #   group 3: /*+ ... */ optimizer hint                      — 保留
-    #   group 4: /* ... */ 普通多行注释                          — 删除
-    #   group 5: -- ... 单行注释                                 — 删除
+    # Regex groups (listed by priority; the leftmost match wins):
+    #   group 1: single-quoted string '...'  (SQL-standard '' escape supported)   - keep
+    #   group 2: double-quoted string/identifier "..."                            - keep
+    #   group 3: /*+ ... */ optimizer hint                                        - keep
+    #   group 4: /* ... */ ordinary multi-line comment                            - remove
+    #   group 5: -- ... single-line comment                                       - remove
     # =========================================================================
-    # 修复记录 (2026-06-11):
-    #   1. re.sub + 回调 替代 re.findall + str.replace,
-    #      避免全局替换破坏字符串字面量内相同文本
-    #   2. 新增双引号保护分组, 防止 "..." 内的注释标记被误删
-    #   3. 改进单引号正则: '([^']|'')*' — 支持 SQL 标准转义
+    # Fix log (2026-06-11):
+    #   1. re.sub with a callback replaces re.findall + str.replace,
+    #      so a global replace can no longer damage identical text inside string literals
+    #   2. Added a double-quote protection group, so comment markers inside "..." are not removed by mistake
+    #   3. Improved single-quote regex: '([^']|'')*' - supports the SQL-standard escape
     # =========================================================================
     pattern = r"""(?ms)('[^']*(?:''[^']*)*')|("[^"]*")|(\/\*\+.*?\*\/)|(\/\*.*?\*\/)|(\-\-.*?)$"""
 
     def _replacer(m):
-        # Group 1 (单引号), Group 2 (双引号), Group 3 (hint): 保留原文
+        # Group 1 (single-quoted), Group 2 (double-quoted), Group 3 (hint): keep the original text
         if m.group(1) or m.group(2) or m.group(3):
             return m.group(0)
-        # Group 4 (/* */) 和 Group 5 (--): 删除
+        # Group 4 (/* */) and Group 5 (--): remove
         return ''
 
     sql = re.sub(pattern, _replacer, sql)
@@ -1415,19 +1425,20 @@ def _remove_comments(sql):
 
 def _split_select_fields(select_clause):
     """
-    拆分SELECT字段列表，按逗号分割但尊重括号嵌套深度。
+    Split a SELECT field list on commas while respecting the parenthesis nesting depth.
 
-    该函数确保 EXCEPT(...)、COALESCE(...)、子查询等括号内的逗号不会被误当作字段分隔符。
+    This function ensures that commas inside parentheses, such as in EXCEPT(...), COALESCE(...) or subqueries,
+    are not mistaken for field separators.
 
     Parameters
     ----------
     select_clause : str
-        SELECT 和下一个关键字（FROM/WHERE等）之间的字段列表字符串
+        Field-list string between SELECT and the next keyword (FROM, WHERE, etc.).
 
     Returns
     -------
     list
-        字段名称列表，每个字段去除前后空白
+        List of field names, each stripped of leading and trailing whitespace.
 
     Examples
     --------
@@ -1459,20 +1470,20 @@ def _split_select_fields(select_clause):
 
 def _format_sql_select(sql):
     """
-    格式化SQL的SELECT子句：SELECT独占一行，每个字段独占一行，使用前置逗号风格。
+    Format the SELECT clause of a SQL query: SELECT on its own line, one field per line, leading-comma style.
 
-    递归格式化所有嵌套子查询中的SELECT，包括 FROM (SELECT ...)、JOIN (SELECT ...)、
-    WITH ... AS (SELECT ...) 等场景。
+    Recursively format the SELECT in every nested subquery, including FROM (SELECT ...), JOIN (SELECT ...),
+    WITH ... AS (SELECT ...) and similar cases.
 
     Parameters
     ----------
     sql : str
-        SQL查询字符串
+        SQL query string.
 
     Returns
     -------
     str
-        格式化后的SQL字符串；如果找不到SELECT关键字则返回原字符串
+        Formatted SQL string; the original string is returned if no SELECT keyword is found.
 
     Examples
     --------
@@ -1482,13 +1493,13 @@ def _format_sql_select(sql):
     import re
 
     # =========================================================================
-    # Phase 1: 递归处理括号内的子查询（内向外格式化）
+    # Phase 1: recursively process the subqueries inside parentheses (format from the inside out)
     # =========================================================================
     result_parts = []
     i = 0
     while i < len(sql):
         if sql[i] == '(':
-            # 找到匹配的右括号
+            # Find the matching closing parenthesis
             depth = 1
             j = i + 1
             while j < len(sql) and depth > 0:
@@ -1497,7 +1508,7 @@ def _format_sql_select(sql):
                 elif sql[j] == ')':
                     depth -= 1
                 j += 1
-            # 递归格式化括号内的内容
+            # Recursively format the content inside the parentheses
             inner_content = sql[i + 1:j - 1]
             formatted_inner = _format_sql_select(inner_content)
             result_parts.append('(' + formatted_inner + ')')
@@ -1509,9 +1520,9 @@ def _format_sql_select(sql):
     sql = ''.join(result_parts)
 
     # =========================================================================
-    # Phase 2: 格式化当前层级（depth=0）的 SELECT 子句
+    # Phase 2: format the SELECT clause at the current level (depth=0)
     # =========================================================================
-    # 查找最外层SELECT关键字（不在括号内的SELECT）
+    # Find the outermost SELECT keyword (a SELECT that is not inside parentheses)
     select_match = None
     depth = 0
     for m in re.finditer(r'\bSELECT\b', sql, re.IGNORECASE):
@@ -1524,12 +1535,12 @@ def _format_sql_select(sql):
     if not select_match:
         return sql
 
-    # 保留 SELECT 关键字之前的文本（如 WITH 子句）
+    # Keep the text before the SELECT keyword (such as a WITH clause)
     pre_select = sql[:select_match.start()]
     select_start = select_match.end()
     remainder = sql[select_start:]
 
-    # 查找SELECT子句结束位置（下一个SQL关键字，不在括号内）
+    # Find where the SELECT clause ends (the next SQL keyword that is not inside parentheses)
     end_keywords = [
         r'\bFROM\b', r'\bWHERE\b', r'\bGROUP\s+BY\b', r'\bORDER\s+BY\b',
         r'\bHAVING\b', r'\bLIMIT\b', r'\bOFFSET\b',
@@ -1542,10 +1553,10 @@ def _format_sql_select(sql):
         r';', r'\)\s*$'
     ]
 
-    # 组合成正则，在括号深度为0的位置匹配
+    # Combine the keywords into one regex, to be matched at parenthesis depth 0
     pattern = '|'.join(f'(?:{kw})' for kw in end_keywords)
 
-    # 使用字符遍历方式定位第一个不在括号内的结束关键字
+    # Iterate over the matches to locate the first ending keyword that is not inside parentheses
     best_pos = len(remainder)
     for m in re.finditer(pattern, remainder, re.IGNORECASE):
         prefix = remainder[:m.start()]
@@ -1554,30 +1565,30 @@ def _format_sql_select(sql):
             best_pos = m.start()
             break
 
-    # 非SELECT语句（如只包含FROM子查询的语句）
+    # Not a SELECT statement (for example, one that only contains a FROM subquery)
     if best_pos == 0:
         return sql
 
     select_clause = remainder[:best_pos]
     rest_of_sql = remainder[best_pos:]
 
-    # 如果SELECT子句为空（例如边缘情况），返回原SQL
+    # If the SELECT clause is empty (for example, an edge case), return the original SQL
     if not select_clause.strip():
         return sql
 
-    # 拆分字段
+    # Split the fields
     fields = _split_select_fields(select_clause)
 
     if not fields:
         return sql
 
-    # 标准化为前置逗号风格并组装
+    # Normalize to leading-comma style and assemble
     formatted_fields = []
     for i, field in enumerate(fields):
         if i == 0:
             formatted_fields.append(f"    {field}")
         else:
-            # 移除字段已有的前置逗号，统一添加
+            # Remove any leading comma the field already has, then add it uniformly
             field_stripped = field.strip()
             if field_stripped.startswith(','):
                 field_stripped = field_stripped[1:].strip()
@@ -1589,31 +1600,31 @@ def _format_sql_select(sql):
 
 def _split_sql_queries(query, split_mark = "$single_query_end$"):
     """
-    分割SQL查询字符串。
+    Split a SQL query string into individual queries.
     
     Parameters
     ----------
     query : str
-        SQL查询字符串
+        SQL query string.
     split_mark : str, default "$single_query_end$"
-        分割标记
+        Split marker.
     
     Returns
     -------
     list
-        分割后的SQL查询列表
+        List of the split SQL queries.
     """
     import re
     query = _remove_comments(query)
-    # 保护字符串和标识符内的分号不被当作查询分隔符
-    # group 1: 单引号字符串 (支持 SQL 标准 '' 转义)
-    # group 2: 双引号字符串/标识符
-    # group 3: 分号 (真正的查询分隔符)
+    # Protect semicolons inside strings and identifiers from being treated as query separators
+    # group 1: single-quoted string (SQL-standard '' escape supported)
+    # group 2: double-quoted string/identifier
+    # group 3: semicolon (the real query separator)
     skip_semi_in_quote = r"""(?s)('[^']*(?:''[^']*)*')|("[^"]*")|(;)"""
     def _protect_semicolon(m):
         if m.group(1) or m.group(2):
-            return m.group(0)  # 保留字符串原文
-        return split_mark      # 将分号替换为分割标记
+            return m.group(0)  # keep the original string text
+        return split_mark      # replace the semicolon with the split marker
     query = re.sub(skip_semi_in_quote, _protect_semicolon, query)
     return query.split(split_mark)
 
@@ -1624,25 +1635,25 @@ def parse_sql_file(sql_path:str=None,
                    format_select:bool=False,
                    **kwargs):
     """
-    解析SQL文件并替换变量。
+    Parse a SQL file and substitute variables.
 
     Parameters
     ----------
     sql_path : str, optional
-        SQL文件路径
+        Path to the SQL file.
     sql_query : str, optional
-        SQL查询字符串
+        SQL query string.
     split : bool, default False
-        是否分割多个查询
+        Whether to split multiple queries.
     format_select : bool, default False
-        是否自动格式化SELECT字段（每个字段一行，前置逗号风格）
+        Whether to automatically format the SELECT fields (one field per line, leading-comma style).
     **kwargs
-        SQL中要替换的变量
+        Variables in the SQL to substitute.
 
     Returns
     -------
     str or list
-        解析后的SQL字符串或字符串列表
+        Parsed SQL string or list of strings.
 
     Examples
     --------
@@ -1701,7 +1712,8 @@ def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
     if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
         bad_values = data[bad_pct]
         good_values = data[good_pct]
-        # 某一类占比为 0 的箱 WOE 为 ±inf（历来如此，调用方自行处理），不为此告警
+        # A bin in which one class has a share of 0 gets a WOE of +/-inf (this has always been the case and callers
+        # handle it themselves), so do not warn about it
         with np.errstate(divide="ignore"):
             woe = np.log(bad_values / good_values)
         iv = (bad_values - good_values) * woe
@@ -1713,25 +1725,25 @@ def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
 
 def calc_woe(data, bad_pct, good_pct, fillwoe=True):
     """
-    计算WOE（Weight of Evidence）值。
+    Compute the weight of evidence (WOE).
     
-    WOE = ln(组正样本占比 / 组负样本占比)
+    WOE = ln(the bin's share of all bad samples / the bin's share of all good samples)
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含比例的数据表
+        DataFrame containing the proportions.
     bad_pct : str
-        坏样本占比列名
+        Name of the column holding the bad-sample proportion.
     good_pct : str
-        好样本占比列名
+        Name of the column holding the good-sample proportion.
     fillwoe : bool, default True
-        当比例为0时是否将woe置为0
+        Whether to set the WOE to 0 when a proportion is 0.
     
     Returns
     -------
     float or pandas.Series
-        WOE值
+        WOE value(s).
     
     Examples
     --------
@@ -1744,25 +1756,25 @@ def calc_woe(data, bad_pct, good_pct, fillwoe=True):
 
 def calc_iv(data, bad_pct, good_pct, filliv=True):
     """
-    计算IV（Information Value）值。
+    Compute the information value (IV).
     
-    IV = (组正样本占比 - 组负样本占比) * WOE
+    IV = (the bin's share of all bad samples - the bin's share of all good samples) * WOE
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含比例的数据表
+        DataFrame containing the proportions.
     bad_pct : str
-        坏样本占比列名
+        Name of the column holding the bad-sample proportion.
     good_pct : str
-        好样本占比列名
+        Name of the column holding the good-sample proportion.
     filliv : bool, default True
-        当比例为0时是否将iv置为0
+        Whether to set the IV to 0 when a proportion is 0.
     
     Returns
     -------
     float or pandas.Series
-        IV值
+        IV value(s).
     
     Examples
     --------
@@ -1775,19 +1787,19 @@ def calc_iv(data, bad_pct, good_pct, filliv=True):
 
 def save_model(model, filename):
     """
-    使用pickle保存lightGBM模型。
+    Save a LightGBM model using pickle.
     
     Parameters
     ----------
     model : object
-        要保存的模型对象
+        Model object to save.
     filename : str
-        保存路径
+        Path to save the model to.
     
     Returns
     -------
     int
-        执行状态码（0表示成功）
+        Execution status code (0 means success).
     
     Examples
     --------
@@ -1802,17 +1814,17 @@ def save_model(model, filename):
 
 def load_model(model_path):
     """
-    加载pickle模型。
+    Load a pickled model.
     
     Parameters
     ----------
     model_path : str
-        模型文件路径
+        Path to the model file.
     
     Returns
     -------
     object
-        加载的模型对象
+        The loaded model object.
     
     Examples
     --------
@@ -1827,27 +1839,27 @@ def load_model(model_path):
 
 def scoring(data, model, varlist, scr_name, keeplist = None, all_missing_spec_value = None):
     """
-    使用模型对数据进行评分。
+    Score data with a model.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     model : sklearn-like model
-        机器学习模型
+        Machine learning model.
     varlist : list
-        特征变量列表
+        List of feature variables.
     scr_name : str
-        分数列名
+        Name of the score column.
     keeplist : list, optional
-        要保留的列列表
+        List of columns to keep.
     all_missing_spec_value : float, optional
-        全缺失样本的指定分数值
+        Score value to assign to samples in which all features are missing.
     
     Returns
     -------
     pandas.DataFrame
-        包含分数的数据表
+        DataFrame containing the scores.
     
     Examples
     --------
@@ -1891,31 +1903,31 @@ def get_missing_indicator(data, subset = None):
 
 def upload_score(data, model, varlist, scr_name, table_name, keeplist = None, retPandas = False, all_missing_spec_value = None):
     """
-    将模型分数上传到Maxcompute。
+    Upload model scores to MaxCompute.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        输入数据表
+        Input DataFrame.
     model : sklearn-like model
-        机器学习模型
+        Machine learning model.
     varlist : list
-        特征变量列表
+        List of feature variables.
     scr_name : str
-        分数列名
+        Name of the score column.
     table_name : str
-        目标表名
+        Name of the target table.
     keeplist : list, optional
-        要保留的列列表
+        List of columns to keep.
     retPandas : bool, default False
-        是否返回pandas DataFrame
+        Whether to return the pandas DataFrame.
     all_missing_spec_value : float, optional
-        全缺失样本的指定分数值
+        Score value to assign to samples in which all features are missing.
     
     Returns
     -------
     int or pandas.DataFrame
-        状态码或数据表
+        Status code or DataFrame.
     
     Examples
     --------
@@ -1995,14 +2007,15 @@ def pull_attributes_in_batch(table_name, varlist, batch_num = 6, unikey = 'flow_
 
 class DataFrameProcessor:
     """
-    DataFrame处理工具类。
+    Utility class for processing DataFrames.
     
-    提供DataFrame操作的统一接口，包括列操作、行过滤、类型转换等功能。
+    Provide a unified interface for DataFrame operations, including column operations, row filtering and
+    type conversion.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        要处理的DataFrame
+        The DataFrame to process.
     
     Examples
     --------
@@ -2013,29 +2026,29 @@ class DataFrameProcessor:
     
     def __init__(self, data):
         """
-        初始化DataFrame处理器。
+        Initialize the DataFrame processor.
         
         Parameters
         ----------
         data : pandas.DataFrame
-            要处理的DataFrame
+            The DataFrame to process.
         """
         self.data = data
     
     def move_column(self, colname, idx, return_kDF=True, h2o_frame=False):
         """
-        移动列到指定位置。
+        Move a column to a given position.
         
         Parameters
         ----------
         colname : str
-            要移动的列名
+            Name of the column to move.
         idx : int
-            目标位置索引
+            Target position index.
         return_kDF : bool, default True
-            是否返回kDataFrame
+            Whether to return a kDataFrame.
         h2o_frame : bool, default False
-            输入是否为H2OFrame
+            Whether the input is an H2OFrame.
         
         Returns
         -------
@@ -2045,14 +2058,14 @@ class DataFrameProcessor:
     
     def convert_colnames(self, how="lowercase", return_kDF=True):
         """
-        转换列名格式。
+        Convert the case of the column names.
         
         Parameters
         ----------
         how : str, default "lowercase"
-            转换方式
+            Conversion method.
         return_kDF : bool, default True
-            是否返回kDataFrame
+            Whether to return a kDataFrame.
         
         Returns
         -------
@@ -2062,18 +2075,18 @@ class DataFrameProcessor:
     
     def col_filter_regex(self, regex, case_sensitive=True, h2o_frame=False, return_kDF=True):
         """
-        使用正则表达式过滤列。
+        Filter the columns by a regular expression.
         
         Parameters
         ----------
         regex : str
-            正则表达式
+            Regular expression.
         case_sensitive : bool, default True
-            是否区分大小写
+            Whether matching is case-sensitive.
         h2o_frame : bool, default False
-            输入是否为H2OFrame
+            Whether the input is an H2OFrame.
         return_kDF : bool, default True
-            是否返回kDataFrame
+            Whether to return a kDataFrame.
         
         Returns
         -------
@@ -2083,20 +2096,20 @@ class DataFrameProcessor:
     
     def row_filter_regex(self, col, regex, case_sensitive=True, as_index=False, return_kDF=True):
         """
-        使用正则表达式过滤行。
+        Filter the rows by a regular expression.
         
         Parameters
         ----------
         col : str
-            用于过滤的列名
+            Name of the column to filter on.
         regex : str
-            正则表达式
+            Regular expression.
         case_sensitive : bool, default True
-            是否区分大小写
+            Whether matching is case-sensitive.
         as_index : bool, default False
-            是否将过滤列作为索引
+            Whether to use the filter column as the index.
         return_kDF : bool, default True
-            是否返回kDataFrame
+            Whether to return a kDataFrame.
         
         Returns
         -------
@@ -2106,14 +2119,14 @@ class DataFrameProcessor:
     
     def get_dtypes(self, outputFile=None, ck_format=False):
         """
-        获取数据类型。
+        Get the data types.
         
         Parameters
         ----------
         outputFile : str, optional
-            输出文件路径
+            Output file path.
         ck_format : bool, default False
-            是否使用自定义格式
+            Whether to use a custom format.
         
         Returns
         -------
@@ -2123,12 +2136,12 @@ class DataFrameProcessor:
     
     def drop_tmp_cols(self, drop_list=['py_inserttime']):
         """
-        删除临时列。
+        Drop temporary columns.
         
         Parameters
         ----------
         drop_list : list, default ['py_inserttime']
-            要删除的列列表
+            List of columns to drop.
         
         Returns
         -------
@@ -2138,7 +2151,7 @@ class DataFrameProcessor:
     
     def to_bool_str(self):
         """
-        将布尔列转换为字符串。
+        Convert boolean columns to strings.
         
         Returns
         -------
@@ -2149,9 +2162,9 @@ class DataFrameProcessor:
 
 class FilePathManager:
     """
-    文件路径管理工具类。
+    Utility class for managing file paths.
     
-    提供路径操作、文件列表获取、目录创建等功能。
+    Provide path operations, file listing and directory creation.
     
     Examples
     --------
@@ -2162,25 +2175,25 @@ class FilePathManager:
     
     def __init__(self, base_path=None):
         """
-        初始化路径管理器。
+        Initialize the path manager.
         
         Parameters
         ----------
         base_path : str, optional
-            基础路径
+            Base path.
         """
         self.base_path = base_path or os.getcwd()
     
     def get_filenames(self, path, regex):
         """
-        获取匹配的文件名列表。
+        Get the list of matching file names.
         
         Parameters
         ----------
         path : str
-            目录路径
+            Directory path.
         regex : str
-            正则表达式
+            Regular expression.
         
         Returns
         -------
@@ -2190,14 +2203,14 @@ class FilePathManager:
     
     def add_suffix(self, file, suffix="_cut"):
         """
-        添加文件后缀。
+        Add a suffix to a file path.
         
         Parameters
         ----------
         file : str
-            文件路径
+            File path.
         suffix : str, default "_cut"
-            后缀
+            Suffix.
         
         Returns
         -------
@@ -2207,14 +2220,14 @@ class FilePathManager:
     
     def mkdir(self, folder_path, replace=False):
         """
-        创建目录。
+        Create a directory.
         
         Parameters
         ----------
         folder_path : str
-            目录路径
+            Directory path.
         replace : bool, default False
-            是否替换已存在目录
+            Whether to replace an existing directory.
         
         Returns
         -------
@@ -2224,12 +2237,12 @@ class FilePathManager:
     
     def get_curr_abs_path(self, path):
         """
-        获取绝对路径。
+        Get the absolute path.
         
         Parameters
         ----------
         path : str
-            相对路径
+            Relative path.
         
         Returns
         -------
@@ -2240,9 +2253,9 @@ class FilePathManager:
 
 class DateTimeUtils:
     """
-    日期时间工具类。
+    Utility class for dates and times.
     
-    提供日期时间相关的便捷方法。
+    Provide convenient date- and time-related methods.
     
     Examples
     --------
@@ -2255,12 +2268,12 @@ class DateTimeUtils:
     
     def get_curr_datetime(self, sep=''):
         """
-        获取当前日期时间。
+        Get the current date and time.
         
         Parameters
         ----------
         sep : str, default ''
-            分隔符
+            Separator.
         
         Returns
         -------
@@ -2270,12 +2283,12 @@ class DateTimeUtils:
     
     def get_buffer_date(self, start_date):
         """
-        获取缓冲日期。
+        Get the buffer date.
         
         Parameters
         ----------
         start_date : str
-            起始日期
+            Start date.
         
         Returns
         -------
@@ -2285,12 +2298,12 @@ class DateTimeUtils:
     
     def get_quarter(self, strDate):
         """
-        获取季度。
+        Get the quarter.
         
         Parameters
         ----------
         strDate : str
-            日期字符串
+            Date string.
         
         Returns
         -------
@@ -2300,7 +2313,7 @@ class DateTimeUtils:
     
     def get_last_vintage(self):
         """
-        获取上一个月的vintage。
+        Get the vintage of the previous month.
         
         Returns
         -------
@@ -2310,7 +2323,7 @@ class DateTimeUtils:
     
     def last_month_vintage(self, year, month, day):
         """
-        获取上个月vintage。
+        Get the vintage of the previous month.
         
         Parameters
         ----------
@@ -2326,7 +2339,7 @@ class DateTimeUtils:
     
     def get_valid_vintages(self, sVintage, eVintage):
         """
-        获取有效vintage列表。
+        Get the list of valid vintages.
         
         Parameters
         ----------
@@ -2342,18 +2355,18 @@ class DateTimeUtils:
 
 class WOEIVCalculator:
     """
-    WOE和IV计算工具类。
+    Utility class for computing WOE and IV.
     
-    提供信用评分中常用的WOE和IV指标计算功能。
+    Provide the WOE and IV calculations commonly used in credit scoring.
     
     Parameters
     ----------
     data : pandas.DataFrame
-        包含比例的数据表
+        DataFrame containing the proportions.
     bad_pct_col : str
-        坏样本占比列名
+        Name of the column holding the bad-sample proportion.
     good_pct_col : str
-        好样本占比列名
+        Name of the column holding the good-sample proportion.
     
     Examples
     --------
@@ -2364,16 +2377,16 @@ class WOEIVCalculator:
     
     def __init__(self, data, bad_pct_col, good_pct_col):
         """
-        初始化WOE/IV计算器。
+        Initialize the WOE/IV calculator.
         
         Parameters
         ----------
         data : pandas.DataFrame
-            数据表
+            DataFrame containing the proportions.
         bad_pct_col : str
-            坏样本占比列名
+            Name of the column holding the bad-sample proportion.
         good_pct_col : str
-            好样本占比列名
+            Name of the column holding the good-sample proportion.
         """
         self.data = data
         self.bad_pct_col = bad_pct_col
@@ -2381,12 +2394,12 @@ class WOEIVCalculator:
     
     def calc_woe(self, fillna=True):
         """
-        计算WOE值。
+        Compute the WOE values.
         
         Parameters
         ----------
         fillna : bool, default True
-            是否填充NA为0
+            Whether to fill NA with 0.
         
         Returns
         -------
@@ -2396,12 +2409,12 @@ class WOEIVCalculator:
     
     def calc_iv(self, fillna=True):
         """
-        计算IV值。
+        Compute the IV values.
         
         Parameters
         ----------
         fillna : bool, default True
-            是否填充NA为0
+            Whether to fill NA with 0.
         
         Returns
         -------
@@ -2411,12 +2424,12 @@ class WOEIVCalculator:
     
     def calc_both(self, fillna=True):
         """
-        同时计算WOE和IV。
+        Compute the WOE and IV together.
         
         Parameters
         ----------
         fillna : bool, default True
-            是否填充NA为0
+            Whether to fill NA with 0.
         
         Returns
         -------
@@ -2432,44 +2445,45 @@ class WOEIVCalculator:
 
 
 def get_feature_names(model, model_type=None):
-    """获取模型的特征名称列表。
+    """Get the list of feature names of a model.
 
-    自动检测模型类型并返回其特征名称。
-    支持LightGBM、XGBoost、sklearn等多种模型。
+    Detect the model type automatically and return its feature names.
+    Supports LightGBM, XGBoost, sklearn and other models.
 
     Parameters
     ----------
     model : object
-        训练好的机器学习模型对象
+        Trained machine learning model object.
     model_type : str, optional
-        模型类型提示，可选值：
-        - 'lgb' 或 'lightgbm': LightGBM模型
-        - 'xgb' 或 'xgboost': XGBoost模型
-        - 'sklearn': sklearn模型
-        - None: 自动检测（默认）
+        Model type hint. Allowed values:
+
+        - 'lgb' or 'lightgbm': LightGBM model
+        - 'xgb' or 'xgboost': XGBoost model
+        - 'sklearn': sklearn model
+        - None: detect automatically (default)
 
     Returns
     -------
     list
-        特征名称列表
+        List of feature names.
 
     Raises
     ------
     ValueError
-        当无法获取特征名称时抛出
+        Raised when the feature names cannot be obtained.
 
     Examples
     --------
-    >>> # 通用方式
+    >>> # Generic usage
     >>> feature_names = get_feature_names(model)
 
-    >>> # 指定类型
+    >>> # Specify the model type
     >>> feature_names = get_feature_names(lgb_model, model_type='lgb')
 
-    >>> # 处理XGBoost
+    >>> # XGBoost model
     >>> feature_names = get_feature_names(xgb_model, model_type='xgb')
     """
-    # 如果指定了模型类型，优先使用专用函数
+    # If a model type is specified, prefer the dedicated function
     if model_type is not None:
         model_type_lower = model_type.lower()
         if model_type_lower in ['lgb', 'lightgbm']:
@@ -2477,7 +2491,7 @@ def get_feature_names(model, model_type=None):
         elif model_type_lower in ['xgb', 'xgboost']:
             return get_feature_names_xgb(model)
 
-    # 自动检测模型类型并获取特征名
+    # Detect the model type automatically and get the feature names
     model_class_name = model.__class__.__name__.lower()
 
     # SMF GradientBoostingModel wraps the fitted estimator in _model.model and
@@ -2498,37 +2512,37 @@ def get_feature_names(model, model_type=None):
                 return get_feature_names_xgb(wrapped_estimator)
             return get_feature_names(wrapped_estimator)
 
-    # LightGBM 检测
+    # LightGBM detection
     if 'lgb' in model_class_name or 'lightgbm' in model_class_name:
         return get_feature_names_lgb(model)
 
-    # XGBoost 检测
+    # XGBoost detection
     if 'xgb' in model_class_name or 'xgboost' in model_class_name:
         return get_feature_names_xgb(model)
     
     if 'logisticregression' in model_class_name:
         return list(model.feature_names_in_)
 
-    # 尝试通用sklearn方式
-    # 方法1: feature_names_in 属性 (sklearn >= 1.0)
+    # Try the generic sklearn approaches
+    # Method 1: feature_names_in_ attribute (sklearn >= 1.0)
     if hasattr(model, 'feature_names_in_'):
         return list(model.feature_names_in_)
 
-    # 方法2: feature_names 属性
+    # Method 2: feature_names attribute
     if hasattr(model, 'feature_names'):
         feature_names = model.feature_names
         if callable(feature_names):
             return list(feature_names())
         return list(feature_names)
 
-    # 方法3: booster方式 (LightGBM特有)
+    # Method 3: booster approach (LightGBM-specific)
     if hasattr(model, 'booster_'):
         try:
             return model.booster_.feature_name()
         except (AttributeError, TypeError):
             pass
 
-    # 方法4: 尝试从模型参数中获取
+    # Method 4: try to get the names from the model parameters
     if hasattr(model, 'feature_name'):
         try:
             feature_names = model.feature_name
@@ -2538,31 +2552,31 @@ def get_feature_names(model, model_type=None):
         except (AttributeError, TypeError):
             pass
 
-    # 无法获取特征名
+    # Unable to get the feature names
     raise ValueError(
-        f"无法获取模型 '{model_class_name}' 的特征名称。\n"
-        f"请尝试：\n"
-        f"1. 显式指定 model_type 参数\n"
-        f"2. 使用专用函数：get_feature_names_lgb() 或 get_feature_names_xgb()"
+        f"Cannot get the feature names of model '{model_class_name}'.\n"
+        f"Please try:\n"
+        f"1. Specify the model_type argument explicitly\n"
+        f"2. Use a dedicated function: get_feature_names_lgb() or get_feature_names_xgb()"
     )
 
 def get_feature_names_lgb(model):
-    """获取LightGBM模型的特征名称。
+    """Get the feature names of a LightGBM model.
 
     Parameters
     ----------
     model : lgb.LGBMClassifier or lgb.LGBMRegressor
-        训练好的LightGBM模型
+        Trained LightGBM model.
 
     Returns
     -------
     list
-        特征名称列表
+        List of feature names.
 
     Raises
     ------
     ValueError
-        当无法获取特征名称时抛出
+        Raised when the feature names cannot be obtained.
 
     Examples
     --------
@@ -2572,18 +2586,18 @@ def get_feature_names_lgb(model):
     >>> print(feature_names)
     ['feature_1', 'feature_2', 'feature_3']
     """
-    # 方法1: booster_.feature_name() (最可靠)
+    # Method 1: booster_.feature_name() (most reliable)
     if hasattr(model, 'booster_') and model.booster_ is not None:
         try:
             return model.booster_.feature_name()
         except (AttributeError, TypeError):
             pass
 
-    # 方法2: feature_name_ 属性
+    # Method 2: feature_name_ attribute
     if hasattr(model, 'feature_name_'):
         return list(model.feature_name_)
 
-    # 方法3: feature_name 属性/方法
+    # Method 3: feature_name attribute/method
     if hasattr(model, 'feature_name'):
         feature_names = model.feature_name
         if callable(feature_names):
@@ -2591,28 +2605,28 @@ def get_feature_names_lgb(model):
         return list(feature_names)
 
     raise ValueError(
-        "无法获取LightGBM模型的特征名称。\n"
-        "确保模型已正确训练。"
+        "Cannot get the feature names of the LightGBM model.\n"
+        "Make sure the model has been trained correctly."
     )
 
 
 def get_feature_names_xgb(model):
-    """获取XGBoost模型的特征名称。
+    """Get the feature names of an XGBoost model.
 
     Parameters
     ----------
     model : xgb.XGBClassifier or xgb.XGBRegressor
-        训练好的XGBoost模型
+        Trained XGBoost model.
 
     Returns
     -------
     list
-        特征名称列表
+        List of feature names.
 
     Raises
     ------
     ValueError
-        当无法获取特征名称时抛出
+        Raised when the feature names cannot be obtained.
 
     Examples
     --------
@@ -2622,11 +2636,11 @@ def get_feature_names_xgb(model):
     >>> print(feature_names)
     ['feature_1', 'feature_2', 'feature_3']
     """
-    # 方法1: feature_names_in 属性 (sklearn风格)
+    # Method 1: feature_names_in_ attribute (sklearn style)
     if hasattr(model, 'feature_names_in_'):
         return list(model.feature_names_in_)
 
-    # 方法2: booster.get_feature_names() (原生XGBoost)
+    # Method 2: booster.get_feature_names() (native XGBoost)
     if hasattr(model, 'get_booster'):
         try:
             booster = model.get_booster()
@@ -2635,7 +2649,7 @@ def get_feature_names_xgb(model):
         except (AttributeError, TypeError):
             pass
 
-    # 方法3: feature_names 属性
+    # Method 3: feature_names attribute
     if hasattr(model, 'feature_names'):
         feature_names = model.feature_names
         if callable(feature_names):
@@ -2643,29 +2657,29 @@ def get_feature_names_xgb(model):
         return list(feature_names)
 
     raise ValueError(
-        "无法获取XGBoost模型的特征名称。\n"
-        "确保模型已正确训练。"
+        "Cannot get the feature names of the XGBoost model.\n"
+        "Make sure the model has been trained correctly."
     )
 
 
 # ============================================================================
-# 便捷函数：批量获取特征名
+# Convenience function: get feature names in batch
 # ============================================================================
 
 def get_feature_names_batch(models, model_type=None):
-    """批量获取多个模型的特征名称。
+    """Get the feature names of multiple models in batch.
 
     Parameters
     ----------
     models : dict or list
-        模型字典 {name: model} 或模型列表
+        Model dictionary {name: model} or list of models.
     model_type : str, optional
-        模型类型提示
+        Model type hint.
 
     Returns
     -------
     dict or list
-        特征名称字典或列表，与输入结构对应
+        Dictionary or list of feature names, matching the structure of the input.
 
     Examples
     --------
@@ -2682,4 +2696,4 @@ def get_feature_names_batch(models, model_type=None):
     elif isinstance(models, list):
         return [get_feature_names(model, model_type=model_type) for model in models]
     else:
-        raise TypeError("models参数应为dict或list类型")
+        raise TypeError("The models argument must be a dict or a list")
