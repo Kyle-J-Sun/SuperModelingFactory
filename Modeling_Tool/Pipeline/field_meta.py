@@ -35,7 +35,7 @@ class FieldMeta:
     max_val: float | None = None
     step: float | None = None
     required: bool = False
-    group: str = "基础配置"
+    group: str = "Basic settings"
     depends_on: dict[str, Any] | None = None
     since_version: str | None = None
     is_dict_subkey: bool = False
@@ -94,15 +94,15 @@ class PipelineRegistryEntry:
         return payload
 
 
-BASIC_GROUP = "基础配置"
-DATA_GROUP = "数据输入"
-SPLIT_GROUP = "样本切分"
-OUTPUT_GROUP = "输出与报告"
-WOE_GROUP = "WOE/分箱"
-MODEL_GROUP = "模型训练"
-EVAL_GROUP = "评估配置"
-ANALYSIS_GROUP = "分析配置"
-ADVANCED_GROUP = "高级配置"
+BASIC_GROUP = "Basic settings"
+DATA_GROUP = "Data input"
+SPLIT_GROUP = "Sample split"
+OUTPUT_GROUP = "Output and reports"
+WOE_GROUP = "WOE/Binning"
+MODEL_GROUP = "Model training"
+EVAL_GROUP = "Evaluation settings"
+ANALYSIS_GROUP = "Analysis settings"
+ADVANCED_GROUP = "Advanced settings"
 
 _NON_SERIALIZABLE_FIELDS = {
     "screening_artifact",
@@ -133,253 +133,253 @@ _HIDDEN_OR_OBJECT_FIELDS = {
 }
 
 _FIELD_LABELS = {
-    "output_dir": "输出目录",
-    "target_col": "目标变量列",
-    "target_cols": "目标变量列列表",
-    "feature_cols": "入模特征列",
-    "new_feature_cols": "新特征列",
-    "incumbent_feature_cols": "现有特征列",
-    "id_col": "主键列",
-    "apply_time_col": "申请时间列",
-    "time_col": "时间列",
-    "split_col": "样本切分列",
-    "sample_col": "样本标识列",
-    "oot_col": "OOT 标识列",
-    "weight_col": "样本权重列",
-    "random_state": "随机种子",
-    "write_outputs": "写出 CSV/文件",
-    "write_excel": "写出 Excel 报告",
-    "plot_outputs": "写出图表",
-    "save_models": "保存模型",
-    "model_output_dir": "模型输出目录",
-    "model_include_metadata": "保存模型 metadata",
-    "save_woe_artifacts": "保存 WOE artifact",
-    "split_config": "INS/OOS 切分配置",
-    "feature_selection": "特征筛选配置",
-    "woe_engine": "WOE 引擎",
-    "woe_fit_query": "WOE 拟合样本过滤条件",
-    "woe_params": "WOE 分箱参数",
-    "monotone_woe_params": "单调 WOE 参数",
-    "train_models": "训练模型列表",
-    "model_params": "模型参数",
-    "gbm_feature_source": "GBM 特征来源",
-    "lr_search_enabled": "启用 LR 参数筛选",
-    "lr_search_param_grid": "LR 参数搜索网格",
-    "lr_search_params": "LR 参数搜索配置",
-    "use_lr_search_params": "使用 LR 搜索结果",
-    "warm_start_enabled": "启用前置分 warm-start",
-    "warm_start_score_col": "前置分列",
-    "warm_start_score_type": "前置分类型",
-    "warm_start_models": "warm-start 模型",
-    "warm_start_on_unsupported": "不支持模型处理方式",
-    "warm_start_apply_to_optuna": "Optuna 使用 warm-start",
-    "backward_enabled": "启用逐步回归",
-    "backward_model": "逐步回归模型",
-    "backward_params": "逐步回归参数",
-    "use_backward_features": "使用逐步回归特征",
-    "candidate_mode": "候选模式（禁用 OOT）",
-    "eval_target_cols": "额外评估标签",
-    "all_missing_score_value": "全缺失分数覆写值",
-    "special_score_values": "特殊分数独立箱",
-    "gains_ascending": "Gains 分数升序",
-    "eval_weight_col": "评估权重列",
-    "synthesize_missing_oot": "缺 OOT 时用 OOS 副本代替",
-    "evaluation_splits": "评估 split 白名单",
-    "forbidden_splits": "禁用 split（硬闸）",
-    "search_eval_splits": "调参评估 split",
-    "search_objective_when_no_oot": "无 OOT 时调参目标",
-    "backward_validation_split": "逐步回归验证 split",
-    "backward_report_splits": "逐步回归报告 split",
-    "optuna_models": "Optuna 模型",
-    "optuna_n_trials": "Optuna 轮数",
-    "optuna_params": "Optuna 参数",
-    "explain_models": "解释模型",
-    "explain_params": "解释性参数",
-    "owen_enabled": "启用 Owen Value",
-    "business_prior_groups": "业务先验分组",
-    "perf_pct_bins": "表现分箱数",
-    "perf_min_bin_prop": "表现最小箱占比",
-    "approved_col": "审批通过标识列",
-    "score_col": "预评分列",
-    "train_prescore": "训练预评分模型",
-    "prescore_model_type": "预评分模型类型",
-    "prescore_params": "预评分模型参数",
-    "prescore_test_size": "预评分测试集比例",
-    "ri_methods": "拒绝推断方法",
-    "ri_method_params": "拒绝推断方法参数",
-    "ri_score_direction": "分数方向",
-    "train_ri_models": "训练 RI 后模型",
-    "ri_model_type": "RI 后模型类型",
-    "ri_model_params": "RI 后模型参数",
-    "lr_nan_handling": "lr 模型缺失值处理",
-    "include_no_ri_benchmark": "加入无 RI benchmark",
-    "ri_validation_frac": "RI 验证集比例",
-    "write_ri_datasets": "写出 RI 增强样本",
-    "ri_dataset_output_cols": "RI 样本输出列",
-    "ri_dataset_warn_mb": "RI 样本写出提醒阈值(MB)",
-    "oot_frac": "OOT 随机切分比例",
-    "ri_approved_query": "RI 参考通过样本过滤条件",
-    "ri_approved_frac": "RI 参考样本抽样比例",
-    "ri_approved_n": "RI 参考样本抽样数量",
-    "ri_approved_scope": "RI 参考样本输出范围",
-    "nbins": "分箱数",
-    "min_bin_prop": "最小箱占比",
-    "equal_freq": "等频分箱",
-    "min_data_size": "最小样本数",
-    "precision": "数值精度",
-    "include_missing": "包含缺失值",
-    "fillna": "缺失填充值",
-    "positive_score_only": "仅正向分数",
-    "group_missing_values": "分组缺失值枚举",
-    "drop_missing_group_values": "丢弃缺失分组",
-    "time_dims": "时间维度",
-    "population_dims": "人群维度",
-    "segment_dims": "分群维度",
-    "include_time_population_cross": "时间 x 人群交叉",
-    "group_min_size": "分组最小样本数",
-    "group_specs": "分组规格",
-    "custom_metric_cols": "自定义指标列",
-    "gains_display_metric_list": "Gains 展示指标",
-    "cross_vars": "交叉分析变量",
-    "cross_metrics": "交叉分析指标",
-    "cross_binning_numeric": "交叉变量数值分箱标识",
-    "pairwise_cross_enabled": "启用两两交叉",
-    "pairwise_cross_agg_dict": "两两交叉聚合配置",
-    "sql_dir": "SQL 目录",
-    "offline_sql": "离线 SQL 文件",
-    "online_sql": "线上 SQL 文件",
-    "env_path": ".env 路径",
-    "n_process": "并发进程数",
-    "main_model_score_col": "主模型分列",
-    "tol_score": "模型分容忍度",
-    "tol_feat": "特征值容忍度",
-    "time_featlist": "时间特征列",
-    "tol_time_seconds": "时间容忍秒数",
-    "excel_output_path": "Excel 输出路径",
-    "excel_font": "Excel 字体",
-    "info_list": "报告说明列表",
-    "include_submodel_scores": "校验子模型分",
-    "submodel_pairs": "子模型字段映射",
-    "numeric_coercion_mode": "数值转换模式",
-    "numeric_coercion_min_ratio": "安全数值转换阈值",
-    "comparison_block_size": "一致性比较列块大小",
-    "input_type": "输入类型",
-    "csv_read_kwargs": "CSV 读取参数",
-    "enable_batch": "启用 CSV 分批",
-    "feature_batch_size": "特征分批大小",
-    "feature_batches": "显式特征批次",
-    "batch_base_cols": "批处理基础列",
-    "batch_output_subdir": "批处理输出子目录",
-    "batch_keep_intermediate": "保留批处理中间结果",
-    "batch_corr_mode": "批处理相关性模式",
-    "batch_corr_pair_chunk_size": "跨批相关性块大小",
-    "min_group_size": "分组最小样本数",
-    "distribution_enabled": "启用分布分析",
-    "distribution_params": "分布分析参数",
-    "woe_enabled": "启用 WOE 分析",
-    "categorical_features": "类别特征",
-    "monotone_refine_cate_enabled": "启用类别聚类 refine",
-    "monotone_refine_cate_params": "类别 refine 参数",
-    "monotone_refine_dtree_enabled": "启用决策树 refine",
-    "monotone_refine_dtree_params": "决策树 refine 参数",
-    "monotone_refine_chi2_enabled": "启用卡方 refine",
-    "monotone_refine_chi2_params": "卡方 refine 参数",
-    "woe_plot_groups": "WOE 分组绘图维度",
-    "psi_enabled": "启用 PSI",
-    "psi_reference_dataset": "PSI 参考样本",
-    "psi_group_dims": "PSI 分组维度",
-    "psi_use_woe_bins": "PSI 复用 WOE 分箱",
-    "psi_params": "PSI 参数",
-    "ivks_enabled": "启用 IV/KS",
-    "ivks_group_dims": "IV/KS 分组维度",
-    "ivks_use_woe_bins": "IV/KS 复用 WOE 分箱",
-    "ivks_params": "IV/KS 参数",
-    "corr_enabled": "启用相关性分析",
-    "corr_include_incumbent": "相关性包含现有特征",
-    "corr_use_woe_bins": "相关性指标复用 WOE 分箱",
-    "corr_params": "相关性参数",
-    "missing_rate_threshold": "缺失率阈值",
-    "woe_fit_scope": "顶层 WOE 拟合范围",
-    "iv_upper_threshold": "IV 上限阈值",
-    "selection_enabled": "启用自动特征筛选",
-    "selection_params": "自动筛选参数",
-    "selection_group_dims": "筛选门分组维度",
-    "monthly_iv_min": "分组 IV 下限",
-    "monthly_iv_cv_max": "分组 IV 变异系数上限",
-    "direction_consistency_min": "方向一致组占比下限",
-    "min_group_n": "分组最小样本数",
-    "insufficient_group_policy": "分组不足处理策略",
-    "target_rules": "多标签联合规则",
-    "min_pass_count": "多标签最少通过数",
-    "per_target_iv_range": "分标签 IV 区间",
-    "direction_reference_target": "方向基准标签",
-    "max_selected_features": "入选特征数上限",
-    "min_selected_features": "入选特征数下限",
-    "ranking_metric": "截断排序指标",
-    "tie_breaker": "截断破平规则",
-    "vif_enabled": "启用 VIF 门",
-    "vif_threshold": "VIF 阈值",
-    "vif_min_features": "VIF 保留特征下限",
-    "vif_tie_break_metric": "VIF 破平指标",
-    "lr_elimination_mode": "LR 系数淘汰模式",
-    "lr_elimination_params": "LR 系数淘汰参数",
-    "materialize_split": "物化行级切分",
-    "oot_cutoff": "OOT 切点",
-    "split_col_name": "切分列名",
-    "persist_split_map": "落盘切分映射",
-    "profile_cols": "画像列",
-    "oot_time_dim": "OOT 时间粒度",
-    "oot_windows": "OOT 窗口列表",
-    "ins_oos_ratios": "INS/OOS 候选比例",
-    "random_seeds": "随机种子列表",
-    "min_sample_size": "最小样本数",
-    "dry_run": "仅估算不执行",
-    "n_samples": "样本量",
-    "applied_sample": "输出样本口径",
-    "approve_rate": "审批通过率",
-    "num_online_scores": "线上模型分数量",
-    "y_flag_candidates": "标签表现期列表",
-    "num_features": "模拟特征数量",
-    "min_num_feature_business_type": "最少业务特征类型数",
-    "observation_timestamp": "观察时间",
-    "application_months": "申请时间回溯月数",
-    "write_csv": "写出 CSV",
-    "output_path": "输出路径",
+    "output_dir": "Output directory",
+    "target_col": "Target column",
+    "target_cols": "Target columns",
+    "feature_cols": "Model feature columns",
+    "new_feature_cols": "New feature columns",
+    "incumbent_feature_cols": "Incumbent feature columns",
+    "id_col": "Primary key column",
+    "apply_time_col": "Application time column",
+    "time_col": "Time column",
+    "split_col": "Sample split column",
+    "sample_col": "Sample flag column",
+    "oot_col": "OOT flag column",
+    "weight_col": "Sample weight column",
+    "random_state": "Random seed",
+    "write_outputs": "Write CSV/files",
+    "write_excel": "Write Excel report",
+    "plot_outputs": "Write charts",
+    "save_models": "Save models",
+    "model_output_dir": "Model output directory",
+    "model_include_metadata": "Save model metadata",
+    "save_woe_artifacts": "Save WOE artifacts",
+    "split_config": "INS/OOS split settings",
+    "feature_selection": "Feature screening settings",
+    "woe_engine": "WOE engine",
+    "woe_fit_query": "WOE fitting sample filter",
+    "woe_params": "WOE binning parameters",
+    "monotone_woe_params": "Monotone WOE parameters",
+    "train_models": "Models to train",
+    "model_params": "Model parameters",
+    "gbm_feature_source": "GBM feature source",
+    "lr_search_enabled": "Enable LR parameter search",
+    "lr_search_param_grid": "LR parameter search grid",
+    "lr_search_params": "LR parameter search settings",
+    "use_lr_search_params": "Use LR search results",
+    "warm_start_enabled": "Enable pre-score warm start",
+    "warm_start_score_col": "Pre-score column",
+    "warm_start_score_type": "Pre-score type",
+    "warm_start_models": "Warm-start models",
+    "warm_start_on_unsupported": "Handling of unsupported models",
+    "warm_start_apply_to_optuna": "Use warm start in Optuna",
+    "backward_enabled": "Enable backward elimination",
+    "backward_model": "Backward elimination model",
+    "backward_params": "Backward elimination parameters",
+    "use_backward_features": "Use backward-elimination features",
+    "candidate_mode": "Candidate mode (OOT disabled)",
+    "eval_target_cols": "Additional evaluation targets",
+    "all_missing_score_value": "All-missing score override value",
+    "special_score_values": "Special scores as separate bins",
+    "gains_ascending": "Gains: ascending score order",
+    "eval_weight_col": "Evaluation weight column",
+    "synthesize_missing_oot": "Use an OOS copy when OOT is missing",
+    "evaluation_splits": "Evaluation split allow-list",
+    "forbidden_splits": "Forbidden splits (hard gate)",
+    "search_eval_splits": "Tuning evaluation splits",
+    "search_objective_when_no_oot": "Tuning objective when OOT is absent",
+    "backward_validation_split": "Backward elimination validation split",
+    "backward_report_splits": "Backward elimination report splits",
+    "optuna_models": "Optuna models",
+    "optuna_n_trials": "Optuna trials",
+    "optuna_params": "Optuna parameters",
+    "explain_models": "Models to explain",
+    "explain_params": "Explainability parameters",
+    "owen_enabled": "Enable Owen value",
+    "business_prior_groups": "Business prior groups",
+    "perf_pct_bins": "Performance bins",
+    "perf_min_bin_prop": "Performance minimum bin proportion",
+    "approved_col": "Approval flag column",
+    "score_col": "Pre-score column",
+    "train_prescore": "Train pre-score model",
+    "prescore_model_type": "Pre-score model type",
+    "prescore_params": "Pre-score model parameters",
+    "prescore_test_size": "Pre-score test set fraction",
+    "ri_methods": "Reject inference methods",
+    "ri_method_params": "Reject inference method parameters",
+    "ri_score_direction": "Score direction",
+    "train_ri_models": "Train post-RI models",
+    "ri_model_type": "Post-RI model type",
+    "ri_model_params": "Post-RI model parameters",
+    "lr_nan_handling": "LR missing-value handling",
+    "include_no_ri_benchmark": "Include no-RI benchmark",
+    "ri_validation_frac": "RI validation fraction",
+    "write_ri_datasets": "Write RI-augmented datasets",
+    "ri_dataset_output_cols": "RI dataset output columns",
+    "ri_dataset_warn_mb": "RI dataset size warning threshold (MB)",
+    "oot_frac": "OOT random split fraction",
+    "ri_approved_query": "RI approved reference sample filter",
+    "ri_approved_frac": "RI reference sampling fraction",
+    "ri_approved_n": "RI reference sampling count",
+    "ri_approved_scope": "RI reference sample output scope",
+    "nbins": "Number of bins",
+    "min_bin_prop": "Minimum bin proportion",
+    "equal_freq": "Equal-frequency binning",
+    "min_data_size": "Minimum sample count",
+    "precision": "Numeric precision",
+    "include_missing": "Include missing values",
+    "fillna": "Missing-value fill",
+    "positive_score_only": "Positive scores only",
+    "group_missing_values": "Group missing-value tokens",
+    "drop_missing_group_values": "Drop missing groups",
+    "time_dims": "Time dimensions",
+    "population_dims": "Population dimensions",
+    "segment_dims": "Segment dimensions",
+    "include_time_population_cross": "Time x population cross",
+    "group_min_size": "Minimum group size",
+    "group_specs": "Group specifications",
+    "custom_metric_cols": "Custom metric columns",
+    "gains_display_metric_list": "Gains display metrics",
+    "cross_vars": "Cross-analysis variables",
+    "cross_metrics": "Cross-analysis metrics",
+    "cross_binning_numeric": "Numeric binning flags for cross variables",
+    "pairwise_cross_enabled": "Enable pairwise cross",
+    "pairwise_cross_agg_dict": "Pairwise cross aggregation settings",
+    "sql_dir": "SQL directory",
+    "offline_sql": "Offline SQL file",
+    "online_sql": "Online SQL file",
+    "env_path": ".env path",
+    "n_process": "Number of processes",
+    "main_model_score_col": "Main model score column",
+    "tol_score": "Model score tolerance",
+    "tol_feat": "Feature value tolerance",
+    "time_featlist": "Time feature columns",
+    "tol_time_seconds": "Time tolerance (seconds)",
+    "excel_output_path": "Excel output path",
+    "excel_font": "Excel font",
+    "info_list": "Report notes",
+    "include_submodel_scores": "Check sub-model scores",
+    "submodel_pairs": "Sub-model column mapping",
+    "numeric_coercion_mode": "Numeric coercion mode",
+    "numeric_coercion_min_ratio": "Safe numeric coercion threshold",
+    "comparison_block_size": "Consistency comparison block size",
+    "input_type": "Input type",
+    "csv_read_kwargs": "CSV read arguments",
+    "enable_batch": "Enable CSV batching",
+    "feature_batch_size": "Feature batch size",
+    "feature_batches": "Explicit feature batches",
+    "batch_base_cols": "Batch base columns",
+    "batch_output_subdir": "Batch output subdirectory",
+    "batch_keep_intermediate": "Keep batch intermediate results",
+    "batch_corr_mode": "Batch correlation mode",
+    "batch_corr_pair_chunk_size": "Cross-batch correlation chunk size",
+    "min_group_size": "Minimum group size",
+    "distribution_enabled": "Enable distribution analysis",
+    "distribution_params": "Distribution analysis parameters",
+    "woe_enabled": "Enable WOE analysis",
+    "categorical_features": "Categorical features",
+    "monotone_refine_cate_enabled": "Enable categorical clustering refinement",
+    "monotone_refine_cate_params": "Categorical refinement parameters",
+    "monotone_refine_dtree_enabled": "Enable decision-tree refinement",
+    "monotone_refine_dtree_params": "Decision-tree refinement parameters",
+    "monotone_refine_chi2_enabled": "Enable chi-square refinement",
+    "monotone_refine_chi2_params": "Chi-square refinement parameters",
+    "woe_plot_groups": "WOE plot grouping dimensions",
+    "psi_enabled": "Enable PSI",
+    "psi_reference_dataset": "PSI reference sample",
+    "psi_group_dims": "PSI grouping dimensions",
+    "psi_use_woe_bins": "PSI reuses WOE bins",
+    "psi_params": "PSI parameters",
+    "ivks_enabled": "Enable IV/KS",
+    "ivks_group_dims": "IV/KS grouping dimensions",
+    "ivks_use_woe_bins": "IV/KS reuses WOE bins",
+    "ivks_params": "IV/KS parameters",
+    "corr_enabled": "Enable correlation analysis",
+    "corr_include_incumbent": "Include incumbent features in correlation",
+    "corr_use_woe_bins": "Correlation reuses WOE bins",
+    "corr_params": "Correlation parameters",
+    "missing_rate_threshold": "Missing rate threshold",
+    "woe_fit_scope": "Top-level WOE fit scope",
+    "iv_upper_threshold": "IV upper threshold",
+    "selection_enabled": "Enable automatic feature screening",
+    "selection_params": "Automatic screening parameters",
+    "selection_group_dims": "Screening gate grouping dimensions",
+    "monthly_iv_min": "Minimum group IV",
+    "monthly_iv_cv_max": "Maximum group IV coefficient of variation",
+    "direction_consistency_min": "Minimum share of direction-consistent groups",
+    "min_group_n": "Minimum group size",
+    "insufficient_group_policy": "Insufficient-group policy",
+    "target_rules": "Multi-target joint rules",
+    "min_pass_count": "Minimum targets passed",
+    "per_target_iv_range": "Per-target IV range",
+    "direction_reference_target": "Direction reference target",
+    "max_selected_features": "Maximum selected features",
+    "min_selected_features": "Minimum selected features",
+    "ranking_metric": "Truncation ranking metric",
+    "tie_breaker": "Truncation tie-breaker",
+    "vif_enabled": "Enable VIF gate",
+    "vif_threshold": "VIF threshold",
+    "vif_min_features": "VIF minimum retained features",
+    "vif_tie_break_metric": "VIF tie-break metric",
+    "lr_elimination_mode": "LR coefficient elimination mode",
+    "lr_elimination_params": "LR coefficient elimination parameters",
+    "materialize_split": "Materialize row-level split",
+    "oot_cutoff": "OOT cutoff",
+    "split_col_name": "Split column name",
+    "persist_split_map": "Persist split map to disk",
+    "profile_cols": "Profile columns",
+    "oot_time_dim": "OOT time granularity",
+    "oot_windows": "OOT windows",
+    "ins_oos_ratios": "Candidate INS/OOS ratios",
+    "random_seeds": "Random seeds",
+    "min_sample_size": "Minimum sample count",
+    "dry_run": "Dry run (estimate only)",
+    "n_samples": "Number of samples",
+    "applied_sample": "Output sample scope",
+    "approve_rate": "Approval rate",
+    "num_online_scores": "Number of online model scores",
+    "y_flag_candidates": "Label performance windows (days)",
+    "num_features": "Number of simulated features",
+    "min_num_feature_business_type": "Minimum feature business types",
+    "observation_timestamp": "Observation timestamp",
+    "application_months": "Application look-back (months)",
+    "write_csv": "Write CSV",
+    "output_path": "Output path",
 }
 
 _FIELD_DESCRIPTIONS = {
-    "output_dir": "所有输出文件、图表和报告的根目录。",
-    "target_col": "二分类目标变量列名，通常约定 1=bad、0=good。",
-    "target_cols": "一个或多个目标变量列名，多标签场景会逐个分析。",
-    "feature_cols": "入模特征列。None 表示由 Pipeline 自动从数值列推断。",
-    "new_feature_cols": "需要验证的新接特征列。None 时在 CSV batch 模式可由表头推断。",
-    "incumbent_feature_cols": "现有模型或基准特征，主要用于相关性对比。",
-    "split_col": "推荐的样本切分字段，大小写不敏感支持 ins/oos/oot。",
-    "sample_col": "兼容旧版本的样本切分字段，未配置 split_col 时使用。",
-    "oot_col": "OOT 标识列；当没有 split_col/sample_col 时用于切出 OOT。",
-    "weight_col": "样本权重列名。None 表示等权。",
-    "write_outputs": "是否落地 CSV、图表、模型路径等文件。",
-    "write_excel": "是否生成 ExcelMaster/Excel 报告。",
-    "plot_outputs": "是否生成 Pipeline 自动分析图；仍受 write_outputs 总开关控制，不影响 CSV 或 Excel 输出。",
-    "write_ri_datasets": "是否写出各 RI 方法的增强样本集，宽表场景可能很大。",
-    "screening_artifact": "FeatureValidationPipeline 产出的 Python artifact 对象，不适合 GUI/YAML 直接编辑。",
-    "feature_validation_result": "FeatureValidationPipelineResult 对象，不适合 GUI/YAML 直接编辑。",
-    "extra_eval_datasets": "额外评估 DataFrame 字典，不适合 YAML 直接序列化。",
-    "oot_data": "外部 OOT DataFrame，不适合 YAML 直接序列化。",
-    "ri_approved_data": "外部 RI approved 参考 DataFrame，不适合 YAML 直接序列化。",
-    "ri_approved_func": "Python callable，仅代码模式可用。",
-    "gains_add_func": "Python callable，仅代码模式可用。",
-    "sqlrunner": "ODPS/sqlrunner 连接对象，仅代码模式可用。",
-    "offline_data": "离线 DataFrame，仅代码模式可用。",
-    "online_data": "线上 DataFrame，仅代码模式可用。",
-    "psi_reference_data": "外部 PSI benchmark DataFrame，仅代码模式可用。",
-    "submodel_pairs": "子模型字段映射，GUI 可用 key=value 或 JSON 形式编辑。",
-    "enable_batch": "是否显式启用 CSV feature batch 模式；默认关闭。关闭时 feature_batch_size/feature_batches 仅保留在配置中，不会触发分批。",
-    "feature_batch_size": "CSV 宽表模式下每批分析的新特征数量。",
-    "feature_batches": "显式指定每批新特征列表；优先级高于 feature_batch_size。",
-    "batch_corr_mode": "within_batch 只算批内相关性，block_pairwise 会额外读 CSV 计算跨批相关性。",
-    "comparison_block_size": "UAT 宽表逐 flow 比较时每个向量化列块包含的字段数；值越小峰值内存越低。",
-    "applied_sample": "1 输出全量申请，0 只输出通过样本。",
+    "output_dir": "Root directory for all output files, charts, and reports.",
+    "target_col": "Name of the binary target column; by convention 1 = bad, 0 = good.",
+    "target_cols": "One or more target column names; in multi-target setups each target is analyzed in turn.",
+    "feature_cols": "Model feature columns. None lets the Pipeline infer them from the numeric columns.",
+    "new_feature_cols": "New feature columns to validate. When None, CSV batch mode can infer them from the header.",
+    "incumbent_feature_cols": "Features of the incumbent model or benchmark, used mainly for correlation comparison.",
+    "split_col": "Recommended sample split column; ins/oos/oot are recognized case-insensitively.",
+    "sample_col": "Legacy sample split column, used when split_col is not configured.",
+    "oot_col": "OOT flag column; used to carve out OOT when neither split_col nor sample_col is set.",
+    "weight_col": "Sample weight column name. None means equal weights.",
+    "write_outputs": "Whether to write CSV, chart, model, and other files to disk.",
+    "write_excel": "Whether to generate the ExcelMaster/Excel report.",
+    "plot_outputs": "Whether to generate the Pipeline's automatic analysis charts; still governed by the write_outputs master switch and does not affect CSV or Excel output.",
+    "write_ri_datasets": "Whether to write the augmented dataset of each RI method; can be very large for wide tables.",
+    "screening_artifact": "Python artifact object produced by FeatureValidationPipeline; not suitable for direct editing in a GUI or YAML.",
+    "feature_validation_result": "FeatureValidationPipelineResult object; not suitable for direct editing in a GUI or YAML.",
+    "extra_eval_datasets": "Dictionary of additional evaluation DataFrames; cannot be serialized to YAML directly.",
+    "oot_data": "External OOT DataFrame; cannot be serialized to YAML directly.",
+    "ri_approved_data": "External approved-reference DataFrame for RI; cannot be serialized to YAML directly.",
+    "ri_approved_func": "Python callable; available in code mode only.",
+    "gains_add_func": "Python callable; available in code mode only.",
+    "sqlrunner": "ODPS/sqlrunner connection object; available in code mode only.",
+    "offline_data": "Offline DataFrame; available in code mode only.",
+    "online_data": "Online DataFrame; available in code mode only.",
+    "psi_reference_data": "External PSI benchmark DataFrame; available in code mode only.",
+    "submodel_pairs": "Sub-model column mapping; a GUI can edit it as key=value pairs or JSON.",
+    "enable_batch": "Whether to explicitly enable CSV feature-batch mode; off by default. When off, feature_batch_size/feature_batches stay in the config but do not trigger batching.",
+    "feature_batch_size": "Number of new features analyzed per batch in CSV wide-table mode.",
+    "feature_batches": "Explicit list of new features for each batch; takes precedence over feature_batch_size.",
+    "batch_corr_mode": "within_batch computes correlations inside each batch only; block_pairwise additionally re-reads the CSV to compute cross-batch correlations.",
+    "comparison_block_size": "Number of columns in each vectorized column block when the UAT compares wide tables flow by flow; smaller values lower peak memory.",
+    "applied_sample": "1 outputs all applications; 0 outputs approved samples only.",
 }
 
 _FIELD_OPTIONS = {
@@ -449,66 +449,66 @@ def _nested(label: str, description: str, widget: WidgetType = "number", **kwarg
 
 _NESTED_FIELDS = {
     "split_config": [
-        _nested("test_size", "OOS 样本比例。", "slider", min_val=0.05, max_val=0.5, step=0.01),
-        _nested("stratify", "是否按目标变量分层抽样。", "toggle"),
-        _nested("random_state", "切分随机种子。", "number"),
+        _nested("test_size", "Fraction of samples assigned to OOS.", "slider", min_val=0.05, max_val=0.5, step=0.01),
+        _nested("stratify", "Whether to stratify the split by the target variable.", "toggle"),
+        _nested("random_state", "Random seed for the split.", "number"),
     ],
     "feature_selection": [
-        _nested("psi_enabled", "是否运行 PSI 筛选。", "toggle"),
-        _nested("psi_threshold", "PSI 剔除阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
-        _nested("iv_enabled", "是否运行 IV 筛选。", "toggle"),
-        _nested("iv_threshold", "IV 保留阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
-        _nested("corr_enabled", "是否运行相关性筛选。", "toggle"),
-        _nested("corr_threshold", "相关性阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
-        _nested("corr_block_size", "加权相关性矩阵每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
+        _nested("psi_enabled", "Whether to run PSI screening.", "toggle"),
+        _nested("psi_threshold", "PSI elimination threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("iv_enabled", "Whether to run IV screening.", "toggle"),
+        _nested("iv_threshold", "IV retention threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("corr_enabled", "Whether to run correlation screening.", "toggle"),
+        _nested("corr_threshold", "Correlation threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("corr_block_size", "Number of columns per feature block when computing the weighted correlation matrix.", "number", min_val=1, max_val=10000, step=1),
     ],
     "woe_params": [
-        _nested("nbins", "分箱数量。", "slider", min_val=2, max_val=50, step=1),
-        _nested("equal_freq", "是否等频分箱。", "toggle"),
-        _nested("min_bin_prop", "每箱最小样本占比。", "slider", min_val=0.0, max_val=0.5, step=0.005),
+        _nested("nbins", "Number of bins.", "slider", min_val=2, max_val=50, step=1),
+        _nested("equal_freq", "Whether to use equal-frequency binning.", "toggle"),
+        _nested("min_bin_prop", "Minimum sample proportion per bin.", "slider", min_val=0.0, max_val=0.5, step=0.005),
     ],
     "monotone_woe_params": [
-        _nested("n_init_bins", "单调分箱初始箱数。", "slider", min_val=2, max_val=100, step=1),
-        _nested("min_bin_size", "单调分箱最小箱占比。", "slider", min_val=0.0, max_val=0.5, step=0.005),
-        _nested("min_n_bins", "单调分箱最少箱数。", "slider", min_val=1, max_val=20, step=1),
-        _nested("n_jobs", "并行任务数。", "number"),
-        _nested("min_bad_count", "每箱最小坏样本数（None=不限制）。", "number"),
-        _nested("min_good_count", "每箱最小好样本数（None=不限制）。", "number"),
-        _nested("small_bin_policy", "小箱处理策略（None=沿用旧行为）。", "select", options=["merge", "warn", "raise"]),
-        _nested("monotone_direction", "强制单调方向。", "select", options=["auto", "increasing", "decreasing"]),
-        _nested("reference_target", "方向参考目标列。", "text"),
-        _nested("direction_conflict_policy", "方向冲突处理。", "select", options=["warn", "raise", "keep"]),
-        _nested("missing_bin_strategy", "缺失箱策略（None=按 special_values 推导）。", "select", options=["empirical_special", "fixed_woe", "fail"]),
-        _nested("refine_min_n_bins_policy", "refine 最少箱数策略（默认 warn；None=沿用 0.6.x 无声旧行为）。", "select", options=["warn", "enforce", "raise"]),
+        _nested("n_init_bins", "Initial number of bins for monotone binning.", "slider", min_val=2, max_val=100, step=1),
+        _nested("min_bin_size", "Minimum bin proportion for monotone binning.", "slider", min_val=0.0, max_val=0.5, step=0.005),
+        _nested("min_n_bins", "Minimum number of bins for monotone binning.", "slider", min_val=1, max_val=20, step=1),
+        _nested("n_jobs", "Number of parallel jobs.", "number"),
+        _nested("min_bad_count", "Minimum number of bad samples per bin (None = no limit).", "number"),
+        _nested("min_good_count", "Minimum number of good samples per bin (None = no limit).", "number"),
+        _nested("small_bin_policy", "Policy for small bins (None = keep the legacy behavior).", "select", options=["merge", "warn", "raise"]),
+        _nested("monotone_direction", "Forced monotone direction.", "select", options=["auto", "increasing", "decreasing"]),
+        _nested("reference_target", "Reference target column for the direction.", "text"),
+        _nested("direction_conflict_policy", "Handling of direction conflicts.", "select", options=["warn", "raise", "keep"]),
+        _nested("missing_bin_strategy", "Strategy for the missing bin (None = derive from special_values).", "select", options=["empirical_special", "fixed_woe", "fail"]),
+        _nested("refine_min_n_bins_policy", "Policy for the minimum number of bins during refinement (default warn; None = keep the silent 0.6.x behavior).", "select", options=["warn", "enforce", "raise"]),
     ],
     "corr_params": [
-        _nested("corr_cutpoint", "高相关阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
-        _nested("method", "相关性方法。", "select", options=["pearson", "spearman", "kendall"]),
-        _nested("max_iterations", "相关性剔除最大迭代次数。", "number"),
-        _nested("base_metric", "相关变量保留依据。", "select", options=["iv", "ks", "lift"]),
+        _nested("corr_cutpoint", "High-correlation threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("method", "Correlation method.", "select", options=["pearson", "spearman", "kendall"]),
+        _nested("max_iterations", "Maximum number of iterations for correlation-based elimination.", "number"),
+        _nested("base_metric", "Criterion for choosing which correlated variable to keep.", "select", options=["iv", "ks", "lift"]),
     ],
     "psi_params": [
-        _nested("buckets", "PSI 分箱数量。", "slider", min_val=2, max_val=50, step=1),
-        _nested("equal_freq", "PSI 是否等频分箱。", "toggle"),
-        _nested("min_bin_prop", "PSI 最小箱占比。", "slider", min_val=0.0, max_val=0.5, step=0.005),
-        _nested("feature_block_size", "WOE 分箱与分组 PSI 每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
+        _nested("buckets", "Number of PSI bins.", "slider", min_val=2, max_val=50, step=1),
+        _nested("equal_freq", "Whether PSI uses equal-frequency bins.", "toggle"),
+        _nested("min_bin_prop", "Minimum bin proportion for PSI.", "slider", min_val=0.0, max_val=0.5, step=0.005),
+        _nested("feature_block_size", "Number of columns per feature block for WOE binning and grouped PSI.", "number", min_val=1, max_val=10000, step=1),
     ],
     "ivks_params": [
-        _nested("iv_cut", "IV 输出过滤阈值。", "slider", min_val=0.0, max_val=1.0, step=0.01),
-        _nested("feature_block_size", "复用 WOE 分箱时每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
+        _nested("iv_cut", "IV output filter threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
+        _nested("feature_block_size", "Number of columns per feature block when reusing WOE bins.", "number", min_val=1, max_val=10000, step=1),
     ],
     "distribution_params": [
-        _nested("q", "分布分位点列表。", "textarea"),
-        _nested("feature_block_size", "宽表分布统计每个特征块的列数。", "number", min_val=1, max_val=10000, step=1),
+        _nested("q", "List of distribution quantiles.", "textarea"),
+        _nested("feature_block_size", "Number of columns per feature block for wide-table distribution statistics.", "number", min_val=1, max_val=10000, step=1),
     ],
     "ri_method_params": [
-        _nested("simple_augment", "simple augment 参数字典。", "json"),
-        _nested("hard_cutoff", "hard cutoff 参数字典。", "json"),
-        _nested("fuzzy_augment", "fuzzy augment 参数字典。", "json"),
-        _nested("parceling", "parceling 参数字典。", "json"),
+        _nested("simple_augment", "Parameter dictionary for simple augmentation.", "json"),
+        _nested("hard_cutoff", "Parameter dictionary for hard cutoff.", "json"),
+        _nested("fuzzy_augment", "Parameter dictionary for fuzzy augmentation.", "json"),
+        _nested("parceling", "Parameter dictionary for parceling.", "json"),
     ],
     "submodel_pairs": [
-        _nested("offline_col = online_col", "每行一个子模型字段映射。", "textarea"),
+        _nested("offline_col = online_col", "One sub-model column mapping per line.", "textarea"),
     ],
 }
 
@@ -541,10 +541,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
     return {
         "credit_model": PipelineRegistryEntry(
             key="credit_model",
-            display_name="全流程信贷建模",
-            description="样本切分、特征筛选、WOE、模型训练、评估、解释性和报告的一体化建模流水线。",
-            use_case="从宽表开始完成信用风险模型开发，适合正式建模主线。",
-            audience=["建模工程师"],
+            display_name="End-to-end credit modeling",
+            description="Integrated modeling pipeline covering sample split, feature screening, WOE, model training, evaluation, explainability, and reporting.",
+            use_case="Develop a credit-risk model starting from a wide table; suited to the main production modeling flow.",
+            audience=["Modeling engineer"],
             pipeline_class=CreditModelPipeline,
             config_class=CreditModelPipelineConfig,
             result_class=CreditModelPipelineResult,
@@ -561,10 +561,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
         ),
         "feature_validation": PipelineRegistryEntry(
             key="feature_validation",
-            display_name="特征验证与筛选",
-            description="新特征稳定性、WOE、PSI、IV/KS、相关性与自动筛选分析。",
-            use_case="新接变量上线前或建模前做特征有效性验收。",
-            audience=["建模工程师", "特征工程师"],
+            display_name="Feature validation and screening",
+            description="Stability, WOE, PSI, IV/KS, correlation, and automatic screening analysis for new features.",
+            use_case="Check feature validity before newly onboarded variables go live or before modeling.",
+            audience=["Modeling engineer", "Feature engineer"],
             pipeline_class=FeatureValidationPipeline,
             config_class=FeatureValidationPipelineConfig,
             result_class=FeatureValidationPipelineResult,
@@ -581,10 +581,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
         ),
         "reject_inference": PipelineRegistryEntry(
             key="reject_inference",
-            display_name="拒绝推断",
-            description="对拒绝样本生成推断标签，并比较不同 RI 方法与无 RI benchmark。",
-            use_case="历史申请包含拒绝样本，需要缓解审批偏差时使用。",
-            audience=["建模工程师"],
+            display_name="Reject inference",
+            description="Infer labels for rejected samples and compare different RI methods against a no-RI benchmark.",
+            use_case="Use when historical applications include rejected samples and approval bias needs to be mitigated.",
+            audience=["Modeling engineer"],
             pipeline_class=RejectInferencePipeline,
             config_class=RejectInferencePipelineConfig,
             result_class=RejectInferencePipelineResult,
@@ -593,10 +593,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
         ),
         "score_comparison": PipelineRegistryEntry(
             key="score_comparison",
-            display_name="多模型/分数对比",
-            description="多评分全局、分组、Gains、cross risk 和 pairwise cross risk 对比。",
-            use_case="Champion/challenger 分数或多版本模型分上线前后对比。",
-            audience=["建模工程师", "策略分析师", "产品"],
+            display_name="Multi-model / score comparison",
+            description="Compare multiple scores globally, by group, with Gains, cross risk, and pairwise cross risk.",
+            use_case="Compare champion/challenger scores, or multiple model versions, before and after launch.",
+            audience=["Modeling engineer", "Strategy analyst", "Product"],
             pipeline_class=ScoreComparisonPipeline,
             config_class=ScoreComparisonPipelineConfig,
             result_class=ScoreComparisonPipelineResult,
@@ -605,24 +605,24 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
         ),
         "score_consistency_uat": PipelineRegistryEntry(
             key="score_consistency_uat",
-            display_name="线上/离线评分一致性 UAT",
-            description="对比线上实时评分与线下离线评分及特征，生成一致性报告。",
-            use_case="模型上线前 UAT，确认线上系统计算结果与离线一致。",
-            audience=["建模工程师", "MLOps"],
+            display_name="Online/offline score consistency UAT",
+            description="Compare online real-time scores and features against offline ones and generate a consistency report.",
+            use_case="Pre-launch UAT confirming that the online system reproduces the offline results.",
+            audience=["Modeling engineer", "MLOps"],
             pipeline_class=ScoreConsistencyUATPipeline,
             config_class=ScoreConsistencyUATPipelineConfig,
             result_class=ScoreConsistencyUATPipelineResult,
             module_path="Modeling_Tool.Pipeline.score_consistency_uat",
             run_requires_data=False,
-            run_method="run() 或 run(offline_data=df_offline, online_data=df_online)",
+            run_method="run() or run(offline_data=df_offline, online_data=df_online)",
             result_attrs=["summary", "coverage_summary", "main_score_summary", "feature_diff_summary", "report_path"],
         ),
         "sample_analysis": PipelineRegistryEntry(
             key="sample_analysis",
-            display_name="样本分析",
-            description="标签成熟度、坏账率时序、画像与 INS/OOS/OOT 划分稳定性分析。",
-            use_case="建模前确定目标标签、OOT 窗口和 INS/OOS 划分比例。",
-            audience=["建模工程师", "策略分析师"],
+            display_name="Sample analysis",
+            description="Label maturity, bad-rate time series, profiling, and stability analysis of the INS/OOS/OOT split.",
+            use_case="Decide the target label, OOT window, and INS/OOS split ratio before modeling.",
+            audience=["Modeling engineer", "Strategy analyst"],
             pipeline_class=SampleAnalysisPipeline,
             config_class=SampleAnalysisPipelineConfig,
             result_class=SampleAnalysisPipelineResult,
@@ -640,10 +640,10 @@ def _build_pipeline_registry() -> dict[str, PipelineRegistryEntry]:
         ),
         "mock_sample": PipelineRegistryEntry(
             key="mock_sample",
-            display_name="合成样本生成",
-            description="生成可用于 SMF demo、测试和样本分析的模拟信贷申请样本。",
-            use_case="没有真实数据时快速生成符合风控字段结构的 mock 数据。",
-            audience=["建模工程师"],
+            display_name="Synthetic sample generation",
+            description="Generate simulated credit-application samples for SMF demos, tests, and sample analysis.",
+            use_case="Quickly generate mock data with a risk-control field structure when no real data is available.",
+            audience=["Modeling engineer"],
             pipeline_class=MockSamplePipeline,
             config_class=MockSamplePipelineConfig,
             result_class=MockSamplePipelineResult,
@@ -723,7 +723,7 @@ def _infer_widget(name: str, tp: Any, default_value: Any) -> WidgetType:
 
 def _field_meta(config_class: type, field_name: str, field_type: Any, default_value: Any) -> FieldMeta:
     label = _FIELD_LABELS.get(field_name, _humanize(field_name))
-    description = _FIELD_DESCRIPTIONS.get(field_name, f"{label}。")
+    description = _FIELD_DESCRIPTIONS.get(field_name, f"{label}.")
     options = _FIELD_OPTIONS.get(field_name) or _literal_options(field_type)
     min_val = max_val = step = None
     if field_name in _FIELD_RANGES:
@@ -756,7 +756,7 @@ def _field_meta(config_class: type, field_name: str, field_type: Any, default_va
     if field_name.startswith("monotone_refine_") and field_name.endswith("_params"):
         meta.depends_on = {field_name.replace("_params", "_enabled"): True}
     if field_name in {"enable_batch", "feature_batch_size", "feature_batches", "batch_corr_mode"}:
-        meta.group = "CSV 分批"
+        meta.group = "CSV batching"
         meta.advanced = True
     return meta
 
@@ -1088,13 +1088,13 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
 
     if entry.key == "credit_model":
         if missing("target_col"):
-            errors.append("target_col 不能为空。")
+            errors.append("target_col must not be empty.")
         if vals.get("warm_start_enabled") and missing("warm_start_score_col"):
-            errors.append("启用 warm_start_enabled 时必须指定 warm_start_score_col。")
+            errors.append("warm_start_score_col is required when warm_start_enabled is on.")
         if int(vals.get("optuna_n_trials", 5) or 0) < 1:
-            errors.append("optuna_n_trials 必须 >= 1。")
+            errors.append("optuna_n_trials must be >= 1.")
         if int(vals.get("optuna_n_trials", 5) or 0) < 5:
-            warnings.append("optuna_n_trials 建议至少为 5，过小的搜索轮数不稳定。")
+            warnings.append("optuna_n_trials should be at least 5; very few search trials are unstable.")
         allowed_lr_search_params = {
             "objective", "primary_set", "gap_ref_sets", "metric", "refit", "verbose"
         }
@@ -1109,31 +1109,31 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
     elif entry.key == "feature_validation":
         has_batch_config = bool(vals.get("feature_batches")) or vals.get("feature_batch_size") is not None
         if vals.get("feature_batch_size") is not None and int(vals["feature_batch_size"]) <= 0:
-            errors.append("feature_batch_size 必须为正整数。")
+            errors.append("feature_batch_size must be a positive integer.")
         if vals.get("enable_batch") and not has_batch_config:
-            errors.append("enable_batch=True 时必须配置 feature_batch_size 或 feature_batches。")
+            errors.append("feature_batch_size or feature_batches is required when enable_batch=True.")
         if vals.get("enable_batch") is False and has_batch_config:
-            warnings.append("enable_batch=False 时 feature_batch_size/feature_batches 不会触发 CSV 分批。")
+            warnings.append("With enable_batch=False, feature_batch_size/feature_batches do not trigger CSV batching.")
         if vals.get("batch_corr_mode") == "block_pairwise":
             method = str((vals.get("corr_params") or {}).get("method", "pearson")).lower()
             if method == "kendall":
-                errors.append("CSV block_pairwise 相关性暂不支持 kendall。")
+                errors.append("CSV block_pairwise correlation does not support kendall yet.")
     elif entry.key == "reject_inference":
         if missing("approved_col"):
-            errors.append("approved_col 不能为空。")
+            errors.append("approved_col must not be empty.")
         if missing("target_col"):
-            errors.append("target_col 不能为空。")
+            errors.append("target_col must not be empty.")
         if missing("ri_methods"):
-            errors.append("至少选择一种 ri_methods。")
+            errors.append("Select at least one entry in ri_methods.")
         if vals.get("train_prescore") is False and missing("score_col"):
-            errors.append("train_prescore=False 时必须指定 score_col。")
+            errors.append("score_col is required when train_prescore=False.")
         if vals.get("ri_approved_frac") is not None and vals.get("ri_approved_n") is not None:
-            errors.append("ri_approved_frac 和 ri_approved_n 不能同时配置。")
+            errors.append("ri_approved_frac and ri_approved_n cannot both be set.")
     elif entry.key == "score_comparison":
         if missing("target_col"):
-            errors.append("target_col 不能为空。")
+            errors.append("target_col must not be empty.")
         if missing("score_cols") and missing("base_score"):
-            warnings.append("未配置 score_cols/base_score 时将依赖 Pipeline 自动探测分数字段。")
+            warnings.append("Without score_cols/base_score, the Pipeline will auto-detect the score columns.")
         if vals.get("group_specs") is not None:
             try:
                 from ._common import normalize_group_specs
@@ -1151,30 +1151,30 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("pairwise_cross_agg_dict must be a {column: aggregation(s)} mapping.")
     elif entry.key == "score_consistency_uat":
         if missing("main_model_score_col"):
-            errors.append("main_model_score_col 不能为空。")
+            errors.append("main_model_score_col must not be empty.")
         if vals.get("numeric_coercion_mode") not in (None, "safe", "aggressive", "off"):
-            errors.append("numeric_coercion_mode 必须是 safe/aggressive/off。")
+            errors.append("numeric_coercion_mode must be one of safe/aggressive/off.")
         if int(vals.get("comparison_block_size", 128) or 0) <= 0:
-            errors.append("comparison_block_size 必须为正整数。")
+            errors.append("comparison_block_size must be a positive integer.")
     elif entry.key == "sample_analysis":
         if missing("target_cols"):
-            errors.append("target_cols 不能为空。")
+            errors.append("target_cols must not be empty.")
         if missing("time_col"):
-            errors.append("time_col 不能为空。")
+            errors.append("time_col must not be empty.")
         if vals.get("materialize_split") and missing("id_col"):
-            errors.append("materialize_split=True 时必须配置 id_col。")
+            errors.append("id_col is required when materialize_split=True.")
     elif entry.key == "mock_sample":
         n_samples = int(vals.get("n_samples", 80000) or 0)
         if n_samples < 1:
-            errors.append("n_samples 必须为正整数。")
+            errors.append("n_samples must be a positive integer.")
         if n_samples < 1000:
-            warnings.append("n_samples 建议至少为 1000，否则统计意义有限。")
+            warnings.append("n_samples should be at least 1000; smaller samples have limited statistical value.")
         if vals.get("applied_sample", 1) not in {0, 1}:
-            errors.append("applied_sample 只能为 1(全量申请) 或 0(通过样本)。")
+            errors.append("applied_sample must be 1 (all applications) or 0 (approved samples).")
         num_features = int(vals.get("num_features", 20) or 0)
         min_types = int(vals.get("min_num_feature_business_type", 5) or 0)
         if min_types > min(num_features, 10):
-            errors.append("min_num_feature_business_type 不能大于 min(num_features, 10)。")
+            errors.append("min_num_feature_business_type must not exceed min(num_features, 10).")
     return errors + [f"WARNING: {msg}" for msg in warnings]
 
 

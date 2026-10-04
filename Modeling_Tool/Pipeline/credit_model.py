@@ -921,9 +921,11 @@ class CreditModelPipeline:
         if cfg.woe_engine.lower() == "monotone":
             defaults = {"feature_cols": feature_cols, "target_col": cfg.target_col}
             if "special_values" not in cfg.monotone_woe_params:
-                # 默认哨兵 -999999 只在拟合样本里真的出现时才声明：没出现时声明与否
-                # 分箱、打分完全一致，声明只会触发"声明了但没出现"告警（unseen_special_policy=
-                # 'neutral' 下还会给每个特征加占位箱）。显式传入的 special_values 不受影响。
+                # Declare the default sentinel -999999 only if it actually occurs in the fit
+                # sample. When it does not occur, declaring it makes no difference to binning or
+                # scoring; it would only trigger a "declared but not seen" warning (and, under
+                # unseen_special_policy='neutral', add a placeholder bin to every feature). An
+                # explicitly passed special_values is not affected.
                 defaults["special_values"] = (
                     [-999999] if _any_column_has_value(fit_ins, feature_cols, -999999) else []
                 )

@@ -768,7 +768,8 @@ class RejectInferencePipeline:
         bad_scores = approved.loc[approved[cfg.target_col] == 1, cfg.score_col]
         if len(bad_scores.dropna()) == 0:
             scores = approved[cfg.score_col]
-            # 全 NaN 时中位数就是 NaN（下方报错），不必让 numpy 为空切片告警
+            # With all-NaN scores the median is NaN anyway (an error is raised below), so do
+            # not let numpy emit an empty-slice warning
             fallback = float(scores.median()) if scores.notna().any() else float("nan")
             if not np.isfinite(fallback):
                 raise ValueError(
