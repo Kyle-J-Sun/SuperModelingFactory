@@ -152,6 +152,33 @@ def compute_correlation_linkage(
 
     Distance is defined as ``1 - abs(corr)``. Constant or all-missing columns are
     retained and treated as uncorrelated with other features.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature frame. Its columns are the leaves of the dendrogram; non-numeric
+        values are coerced to missing.
+    method : str, default "complete"
+        Linkage method: ``"complete"``, ``"average"`` or ``"single"``.
+    corr_method : str, default "spearman"
+        Association measure: ``"spearman"``, ``"pearson"`` or ``"kendall"`` (pandas
+        correlation methods), or ``"MIC"`` (case-insensitive; needs the optional
+        ``minepy`` package).
+
+    Returns
+    -------
+    numpy.ndarray
+        SciPy linkage matrix of shape ``(n_features - 1, 4)``; an empty ``(0, 4)`` array
+        when ``X`` has fewer than two columns.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not one of the supported linkage methods.
+    TypeError
+        If ``X`` has two or more columns and is not a pandas DataFrame.
+    ImportError
+        If ``corr_method="MIC"`` is used and ``minepy`` is not installed.
     """
     method = _check_method(method)
     if X.shape[1] < 2:
@@ -168,7 +195,39 @@ def auto_cluster(
     corr_method: str = "spearman",
     min_group_size: int = 1,
 ) -> Dict[str, List[str]]:
-    """Build data-driven feature groups using hierarchical clustering."""
+    """Build data-driven feature groups using hierarchical clustering.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature frame; its columns are the features to group.
+    threshold : float, default 0.35
+        Cut height of the dendrogram on the distance ``1 - abs(association)``; must lie
+        between 0 and 1 (inclusive). A lower value gives tighter, smaller groups.
+    method : str, default "complete"
+        Linkage method: ``"complete"``, ``"average"`` or ``"single"``.
+    corr_method : str, default "spearman"
+        Association measure: ``"spearman"``, ``"pearson"`` or ``"kendall"`` (pandas
+        correlation methods), or ``"MIC"`` (case-insensitive; needs the optional
+        ``minepy`` package).
+    min_group_size : int, default 1
+        Clusters with fewer features than this are merged into a single group named
+        ``"auto_singleton"``; the default 1 keeps every cluster.
+
+    Returns
+    -------
+    dict
+        Mapping from group name (``"auto_cluster_<k>"``, plus ``"auto_singleton"`` when
+        small clusters were merged) to the list of its feature names. A frame with a
+        single column returns ``{"auto_cluster_1": [column]}``.
+
+    Raises
+    ------
+    ValueError
+        If ``threshold`` is outside ``[0, 1]`` or ``method`` is unsupported.
+    ImportError
+        If ``corr_method="MIC"`` is used and ``minepy`` is not installed.
+    """
     if threshold < 0 or threshold > 1:
         raise ValueError("threshold must be between 0 and 1")
     features = list(X.columns)
@@ -211,6 +270,30 @@ def apply_prior(
     Business priors win. Remaining features keep their automatic cluster with a
     ``residual_`` prefix. Priors may contain feature names absent from X; those
     are ignored. Repeated valid feature names across prior groups are rejected.
+
+    Parameters
+    ----------
+    auto_groups : mapping of str to sequence of str
+        Data-driven groups, for example the result of `auto_cluster`.
+    prior_groups : mapping of str to sequence of str, or None
+        Business groups as ``{group_name: [feature, ...]}``. When ``None`` or empty,
+        ``auto_groups`` is returned unchanged (as a plain dict of lists).
+    features : sequence of str
+        All feature names of the data. Prior feature names that are not in it are
+        ignored, and features that end up in no group are collected in ``"ungrouped"``.
+
+    Returns
+    -------
+    dict
+        Mapping from group name to a list of feature names: the prior groups first (only
+        their members found in ``features``; a prior group with no such member is
+        dropped), then one ``"residual_<auto group name>"`` group per automatic group
+        for its members that no prior group claimed, then ``"ungrouped"`` if needed.
+
+    Raises
+    ------
+    ValueError
+        If a feature of ``features`` appears in more than one prior group.
     """
     if not prior_groups:
         return {str(k): list(v) for k, v in auto_groups.items()}
@@ -244,7 +327,30 @@ def apply_prior(
 
 
 def validate_groups(groups: Mapping[str, Sequence[str]], features: Sequence[str], raise_error: bool = True) -> bool:
-    """Validate complete, non-overlapping feature coverage."""
+    """Validate complete, non-overlapping feature coverage.
+
+    Parameters
+    ----------
+    groups : mapping of str to sequence of str
+        Group name to member features.
+    features : sequence of str
+        The features that must each belong to exactly one group.
+    raise_error : bool, default True
+        If ``True``, an invalid grouping raises ``ValueError``; if ``False``, the
+        function returns ``False`` instead.
+
+    Returns
+    -------
+    bool
+        ``True`` when every feature is in exactly one group and no group contains an
+        unknown feature; ``False`` otherwise (only reached with ``raise_error=False``).
+
+    Raises
+    ------
+    ValueError
+        If the grouping is invalid and ``raise_error`` is ``True``; the message lists the
+        missing, duplicated and unknown features.
+    """
     all_assigned = [feat for feats in groups.values() for feat in feats]
     feature_set = set(features)
     missing = feature_set - set(all_assigned)
@@ -272,6 +378,34 @@ def group_correlation_summary(
 
     For ``corr_method='spearman'`` (default) the summary reports mean/max absolute
     correlation. For ``corr_method='MIC'`` the same columns report mean/max MIC.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature frame; non-numeric values are coerced to missing.
+    groups : mapping of str to sequence of str
+        Group name to member features. Members that are not columns of ``X`` are ignored.
+    corr_method : str, default "spearman"
+        Association measure: ``"spearman"``, ``"pearson"`` or ``"kendall"`` (pandas
+        correlation methods), or ``"MIC"`` (case-insensitive; needs the optional
+        ``minepy`` package).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by ``group`` with columns ``n_features`` (members found in ``X``),
+        ``mean_abs_corr`` and ``max_abs_corr`` (mean and maximum absolute association
+        over the member pairs, rounded to 3 decimals; NaN for a group with fewer than two
+        members) and ``features`` (the members found in ``X``).
+
+    Raises
+    ------
+    TypeError
+        If ``X`` is not a pandas DataFrame.
+    ValueError
+        If ``X`` has no columns.
+    ImportError
+        If ``corr_method="MIC"`` is used and ``minepy`` is not installed.
     """
     frame = _as_numeric_frame(X)
     assoc = _association_matrix(frame, corr_method=corr_method)
@@ -304,7 +438,33 @@ def groups_to_shap_clustering(
     intra_dist: float = 0.01,
     inter_dist: float = 0.99,
 ) -> np.ndarray:
-    """Convert feature groups to the linkage matrix used by SHAP Partition."""
+    """Convert feature groups to the linkage matrix used by SHAP Partition.
+
+    Parameters
+    ----------
+    groups : mapping of str to sequence of str
+        Group name to member features; together the groups must cover every feature in
+        ``features`` exactly once.
+    features : sequence of str
+        Feature names in the column order of the data given to SHAP; they are the leaves
+        of the returned tree.
+    intra_dist : float, default 0.01
+        Distance between two features of the same group.
+    inter_dist : float, default 0.99
+        Distance between two features of different groups.
+
+    Returns
+    -------
+    numpy.ndarray
+        SciPy linkage matrix (complete linkage over the block distance matrix) of shape
+        ``(n_features - 1, 4)``; an empty ``(0, 4)`` array when there are fewer than two
+        features.
+
+    Raises
+    ------
+    ValueError
+        If ``groups`` does not cover ``features`` exactly once (see `validate_groups`).
+    """
     features = list(features)
     validate_groups(groups, features, raise_error=True)
     n = len(features)
@@ -343,6 +503,69 @@ def build_coalition_structure(
 
     Returns a dict containing final groups, automatic groups, correlation
     linkage, SHAP-compatible linkage, and a within-group correlation summary.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature frame whose columns are the features to group. Every column is coerced
+        to numeric (non-numeric values become missing), and constant or all-missing
+        columns count as uncorrelated with the others.
+    prior_groups : mapping of str to sequence of str, or None, default None
+        Business groups as ``{group_name: [feature, ...]}``. They win over the automatic
+        clusters; feature names that are not columns of ``X`` are ignored, and a feature
+        of ``X`` may not appear in two groups. Features outside every prior group fall
+        back to their automatic cluster, in groups named ``"residual_<cluster name>"``.
+    threshold : float, default 0.35
+        Cut height of the clustering on the distance ``1 - abs(association)``; must lie
+        between 0 and 1 (inclusive). With ``method="complete"`` every pair in an
+        automatic group has an absolute association of at least ``1 - threshold``.
+    method : str, default "complete"
+        Linkage method: ``"complete"``, ``"average"`` or ``"single"``.
+    corr_method : str, default "spearman"
+        Association measure: ``"spearman"``, ``"pearson"`` or ``"kendall"`` (pandas
+        correlation methods), or ``"MIC"`` (case-insensitive; needs the optional
+        ``minepy`` package).
+    min_group_size : int, default 1
+        Automatic clusters with fewer features than this are merged into one group named
+        ``"auto_singleton"`` before the priors are applied; the default 1 keeps every
+        cluster.
+    intra_dist : float, default 0.01
+        Distance between two features of the same final group in the partition tree
+        handed to SHAP (``shap_lnk``).
+    inter_dist : float, default 0.99
+        Distance between two features of different final groups in that tree.
+
+    Returns
+    -------
+    dict
+        The coalition structure with these keys:
+
+        ``groups``
+            Final ``{group_name: [features]}`` mapping.
+        ``shap_lnk``
+            Linkage matrix for ``shap.maskers.Partition``, shape ``(n_features - 1, 4)``
+            (``(0, 4)`` for a single feature).
+        ``corr_lnk``
+            Linkage matrix of the correlation dendrogram, same shape rules.
+        ``auto_groups``
+            The automatic clusters before the priors were applied.
+        ``summary``
+            DataFrame indexed by ``group`` with ``n_features``, ``mean_abs_corr``,
+            ``max_abs_corr`` and ``features`` (see `group_correlation_summary`).
+        ``features``
+            Column names of ``X``, in order.
+        ``threshold``, ``method``, ``corr_method``
+            The arguments that produced the structure.
+
+    Raises
+    ------
+    TypeError
+        If ``X`` is not a pandas DataFrame.
+    ValueError
+        If ``X`` has no columns, ``threshold`` is outside ``[0, 1]``, ``method`` is
+        unsupported, or a feature appears in more than one prior group.
+    ImportError
+        If ``corr_method="MIC"`` is used and ``minepy`` is not installed.
     """
     frame = _as_numeric_frame(X)
     features = list(frame.columns)

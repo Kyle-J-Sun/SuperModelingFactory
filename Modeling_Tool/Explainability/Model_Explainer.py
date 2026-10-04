@@ -69,6 +69,63 @@ class ModelExplainer:
     (``GradientBoostingModel`` or ``LRMaster``) or a raw fitted estimator. It
     exposes SHAP attribution, Owen Value grouped attribution, plus model-agnostic
     effect methods (PDP, ICE, ALE, and LIME).
+
+    Parameters
+    ----------
+    model : GradientBoostingModel, LRMaster, or estimator
+        A SuperModelingFactory model wrapper or a fitted estimator (for example a
+        scikit-learn ``LogisticRegression``, or a LightGBM or XGBoost model). The
+        underlying estimator is unwrapped from a wrapper automatically.
+    feature_names : list of str or None, default None
+        Column order the model expects. When ``None`` it is read from the model
+        (``varlist``, ``feature_cols``, ``feature_names``, ``feature_names_``) or from
+        the estimator (``feature_names_in_``, ``feature_name_``, ``feature_name()``);
+        it stays ``None`` when none of them exists. A DataFrame passed to a later method
+        is aligned to this order by column name (extra columns are ignored) when it
+        contains all of these columns, and a plain array is labelled with these names
+        when its column count matches.
+    model_type : str or None, default None
+        Model family, case-insensitive. When ``None`` it is read from
+        ``model.model_type`` or guessed from the estimator class (``"lgb"``,
+        ``"xgb"``, ``"lr"``, otherwise the lower-cased class name). ``"lgb"``,
+        ``"lightgbm"``, ``"xgb"`` and ``"xgboost"`` select the SHAP ``TreeExplainer``;
+        ``"lr"``, ``"linear"`` and ``"logisticregression"`` select the
+        ``LinearExplainer``; any other value selects the model-agnostic
+        ``shap.Explainer`` on the positive-class probability.
+    background_data : pandas.DataFrame, array-like, or None, default None
+        Representative sample of the training features. It is the SHAP background for
+        linear and model-agnostic models (required there) and optional for tree models;
+        it is also the default background for Owen values, the default data for the
+        coalition structure, and the default ``X_train`` for LIME.
+
+    Attributes
+    ----------
+    model : object
+        The ``model`` argument as passed.
+    estimator : object
+        The fitted estimator unwrapped from ``model`` (``model`` itself when it is
+        already a raw estimator).
+    model_type : str
+        Lower-cased model family.
+    feature_names : list of str or None
+        Resolved feature order (see the ``feature_names`` parameter).
+    background_data : pandas.DataFrame, array-like, or None
+        The background sample passed to the constructor.
+    shap_values_ : numpy.ndarray or None
+        2-D SHAP values (rows by features) cached by the last SHAP computation
+        (`explain`, or a SHAP method that was given ``X``); ``None`` before that.
+    expected_value_ : numpy.ndarray or None
+        Base value(s) of the cached SHAP explanation.
+    explanation_ : shap.Explanation or None
+        The cached SHAP explanation object.
+    coalition_structure_ : dict or None
+        Coalition structure cached by `build_coalition_structure` or `explain_owen`.
+    owen_values_ : numpy.ndarray or None
+        2-D Owen values (rows by features) cached by `explain_owen`.
+    owen_expected_value_ : numpy.ndarray or None
+        Base value(s) of the cached Owen explanation.
+    owen_explanation_ : shap.Explanation or None
+        The cached Owen explanation object.
     """
 
     def __init__(self, model, feature_names=None, model_type=None, background_data=None):
@@ -483,7 +540,44 @@ class ModelExplainer:
         return values, base, explanation
 
     def explain(self, X):
-        """Compute and cache SHAP values for a dataset."""
+        """Compute and cache SHAP values for a dataset.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Rows to explain. A DataFrame is aligned to ``feature_names`` by column name
+            when it contains all of them (extra columns are ignored); an array is
+            labelled with ``feature_names`` when its column count matches, and a 1-D
+            array is read as a single row.
+
+        Returns
+        -------
+        shap.Explanation
+            The explanation object returned by the SHAP explainer.
+
+        Raises
+        ------
+        ValueError
+            If the model is linear or needs the model-agnostic explainer and no
+            ``background_data`` was given; or, for XGBoost, if SHAP still cannot parse
+            the model's ``base_score`` after the built-in compatibility patches.
+        ImportError
+            If the optional ``shap`` package is not installed.
+
+        Notes
+        -----
+        The SHAP explainer is built on the first call and reused afterwards:
+        ``TreeExplainer`` for LightGBM and XGBoost (``background_data`` optional),
+        ``LinearExplainer`` for linear models (``background_data`` required), and the
+        model-agnostic ``shap.Explainer`` on the positive-class probability for any
+        other model (``background_data`` required). Tree and linear SHAP values are in
+        the model's raw output scale (log-odds for a binary classifier), model-agnostic
+        values are in probability units.
+
+        Sets ``shap_values_`` (2-D; for a multi-output explanation only the last output
+        is kept), ``expected_value_`` and ``explanation_``, and remembers ``X`` for the
+        plot and importance methods that are called without data.
+        """
         frame = self._as_frame(X)
         values, base, explanation = self._shap_values_for(frame)
         self.shap_values_ = values
@@ -507,7 +601,30 @@ class ModelExplainer:
         return [f"f{i}" for i in range(n_features)]
 
     def feature_importance(self, X=None, normalize=False):
-        """Global feature importance as mean absolute SHAP value."""
+        """Global feature importance as mean absolute SHAP value.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame, array-like, or None, default None
+            Rows to explain. When given, the SHAP values are recomputed with `explain`
+            and replace the cached ones; when ``None``, the values cached by the last
+            SHAP computation are used.
+        normalize : bool, default False
+            If ``True``, add an ``importance_pct`` column with each feature's share of
+            the total mean absolute SHAP value (fractions that sum to 1, not percent).
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per feature with ``feature`` and ``mean_abs_shap`` (plus
+            ``importance_pct`` when ``normalize=True``), sorted by ``mean_abs_shap`` in
+            descending order.
+
+        Raises
+        ------
+        RuntimeError
+            If ``X`` is ``None`` and no SHAP values have been computed yet.
+        """
         values, X_used = self._ensure_values(X)
         mean_abs = np.abs(values).mean(axis=0)
         names = self._resolved_names(X_used, values.shape[1])
@@ -524,6 +641,35 @@ class ModelExplainer:
         ``random_state`` seeds the point jitter through shap's ``rng`` argument
         (shap >= 0.47), so the plot no longer depends on NumPy's global RNG;
         older shap versions ignore it.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame, array-like, or None, default None
+            Rows to plot. When given, the SHAP values are recomputed with `explain` and
+            replace the cached ones; when ``None``, the cached values are used.
+        max_display : int, default 20
+            Maximum number of features shown (the most important ones).
+        plot_type : str, default "dot"
+            Plot kind passed to ``shap.summary_plot``, for example ``"dot"`` (beeswarm)
+            or ``"bar"`` (mean absolute SHAP value).
+        show : bool, default True
+            If ``True``, display the figure with ``plt.show()``. If ``False``, the figure
+            is closed after it has been saved, so nothing is displayed.
+        save_path : str, path-like, or None, default None
+            When given, the figure is saved to this path (``dpi=150``, tight bounding
+            box; the format follows the file extension). The folder must already exist.
+        random_state : int, default 0
+            Seed of the random number generator that jitters the points.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The current matplotlib figure.
+
+        Raises
+        ------
+        RuntimeError
+            If ``X`` is ``None`` and no SHAP values have been computed yet.
         """
         shap = _lazy_shap()
         import matplotlib.pyplot as plt
@@ -538,7 +684,37 @@ class ModelExplainer:
         return self._finalize_plot(plt, show, save_path)
 
     def dependence_plot(self, feature, X=None, interaction_index="auto", show=True, save_path=None):
-        """SHAP dependence plot for a single feature."""
+        """SHAP dependence plot for a single feature.
+
+        Parameters
+        ----------
+        feature : str or int
+            Feature to plot, as a column name or a column position (passed to
+            ``shap.dependence_plot``).
+        X : pandas.DataFrame, array-like, or None, default None
+            Rows to plot. When given, the SHAP values are recomputed with `explain` and
+            replace the cached ones; when ``None``, the cached values are used.
+        interaction_index : str, int, or None, default "auto"
+            Feature used to color the points. ``"auto"`` lets SHAP choose the feature
+            with the strongest apparent interaction; a name or a position selects one
+            feature; ``None`` turns the coloring off.
+        show : bool, default True
+            If ``True``, display the figure with ``plt.show()``. If ``False``, the figure
+            is closed after it has been saved, so nothing is displayed.
+        save_path : str, path-like, or None, default None
+            When given, the figure is saved to this path (``dpi=150``, tight bounding
+            box; the format follows the file extension). The folder must already exist.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The current matplotlib figure.
+
+        Raises
+        ------
+        RuntimeError
+            If ``X`` is ``None`` and no SHAP values have been computed yet.
+        """
         shap = _lazy_shap()
         import matplotlib.pyplot as plt
 
@@ -550,7 +726,35 @@ class ModelExplainer:
         return self._finalize_plot(plt, show, save_path)
 
     def explain_instance(self, x_row):
-        """Per-feature SHAP contributions for a single sample."""
+        """Per-feature SHAP contributions for a single sample.
+
+        Parameters
+        ----------
+        x_row : pandas.DataFrame, pandas.Series, dict, or array-like
+            One observation. A Series or a dict is turned into a one-row frame and a 1-D
+            array is read as one row; when several rows are given, only the first is
+            explained.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per feature with ``feature``, ``value`` (the feature value in
+            ``x_row``) and ``shap_value``, sorted by absolute SHAP value (largest
+            first). ``attrs["base_value"]`` holds the explainer's base value as a float
+            (NaN when it is unavailable).
+
+        Raises
+        ------
+        ValueError
+            If the SHAP explainer has to be built and cannot be (see `explain`).
+        ImportError
+            If the optional ``shap`` package is not installed.
+
+        Notes
+        -----
+        The result is not cached: ``shap_values_``, ``expected_value_`` and
+        ``explanation_`` keep the values of the last `explain` call.
+        """
         if isinstance(x_row, pd.Series):
             x_row = x_row.to_frame().T
         elif isinstance(x_row, dict):
@@ -583,7 +787,48 @@ class ModelExplainer:
         intra_dist=0.01,
         inter_dist=0.99,
     ):
-        """Build and cache a coalition structure for Owen Value explanations."""
+        """Build and cache a coalition structure for Owen Value explanations.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame, array-like, or None, default None
+            Data the correlation clustering is computed on. When ``None``, the
+            explainer's ``background_data`` is used.
+        prior_groups : dict or None, default None
+            Business groups as ``{group_name: [feature, ...]}``. They take precedence
+            over the automatic clusters; feature names that are not columns of the data
+            are ignored, and a feature may not appear in two groups.
+        threshold : float, default 0.35
+            Cut height of the hierarchical clustering on the distance
+            ``1 - abs(association)``; must be between 0 and 1.
+        method : str, default "complete"
+            Linkage method: ``"complete"``, ``"average"`` or ``"single"``.
+        corr_method : str, default "spearman"
+            Association measure: ``"spearman"``, ``"pearson"``, ``"kendall"`` or
+            ``"MIC"`` (case-insensitive; needs the optional ``minepy`` package).
+        min_group_size : int, default 1
+            Automatic clusters with fewer features than this are merged into one group
+            named ``"auto_singleton"``.
+        intra_dist : float, default 0.01
+            Distance between two features of the same group in the partition tree passed
+            to SHAP.
+        inter_dist : float, default 0.99
+            Distance between two features of different groups in that partition tree.
+
+        Returns
+        -------
+        dict
+            The coalition structure, as returned by the module-level
+            `build_coalition_structure` (keys ``groups``, ``shap_lnk``, ``corr_lnk``,
+            ``auto_groups``, ``summary``, ``features``, ``threshold``, ``method`` and
+            ``corr_method``). It is also cached as ``coalition_structure_``.
+
+        Raises
+        ------
+        ValueError
+            If both ``X`` and ``background_data`` are ``None``, or if the clustering
+            arguments are invalid (see the module-level function).
+        """
         data = X if X is not None else self.background_data
         if data is None:
             raise ValueError("build_coalition_structure requires X or background_data")
@@ -632,6 +877,71 @@ class ModelExplainer:
 
         ``model_output='probability'`` explains positive-class probability.
         ``model_output='log_odds'`` is useful for credit reason-code reporting.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Rows to explain. It must contain every feature of the coalition structure;
+            its columns are selected in the structure's feature order.
+        coalition_structure : dict or None, default None
+            Structure returned by `build_coalition_structure`. When ``None``, the cached
+            ``coalition_structure_`` is reused; when there is none, one is built from
+            ``background_data`` (the argument, else the constructor's, else ``X``).
+        prior_groups : dict or None, default None
+            Business groups as ``{group_name: [feature, ...]}``. When given, a new
+            structure is always built from them (using ``threshold``, ``method`` and
+            ``corr_method``) and it replaces ``coalition_structure``, even an explicit
+            one.
+        threshold : float, default 0.35
+            Cut height of the clustering on ``1 - abs(association)``; used only when the
+            structure is built here.
+        method : str, default "complete"
+            Linkage method (``"complete"``, ``"average"`` or ``"single"``); used only
+            when the structure is built here.
+        corr_method : str, default "spearman"
+            Association measure (``"spearman"``, ``"pearson"``, ``"kendall"`` or
+            ``"MIC"``); used only when the structure is built here.
+        background_data : pandas.DataFrame, array-like, or None, default None
+            Background sample for building the structure (when it is built here) and
+            for the SHAP ``PartitionExplainer``. Defaults to the constructor's
+            ``background_data``. It has no effect on a ``PartitionExplainer`` that is
+            already built, unless ``rebuild=True``.
+        model_output : str, default "probability"
+            Quantity to explain: ``"probability"`` (positive-class probability) or
+            ``"log_odds"`` (``"logit"`` is accepted as an alias). Any other value raises
+            ``ValueError``.
+        rebuild : bool, default False
+            If ``True``, build a new ``PartitionExplainer`` instead of reusing the cached
+            one. It is also rebuilt automatically when ``model_output`` differs from the
+            value used by the previous call.
+        **explain_kwargs
+            Extra keyword arguments passed to the ``PartitionExplainer`` call, for example
+            ``max_evals`` or ``silent``.
+
+        Returns
+        -------
+        shap.Explanation
+            The Owen value explanation of ``X`` (restricted to the features of the
+            coalition structure).
+
+        Raises
+        ------
+        ValueError
+            If no ``background_data`` is available (argument or constructor) to build
+            the ``PartitionExplainer``, or if ``model_output`` is not supported.
+        ImportError
+            If the optional ``shap`` package is not installed.
+
+        Notes
+        -----
+        Sets ``coalition_structure_``, ``owen_values_``, ``owen_expected_value_`` and
+        ``owen_explanation_``, and remembers ``X`` for the Owen importance methods.
+
+        The ``PartitionExplainer`` is cached: it is rebuilt only when ``rebuild=True`` or
+        ``model_output`` changes. A different ``coalition_structure``, ``prior_groups`` or
+        ``background_data`` passed in a later call updates ``coalition_structure_`` but
+        does not change the partition tree the explainer already uses, so pass
+        ``rebuild=True`` whenever the grouping or the background changes.
         """
         frame = self._as_frame(X)
         if coalition_structure is None:
@@ -671,7 +981,31 @@ class ModelExplainer:
         return self.owen_values_, self._owen_last_X, self.coalition_structure_
 
     def owen_feature_importance(self, X=None, normalize=False):
-        """Global feature importance as mean absolute Owen value."""
+        """Global feature importance as mean absolute Owen value.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame, array-like, or None, default None
+            Rows to explain. When given, the Owen values are recomputed with
+            ``explain_owen(X)`` using its defaults (the cached coalition structure and
+            ``model_output="probability"``) and replace the cached ones; when ``None``,
+            the values cached by the last `explain_owen` call are used.
+        normalize : bool, default False
+            If ``True``, add an ``importance_pct`` column with each feature's share of
+            the total mean absolute Owen value (fractions that sum to 1, not percent).
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per feature with ``feature`` and ``mean_abs_owen`` (plus
+            ``importance_pct`` when ``normalize=True``), sorted by ``mean_abs_owen`` in
+            descending order.
+
+        Raises
+        ------
+        RuntimeError
+            If no Owen values are cached and ``X`` is ``None``.
+        """
         values, X_used, _ = self._ensure_owen_values(X)
         names = self._resolved_names(X_used, values.shape[1])
         table = pd.DataFrame({"feature": names, "mean_abs_owen": np.abs(values).mean(axis=0)})
@@ -682,7 +1016,34 @@ class ModelExplainer:
         return table
 
     def owen_group_importance(self, X=None, normalize=False):
-        """Aggregate Owen values to coalition groups."""
+        """Aggregate Owen values to coalition groups.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame, array-like, or None, default None
+            Rows to explain. When given, the Owen values are recomputed with
+            ``explain_owen(X)`` using its defaults (the cached coalition structure and
+            ``model_output="probability"``) and replace the cached ones; when ``None``,
+            the values cached by the last `explain_owen` call are used.
+        normalize : bool, default False
+            If ``True``, add an ``importance_pct`` column with each group's share of the
+            total ``mean_abs_owen`` (fractions that sum to 1, not percent).
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per coalition group with ``group``, ``n_features``, ``features``
+            (the member features found in the data), ``mean_owen`` and ``mean_abs_owen``
+            (plus ``importance_pct`` when ``normalize=True``), sorted by
+            ``mean_abs_owen`` in descending order. A group's value for a row is the sum
+            of its members' Owen values; ``mean_owen`` averages that signed sum and
+            ``mean_abs_owen`` averages its absolute value.
+
+        Raises
+        ------
+        RuntimeError
+            If no Owen values are cached and ``X`` is ``None``.
+        """
         values, X_used, cs = self._ensure_owen_values(X)
         names = list(X_used.columns)
         rows = []
@@ -707,7 +1068,36 @@ class ModelExplainer:
         return table
 
     def owen_explain_instance(self, x_row=None, aggregate_groups=True):
-        """Return local Owen reason codes for one sample."""
+        """Return local Owen reason codes for one sample.
+
+        Parameters
+        ----------
+        x_row : pandas.DataFrame, array-like, or None, default None
+            One observation. When ``None``, the first row of the cached Owen batch is
+            used. When given, only its first row is used and the Owen values are
+            recomputed for it with ``explain_owen`` defaults (cached coalition structure,
+            ``model_output="probability"``), which replaces the cached results. A Series
+            or 1-D array is read by position, so its values must follow
+            ``feature_names``; a dict is not supported.
+        aggregate_groups : bool, default True
+            If ``True``, return one row per coalition group (the sum of its members'
+            Owen values). If ``False``, return one row per feature.
+
+        Returns
+        -------
+        pandas.DataFrame
+            With ``aggregate_groups=True``: ``group``, ``n_features``, ``features``,
+            ``owen_value`` and ``abs_owen_value``, sorted by ``abs_owen_value`` (largest
+            first), with ``attrs["base_value"]`` (float, NaN when unavailable) and
+            ``attrs["model_output"]``. With ``aggregate_groups=False``: ``feature``,
+            ``value``, ``owen_value`` and ``abs_owen_value`` sorted the same way, without
+            those ``attrs``.
+
+        Raises
+        ------
+        RuntimeError
+            If ``x_row`` is ``None`` and no Owen values are cached.
+        """
         if x_row is not None:
             self.explain_owen(self._as_frame(x_row).iloc[[0]])
         values, X_used, cs = self._ensure_owen_values(None)
@@ -744,7 +1134,50 @@ class ModelExplainer:
     # PDP / ICE
     # ------------------------------------------------------------------ #
     def partial_dependence(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, prediction_batch_size=100000):
-        """Compute one-way partial dependence for a numeric feature."""
+        """Compute one-way partial dependence for a numeric feature.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data to average over. A DataFrame may carry extra columns: the model's
+            features are selected by name (see ``feature_names``).
+        feature : str or int
+            Numeric feature to vary: a column name, or a Python ``int`` position among
+            the model's feature columns. A name that is not one of the model's columns
+            raises ``KeyError``.
+        grid_resolution : int, default 50
+            Number of grid points between the lower and upper percentile of the feature.
+        percentiles : tuple of float, default (0.05, 0.95)
+            Lower and upper quantile of the feature, as fractions between 0 and 1, that
+            bound the grid. When they coincide (for example for a constant feature), the
+            grid is the sorted distinct values of the feature, at most
+            ``grid_resolution`` of them.
+        sample_size : int or None, default None
+            When ``X`` has more rows than this, a random sample of this size is used;
+            ``None`` uses every row.
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens); ``None`` draws a
+            different sample on each call.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call, which bounds
+            peak memory; ``None`` predicts all grid points in a single call. A value
+            below 1 raises ``ValueError``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per grid point with ``feature`` (the column name), ``grid_value`` and
+            ``average_prediction`` (the mean predicted positive-class probability when
+            the feature is set to the grid value for every row).
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value, or if
+            ``prediction_batch_size`` is not a positive integer or ``None``.
+        """
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
@@ -773,7 +1206,48 @@ class ModelExplainer:
         return pd.DataFrame({"feature": feature, "grid_value": grid, "average_prediction": averages})
 
     def pdp_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=None, random_state=None, show=True, save_path=None, prediction_batch_size=100000):
-        """Plot one-way partial dependence for a numeric feature."""
+        """Plot one-way partial dependence for a numeric feature.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data to average over; same handling as in `partial_dependence`.
+        feature : str or int
+            Numeric feature to vary: a column name, or a Python ``int`` position among
+            the model's feature columns.
+        grid_resolution : int, default 50
+            Number of grid points between the lower and upper percentile of the feature.
+        percentiles : tuple of float, default (0.05, 0.95)
+            Lower and upper quantile of the feature, as fractions between 0 and 1, that
+            bound the grid.
+        sample_size : int or None, default None
+            When ``X`` has more rows than this, a random sample of this size is used;
+            ``None`` uses every row.
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens).
+        show : bool, default True
+            If ``True``, display the figure with ``plt.show()``. If ``False``, the figure
+            is closed after it has been saved, so nothing is displayed.
+        save_path : str, path-like, or None, default None
+            When given, the figure is saved to this path (``dpi=150``, tight bounding
+            box; the format follows the file extension). The folder must already exist.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call; ``None``
+            predicts all grid points in a single call.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The figure with the average-prediction curve over the grid.
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value, or if
+            ``prediction_batch_size`` is not a positive integer or ``None``.
+        """
         import matplotlib.pyplot as plt
 
         df = self.partial_dependence(
@@ -794,7 +1268,54 @@ class ModelExplainer:
         return self._finalize_plot(plt, show, save_path)
 
     def ice(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=200, random_state=None, centered=False, prediction_batch_size=100000):
-        """Compute individual conditional expectation curves."""
+        """Compute individual conditional expectation curves.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data to draw the curves from. A DataFrame may carry extra columns: the
+            model's features are selected by name (see ``feature_names``).
+        feature : str or int
+            Numeric feature to vary: a column name, or a Python ``int`` position among
+            the model's feature columns. A name that is not one of the model's columns
+            raises ``KeyError``.
+        grid_resolution : int, default 50
+            Number of grid points between the lower and upper percentile of the feature.
+        percentiles : tuple of float, default (0.05, 0.95)
+            Lower and upper quantile of the feature, as fractions between 0 and 1, that
+            bound the grid. When they coincide (for example for a constant feature), the
+            grid is the sorted distinct values of the feature, at most
+            ``grid_resolution`` of them.
+        sample_size : int or None, default 200
+            When ``X`` has more rows than this, a random sample of this many rows (one
+            curve each) is used; ``None`` uses every row.
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens); ``None`` draws a
+            different sample on each call.
+        centered : bool, default False
+            If ``True``, subtract from each curve its prediction at the first grid point,
+            so every curve starts at 0.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call; ``None``
+            predicts all stacked rows in a single call. A value below 1 raises
+            ``ValueError``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Long format with one row per grid point and sampled row, ordered by grid
+            value: ``feature`` (the column name), ``sample_index`` (the row label in
+            ``X``), ``grid_value`` and ``prediction`` (the predicted positive-class
+            probability, or its change from the first grid point when ``centered=True``).
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value, or if
+            ``prediction_batch_size`` is not a positive integer or ``None``.
+        """
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         grid = self._numeric_grid(frame[feature], grid_resolution=grid_resolution, percentiles=percentiles)
@@ -822,7 +1343,52 @@ class ModelExplainer:
         return out
 
     def ice_plot(self, X, feature, grid_resolution=50, percentiles=(0.05, 0.95), sample_size=100, random_state=None, centered=False, show=True, save_path=None, prediction_batch_size=100000):
-        """Plot ICE curves for a numeric feature."""
+        """Plot ICE curves for a numeric feature.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data to draw the curves from; same handling as in `ice`.
+        feature : str or int
+            Numeric feature to vary: a column name, or a Python ``int`` position among
+            the model's feature columns.
+        grid_resolution : int, default 50
+            Number of grid points between the lower and upper percentile of the feature.
+        percentiles : tuple of float, default (0.05, 0.95)
+            Lower and upper quantile of the feature, as fractions between 0 and 1, that
+            bound the grid.
+        sample_size : int or None, default 100
+            When ``X`` has more rows than this, a random sample of this many rows (one
+            curve each) is drawn; ``None`` uses every row. Note that this default is
+            smaller than the one of `ice` (200).
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens).
+        centered : bool, default False
+            If ``True``, every curve is shifted to start at 0 (the y-axis is then
+            labelled "Centered prediction").
+        show : bool, default True
+            If ``True``, display the figure with ``plt.show()``. If ``False``, the figure
+            is closed after it has been saved, so nothing is displayed.
+        save_path : str, path-like, or None, default None
+            When given, the figure is saved to this path (``dpi=150``, tight bounding
+            box; the format follows the file extension). The folder must already exist.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call; ``None``
+            predicts all stacked rows in a single call.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The figure with one thin curve per sampled row and the average curve in red.
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value, or if
+            ``prediction_batch_size`` is not a positive integer or ``None``.
+        """
         import matplotlib.pyplot as plt
 
         df = self.ice(
@@ -851,7 +1417,54 @@ class ModelExplainer:
     # ALE
     # ------------------------------------------------------------------ #
     def ale(self, X, feature, bins=20, sample_size=None, random_state=None, prediction_batch_size=100000):
-        """Compute first-order accumulated local effects for a numeric feature."""
+        """Compute first-order accumulated local effects for a numeric feature.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data the effect is estimated on. A DataFrame may carry extra columns: the
+            model's features are selected by name (see ``feature_names``).
+        feature : str or int
+            Numeric feature to analyse: a column name, or a Python ``int`` position among
+            the model's feature columns. A name that is not one of the model's columns
+            raises ``KeyError``.
+        bins : int, default 20
+            Number of equal-count (quantile) intervals the feature is cut into. Repeated
+            quantile edges, caused by heavily tied values, are merged, so fewer intervals
+            may result.
+        sample_size : int or None, default None
+            When ``X`` has more rows than this, a random sample of this size is used;
+            ``None`` uses every row.
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens); ``None`` draws a
+            different sample on each call.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call; ``None``
+            predicts all stacked rows in a single call. A value below 1 raises
+            ``ValueError``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per interval with ``feature`` (the column name), ``bin_left``,
+            ``bin_right``, ``bin_center``, ``ale_value`` and ``n`` (number of rows in the
+            interval). The ``ale_value`` curve is centered so that its count-weighted
+            mean is 0.
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value or fewer than two distinct
+            interval edges, or if ``prediction_batch_size`` is not a positive integer or
+            ``None``.
+
+        Notes
+        -----
+        Rows whose value of ``feature`` is missing (or not numeric) are dropped before the
+        effect is computed, so ``n`` sums to the number of rows with a valid value.
+        """
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         feature = self._feature_name(frame, feature)
         values = pd.to_numeric(frame[feature], errors="coerce")
@@ -914,7 +1527,46 @@ class ModelExplainer:
         return pd.DataFrame({"feature": feature, "bin_left": edges[:-1], "bin_right": edges[1:], "bin_center": centers, "ale_value": ale_values, "n": counts})
 
     def ale_plot(self, X, feature, bins=20, sample_size=None, random_state=None, show=True, save_path=None, prediction_batch_size=100000):
-        """Plot first-order ALE for a numeric feature."""
+        """Plot first-order ALE for a numeric feature.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Data the effect is estimated on; same handling as in `ale`.
+        feature : str or int
+            Numeric feature to analyse: a column name, or a Python ``int`` position among
+            the model's feature columns.
+        bins : int, default 20
+            Number of equal-count (quantile) intervals the feature is cut into.
+        sample_size : int or None, default None
+            When ``X`` has more rows than this, a random sample of this size is used;
+            ``None`` uses every row.
+        random_state : int or None, default None
+            Seed of the row sampling (only used when sampling happens).
+        show : bool, default True
+            If ``True``, display the figure with ``plt.show()``. If ``False``, the figure
+            is closed after it has been saved, so nothing is displayed.
+        save_path : str, path-like, or None, default None
+            When given, the figure is saved to this path (``dpi=150``, tight bounding
+            box; the format follows the file extension). The folder must already exist.
+        prediction_batch_size : int or None, default 100000
+            Maximum number of rows sent to the model in one prediction call; ``None``
+            predicts all stacked rows in a single call.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The figure with the ALE curve plotted at the interval centers.
+
+        Raises
+        ------
+        KeyError
+            If ``feature`` is not one of the model's feature columns of ``X``.
+        ValueError
+            If the feature has no non-missing numeric value or fewer than two distinct
+            interval edges, or if ``prediction_batch_size`` is not a positive integer or
+            ``None``.
+        """
         import matplotlib.pyplot as plt
 
         df = self.ale(
@@ -1082,7 +1734,57 @@ class ModelExplainer:
         missing_strategy="median",
         **lime_kwargs,
     ):
-        """Explain one sample with LIME."""
+        """Explain one sample with LIME.
+
+        Parameters
+        ----------
+        x_row : pandas.DataFrame, pandas.Series, dict, or array-like
+            One observation. A Series or a dict is turned into a one-row frame and a 1-D
+            array is read as one row; when several rows are given, only the first is
+            explained.
+        X_train : pandas.DataFrame, array-like, or None, default None
+            Training data used to set up the LIME explainer (feature statistics and
+            sampling). When ``None``, the explainer's ``background_data`` is used; one of
+            the two must be available.
+        num_features : int, default 10
+            Maximum number of features in the explanation.
+        num_samples : int, default 5000
+            Number of perturbed samples used to fit the local surrogate model.
+        random_state : int or None, default None
+            Seed of the LIME explainer.
+        missing_strategy : str, default "median"
+            How missing values in the numeric columns of ``X_train`` and ``x_row`` are
+            handled: ``"median"`` fills them with the training medians; ``"drop"``
+            removes the affected rows. When values are missing, a ``UserWarning`` names
+            the affected columns. Any other value raises ``ValueError``.
+        **lime_kwargs
+            Extra keyword arguments for ``LimeTabularExplainer``, for example
+            ``discretize_continuous=False``. ``mode`` defaults to ``"classification"``
+            and ``class_names`` to ``["class_0", "class_1"]``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per feature rule with ``feature``, ``feature_rule`` (the LIME rule
+            text), ``weight`` and ``abs_weight``, sorted by ``abs_weight`` (largest
+            first). ``attrs["intercept"]`` (a dict keyed by class label) and
+            ``attrs["score"]`` (the local surrogate's R squared) describe the surrogate
+            model. When LIME returns no rule, an empty frame with these four columns is
+            returned.
+
+        Raises
+        ------
+        ValueError
+            If neither ``X_train`` nor the explainer's ``background_data`` is available,
+            if ``missing_strategy`` is not ``"median"`` or ``"drop"``, or if ``"drop"``
+            removes every row of ``X_train`` or ``x_row``.
+        ImportError
+            If the optional ``lime`` package is not installed.
+
+        Notes
+        -----
+        The explained quantity is the positive-class probability of the model.
+        """
         if isinstance(x_row, pd.Series):
             x_row = x_row.to_frame().T
         elif isinstance(x_row, dict):
@@ -1092,6 +1794,8 @@ class ModelExplainer:
             frame = frame.iloc[[0]]
 
         train_raw = self._as_frame(X_train if X_train is not None else self.background_data)
+        if train_raw is None:
+            raise ValueError("LIME requires X_train or background_data")
         train, frame = self._prepare_lime_data(
             train_raw,
             frame,
@@ -1131,8 +1835,62 @@ class ModelExplainer:
         missing_strategy="median",
         **lime_kwargs,
     ):
-        """Aggregate LIME local weights across a sample as global importance."""
+        """Aggregate LIME local weights across a sample as global importance.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame or array-like
+            Rows to sample from. Each sampled row is explained with
+            `lime_explain_instance`.
+        X_train : pandas.DataFrame, array-like, or None, default None
+            Training data used to set up the LIME explainers. When ``None``, the
+            explainer's ``background_data`` is used; one of the two must be available.
+        num_features : int, default 10
+            Maximum number of features in each local explanation.
+        num_samples : int, default 2000
+            Number of perturbed samples per explained row (smaller than the default of
+            `lime_explain_instance`, 5000).
+        sample_size : int or None, default 100
+            Maximum number of rows of ``X`` that are explained (a random sample); ``None``
+            explains every row.
+        random_state : int or None, default None
+            Seed of the row sampling and of every LIME explainer.
+        missing_strategy : str, default "median"
+            How missing values in the numeric columns of ``X_train`` and of the sampled
+            rows are handled: ``"median"`` fills them with the training medians;
+            ``"drop"`` removes the affected rows (``X_train`` rows, and sampled rows
+            before they are explained). When values are missing, a ``UserWarning`` names
+            the affected columns. Any other value raises ``ValueError``.
+        **lime_kwargs
+            Extra keyword arguments passed through to `lime_explain_instance` and on to
+            ``LimeTabularExplainer``, for example ``discretize_continuous=False``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per feature with ``feature``, ``mean_abs_lime_weight`` (the mean
+            absolute LIME weight over the explained rows in which the feature appears)
+            and ``frequency`` (the number of explained rows whose local explanation
+            contains the feature), sorted by ``mean_abs_lime_weight`` in descending
+            order. An empty frame with these columns is returned when no row is explained.
+
+        Raises
+        ------
+        ValueError
+            If neither ``X_train`` nor the explainer's ``background_data`` is available,
+            if ``missing_strategy`` is not ``"median"`` or ``"drop"``, or if ``"drop"``
+            removes every row of ``X_train`` or of the sample.
+        ImportError
+            If the optional ``lime`` package is not installed.
+
+        Notes
+        -----
+        A new LIME explainer is built and fitted for every explained row, so the run
+        time grows with ``sample_size * num_samples``.
+        """
         train_raw = self._as_frame(X_train if X_train is not None else self.background_data)
+        if train_raw is None:
+            raise ValueError("LIME requires X_train or background_data")
         frame = self._sample_frame(X, sample_size=sample_size, random_state=random_state)
         train, frame = self._prepare_lime_data(
             train_raw,
