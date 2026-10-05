@@ -18,6 +18,40 @@ from Modeling_Tool._utils.robust import smf_logger
 
 
 def resolve_weights(data=None, weight_col=None, sample_weight=None, expected_len=None, wgt=None, wgt_col=None):
+    """Resolve sample weights from a DataFrame column or an array.
+
+    Thin wrapper around ``Modeling_Tool.Core.sample_weight_utils.resolve_sample_weight`` that first maps the aliases
+    ``wgt_col`` to ``weight_col`` and ``wgt`` to ``sample_weight``.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame or None, default None
+        Frame that holds the weight column; required when ``weight_col`` (or ``wgt_col``) is given.
+    weight_col : str or None, default None
+        Name of the weight column in ``data``.
+    sample_weight : array-like or None, default None
+        Weights given directly, one per row. It cannot be combined with ``weight_col``.
+    expected_len : int or None, default None
+        Required length of the weight vector; None skips the length check.
+    wgt : array-like or None, default None
+        Alias of ``sample_weight``, used only when ``sample_weight`` is None.
+    wgt_col : str or None, default None
+        Alias of ``weight_col``, used only when ``weight_col`` is None.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        The validated 1-D float weight vector, or None when neither a column nor an array was given.
+
+    Raises
+    ------
+    ValueError
+        If both a column and an array are given, if a column is given without ``data``, or if the weights are not
+        1-dimensional, have a length other than ``expected_len``, contain NaN, infinity or a negative value, or sum to
+        zero or less.
+    KeyError
+        If the weight column is not in ``data``.
+    """
     if weight_col is None:
         weight_col = wgt_col
     if sample_weight is None:
@@ -31,6 +65,26 @@ def resolve_weights(data=None, weight_col=None, sample_weight=None, expected_len
 
 
 def safe_weighted_average(values, weights=None):
+    """Weighted mean that returns NaN instead of failing on empty or zero-weight input.
+
+    Parameters
+    ----------
+    values : array-like
+        Values to average, converted with ``numpy.asarray(values, dtype=float)``. NaN values are not skipped: they make
+        the result NaN.
+    weights : array-like or None, default None
+        Weights aligned with ``values``. None gives the plain unweighted mean.
+
+    Returns
+    -------
+    float
+        The weighted mean. NaN when ``weights`` is None and ``values`` is empty, or when the weights sum to zero.
+
+    Notes
+    -----
+    The weights are not validated: negative weights are used as given, and a ``weights`` array whose length differs from
+    ``values`` makes ``numpy.average`` raise ``TypeError``.
+    """
     values = np.asarray(values, dtype=float)
     if weights is None:
         return float(np.mean(values)) if len(values) else np.nan
@@ -42,6 +96,24 @@ def safe_weighted_average(values, weights=None):
 
 
 def safe_auc(y_true, y_score, sample_weight=None):
+    """Area under the ROC curve, or NaN when it cannot be computed.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1).
+    y_score : array-like
+        Predicted scores or probabilities.
+    sample_weight : array-like or None, default None
+        Per-sample weights passed to ``sklearn.metrics.roc_auc_score``; None means equal weights.
+
+    Returns
+    -------
+    float
+        The (weighted) AUC. NaN when scikit-learn raises ``ValueError`` or ``ZeroDivisionError``, for example when
+        ``y_true`` holds a single class or ``y_score`` contains NaN. The error is recorded with
+        ``smf_logger.record_and_continue`` (stage ``weighted_eval.safe_auc``) and not re-raised.
+    """
     try:
         return float(roc_auc_score(y_true, y_score, sample_weight=sample_weight))
     except (ValueError, ZeroDivisionError) as exc:
@@ -50,6 +122,34 @@ def safe_auc(y_true, y_score, sample_weight=None):
 
 
 def calc_roc(y_true, y_score, sample_weight=None):
+    """Compute the statistics of the ROC curve, optionally with sample weights.
+
+    Based on ``sklearn.metrics.roc_curve``. The rows where ``y_true``, ``y_score`` or ``sample_weight`` is NaN or infinite
+    are dropped first.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1), converted to float.
+    y_score : array-like
+        Predicted scores or probabilities, converted to float.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``, used for the curve and for ``thresholds_percentile``. They are not
+        validated by this function. None means equal weights.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per ROC threshold with the columns ``fpr``, ``tpr``, ``thresholds``, ``thresholds_percentile`` (percentage of
+        the rows, or of the total weight, whose score is at or below the threshold), ``FPR`` and ``TPR`` (copies of ``fpr``
+        and ``tpr``) and ``KS`` (``abs(tpr - fpr)``). An empty DataFrame with the same columns when no row is left after
+        the filtering.
+
+    Raises
+    ------
+    ValueError
+        If ``y_true`` is not binary (raised by scikit-learn).
+    """
     y_true = np.asarray(y_true, dtype=float)
     y_score = np.asarray(y_score, dtype=float)
     weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
@@ -80,6 +180,31 @@ def calc_roc(y_true, y_score, sample_weight=None):
 
 
 def calc_pr(y_true, y_score, sample_weight=None):
+    """Compute the statistics of the P-R curve, optionally with sample weights.
+
+    Based on ``sklearn.metrics.precision_recall_curve``.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1).
+    y_score : array-like
+        Predicted scores or probabilities.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``; None means equal weights. They are not validated by this function.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per threshold with the columns ``precision``, ``recall`` and ``thresholds``. The last row (precision 1,
+        recall 0) has no threshold (NaN). Unlike the unweighted ``evaluate_model.calc_pr`` there is no
+        ``thresholds_percentile`` column.
+
+    Notes
+    -----
+    NaN or infinite values are not filtered out here, so scikit-learn raises ``ValueError`` when ``y_true`` or ``y_score``
+    contains them.
+    """
     precision, recall, thresholds = precision_recall_curve(
         y_true,
         y_score,
@@ -102,6 +227,30 @@ def rank_bins(score, weight, nbins, ascending=False):
     the highest-score bucket. ``ascending=True`` sorts scores ascending so
     bin 1 is the lowest-score bucket, matching the unweighted
     ``gains_ascending=True`` convention.
+
+    Parameters
+    ----------
+    score : array-like
+        Scores, converted to float. A NaN score is ranked after every finite score, whatever ``ascending`` is, so it falls
+        in the highest-numbered bin(s).
+    weight : array-like or None
+        Weights aligned with ``score`` and used as given (not validated); None gives every row the weight 1. There is no
+        default: the argument must be passed.
+    nbins : int
+        Number of bins (converted with ``int``).
+    ascending : bool, default False
+        False ranks the highest score first (bin 1 holds the highest scores); True ranks the lowest score first.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer bin labels from 1 to ``nbins``, in the order of the input rows. A row gets the label
+        ``ceil(cumulative weight / total weight * nbins)`` (clipped to ``[1, nbins]``) computed in rank order, so every bin
+        holds about ``1 / nbins`` of the total weight.
+
+    Notes
+    -----
+    Rows with the same score are ordered by their position in the input, so they can be split across two adjacent bins.
     """
     score = np.asarray(score, dtype=float)
     weight = np.ones(len(score), dtype=float) if weight is None else np.asarray(weight, dtype=float)
@@ -133,6 +282,77 @@ def _split_special_scores(df, score, spec_values):
 
 def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binning=None,
                     ascending=False, spec_values=None, **kwargs):
+    """Sample-weight-aware Gains table: equal-weight score bins with their target statistics.
+
+    The rows are ranked by score (see ``rank_bins``) and cut into ``nbins`` bins that each hold about ``1 / nbins`` of the
+    total weight. ``data`` is not modified.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Dataset that holds the target, the score and, when given, the weight column.
+    dep : str
+        Name of the target column; numeric, 1 for bad and 0 for good.
+    score : str
+        Name of the score column; converted to float.
+    nbins : int, default 10
+        Number of bins.
+    weight_col : str or None, default None
+        Name of the sample weight column in ``data``. None gives every row the weight 1, so ``N`` is a row count.
+    weighted_binning : bool or None, default None
+        Accepted for compatibility but without any effect: the bins are always equal-weight bins.
+    ascending : bool, default False
+        False puts the highest scores in bin 1; True puts the lowest scores in bin 1.
+    spec_values : list or None, default None
+        Special score values (business sentinels such as ``-1``). The rows holding one of them are taken out before the
+        binning and reported in rows of their own (see Notes). None or an empty list means no special values.
+    **kwargs
+        Accepted and ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per bin, indexed by ``_bin_num`` and ``_bin_range`` (a MultiIndex whose two levels both hold the bin number
+        1 to ``nbins``), with the columns:
+
+        - ``MIN``, ``MAX``: lowest and highest score in the bin.
+        - ``N``: sum of the weights in the bin; ``N_RAW``: number of rows; ``PERF_CNT``: same as ``N``.
+        - ``N_BAD``, ``N_GOOD``: weighted counts of bad (``weight * target``) and good (``weight * (1 - target)``) rows.
+        - ``AVG_SCORE``: weighted mean score of the bin (NaN when the bin has NaN scores); ``UNIQUE_SCORE``: number of
+          distinct scores.
+        - ``PROP``: ``N`` divided by the total weight; ``AVG_BAD`` and ``AVG_GOOD``: ``N_BAD`` and ``N_GOOD`` divided by ``N``.
+        - ``BAD_PCT_IN_EACH_BIN``, ``GOOD_PCT_IN_EACH_BIN``: share of all bad and all good weight that falls in the bin.
+        - ``N_CUM_BAD``, ``N_CUM_GOOD``, ``CUM_BAD_PCT``, ``CUM_GOOD_PCT``: cumulative sums, from bin 1 down, of ``N_BAD``,
+          ``N_GOOD``, ``BAD_PCT_IN_EACH_BIN`` and ``GOOD_PCT_IN_EACH_BIN``.
+        - ``KS_PER_BIN``: ``abs(CUM_BAD_PCT - CUM_GOOD_PCT)``; ``KS`` is a copy of it.
+        - ``LIFT``: ``AVG_BAD`` divided by the overall bad rate.
+        - ``TRUE_BAD_SHIFT``: relative change of ``AVG_BAD`` from the previous bin, ``previous / current - 1`` when
+          ``ascending`` is False and ``current / previous - 1`` when it is True (NaN in bin 1).
+        - ``RANK_ORDER_BUMP``: 1 when ``TRUE_BAD_SHIFT`` is negative (the bad rate is not monotonic), else 0.
+        - ``WOE``: ``ln(BAD_PCT_IN_EACH_BIN / GOOD_PCT_IN_EACH_BIN)``, with 0 where it is infinite or undefined; ``IV``:
+          ``(BAD_PCT_IN_EACH_BIN - GOOD_PCT_IN_EACH_BIN) * WOE``.
+        - ``AUC``: weighted AUC of the score on the non-special rows (the same value on every row), NaN when it cannot be
+          computed.
+
+    Raises
+    ------
+    KeyError
+        If ``dep``, ``score`` or ``weight_col`` is not a column of ``data``.
+    ValueError
+        If the weights contain NaN, infinity or a negative value, or sum to zero or less.
+
+    Notes
+    -----
+    The statistics are computed on the rows that do not hold a special score. Each special score value gets one more row
+    after the bins, indexed by ``"special:<value>"`` in both index levels (in ascending order of the value), with the
+    columns ``MIN``, ``MAX`` (both the value), ``N``, ``N_RAW``, ``PERF_CNT``, ``N_BAD``, ``N_GOOD``, ``AVG_SCORE``,
+    ``UNIQUE_SCORE`` (1), ``PROP``, ``AVG_BAD``, ``AVG_GOOD`` and ``AUC`` (the AUC of the regular rows); every other column
+    is NaN. In these rows ``PROP`` is the share of the weight of all rows, whereas in the regular bins ``PROP`` is the
+    share of the weight of the non-special rows, so the column can add up to more than 1.
+
+    Rows with a NaN score are not dropped: they are ranked last (highest bin numbers), the ``AVG_SCORE`` of their bin is NaN
+    and the ``AUC`` is NaN. Rows with the same score can be split across two adjacent bins.
+    """
     cols = [dep, score]
     if weight_col is not None and weight_col in data.columns:
         cols.append(weight_col)
@@ -244,6 +464,35 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
 
 
 def calc_lift_apt(y_true, y_score, start=1.0, stop=3.0, step=0.1, sample_weight=None):
+    """Closest available Lift values for a grid of target Lifts, from a weighted 100-bin Gains table.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1), converted to float.
+    y_score : array-like
+        Predicted scores or probabilities, converted to float.
+    start : float, default 1.0
+        First target Lift.
+    stop : float, default 3.0
+        Last target Lift (included up to rounding of the grid).
+    step : float, default 0.1
+        Distance between two target Lifts.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``; None means equal weights. They are validated like the weights of
+        ``get_gains_table``.
+
+    Returns
+    -------
+    numpy.ndarray
+        One-dimensional float array with one value per target Lift of ``np.arange(start, stop + step / 2, step)``: the
+        ``LIFT`` of the bin of ``get_gains_table(..., nbins=100)`` (highest scores first) that is closest to that target.
+
+    Raises
+    ------
+    ValueError
+        If the weights are invalid (see ``get_gains_table``).
+    """
     y_true = np.asarray(y_true, dtype=float)
     y_score = np.asarray(y_score, dtype=float)
     weight = np.ones(len(y_true), dtype=float) if sample_weight is None else np.asarray(sample_weight, dtype=float)
@@ -262,6 +511,37 @@ def calc_lift_apt(y_true, y_score, start=1.0, stop=3.0, step=0.1, sample_weight=
 
 
 def calc_equid_dist(y_true, y_score, bins=10, sample_weight=None, **kwargs):
+    """Weighted Gains table over ``bins`` equal-weight score bins.
+
+    Despite its name the bins are not equal-width: the weighted implementation cuts the ranked scores into bins that each
+    hold about ``1 / bins`` of the total weight. It is the weighted counterpart of ``evaluate_model.calc_equid_dist``.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1).
+    y_score : array-like
+        Predicted scores or probabilities, same length as ``y_true``.
+    bins : int, default 10
+        Number of bins.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``; None gives every row the weight 1. They are validated like the weights
+        of ``get_gains_table``.
+    **kwargs
+        Forwarded to ``get_gains_table``: ``ascending`` and ``spec_values`` take effect, other names are ignored.
+        ``nbins`` and ``weight_col`` must not be passed (``TypeError``: they are already set).
+
+    Returns
+    -------
+    pandas.DataFrame
+        The Gains table of ``get_gains_table``: ``bins`` rows indexed by ``_bin_num`` and ``_bin_range`` (see
+        ``get_gains_table`` for the columns).
+
+    Raises
+    ------
+    ValueError
+        If the weights are invalid (see ``get_gains_table``).
+    """
     weight = np.ones(len(y_true), dtype=float) if sample_weight is None else np.asarray(sample_weight, dtype=float)
     return get_gains_table(
         pd.DataFrame({"y": y_true, "s": y_score, "w": weight}),
@@ -274,15 +554,115 @@ def calc_equid_dist(y_true, y_score, bins=10, sample_weight=None, **kwargs):
 
 
 def calc_equid_pct(y_true, y_score, bins=10, sample_weight=None, **kwargs):
+    """Weighted Gains table over ``bins`` equal-weight score bins.
+
+    Same as ``calc_equid_dist``, to which it delegates: the weighted counterpart of ``evaluate_model.calc_equid_pct``.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1).
+    y_score : array-like
+        Predicted scores or probabilities, same length as ``y_true``.
+    bins : int, default 10
+        Number of bins.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``; None gives every row the weight 1.
+    **kwargs
+        Forwarded to ``calc_equid_dist`` and then to ``get_gains_table``: ``ascending`` and ``spec_values`` take effect,
+        other names are ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The Gains table of ``get_gains_table``: ``bins`` rows indexed by ``_bin_num`` and ``_bin_range`` (see
+        ``get_gains_table`` for the columns).
+
+    Raises
+    ------
+    ValueError
+        If the weights are invalid (see ``get_gains_table``).
+    """
     return calc_equid_dist(y_true, y_score, bins=bins, sample_weight=sample_weight, **kwargs)
 
 
 def calc_fixed_pct(y_true, y_score, sample_weight=None, **kwargs):
+    """Weighted Gains table over equal-weight score bins; the weighted counterpart of ``evaluate_model.calc_fixed_pct``.
+
+    Fixed bin edges are not supported here: the call delegates to ``calc_equid_dist``, so the table has 10 equal-weight
+    bins unless ``bins`` is passed in ``kwargs``.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Actual binary labels (0/1).
+    y_score : array-like
+        Predicted scores or probabilities, same length as ``y_true``.
+    sample_weight : array-like or None, default None
+        Per-sample weights aligned with ``y_true``; None gives every row the weight 1.
+    **kwargs
+        Forwarded to ``calc_equid_dist``: ``bins`` (number of bins, default 10), ``ascending`` and ``spec_values`` take
+        effect; other names (such as ``bin_edges``) are ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The Gains table of ``get_gains_table``: ``bins`` rows indexed by ``_bin_num`` and ``_bin_range`` (see
+        ``get_gains_table`` for the columns).
+
+    Raises
+    ------
+    ValueError
+        If the weights are invalid (see ``get_gains_table``).
+    """
     return calc_equid_dist(y_true, y_score, sample_weight=sample_weight, **kwargs)
 
 
 def dataset_summary(name, data, tgt_name, scr_name, weight_col=None, nbins=10,
                     ascending=False, spec_values=None):
+    """Performance summary of one dataset: AUC, KS, Lift, IV and the average target and score.
+
+    Parameters
+    ----------
+    name : str
+        Label of the dataset; stored in the ``index``, ``dataset`` and ``DATASET`` entries.
+    data : pandas.DataFrame
+        Dataset that holds the target, the score and, when given, the weight column.
+    tgt_name : str
+        Name of the target column (binary, 1 for bad).
+    scr_name : str
+        Name of the score column.
+    weight_col : str or None, default None
+        Name of the sample weight column in ``data``; None gives every row the weight 1.
+    nbins : int, default 10
+        Number of bins of the Gains table behind ``LIFT`` and ``IV``.
+    ascending : bool, default False
+        Bin order of that Gains table (see ``get_gains_table``).
+    spec_values : list or None, default None
+        Special score values (such as ``-1``) that are left out of the ranking statistics and reported separately.
+
+    Returns
+    -------
+    dict
+        The entries ``index``, ``dataset`` and ``DATASET`` (all equal to ``name``), ``AUC``, ``KS`` (maximum of
+        ``abs(tpr - fpr)`` on the ROC curve), ``LIFT`` (largest bin Lift), ``IV`` (sum over the bins), ``N`` (sum of the
+        weights of all rows, or the number of rows without weights), ``N_RAW`` (number of rows), ``avgTrue`` (weighted mean
+        of the target over all rows) and ``avgScore`` (weighted mean of the score over the non-special rows). ``N_SPECIAL``
+        (sum of the weights) and ``N_SPECIAL_RAW`` (number of rows) are added when at least one row holds a special score.
+
+    Raises
+    ------
+    KeyError
+        If ``tgt_name``, ``scr_name`` or ``weight_col`` is not a column of ``data``.
+    ValueError
+        If the weights contain NaN, infinity or a negative value, or sum to zero or less.
+
+    Notes
+    -----
+    ``AUC``, ``KS``, ``LIFT``, ``IV`` and ``avgScore`` use the non-special rows only, because sentinel scores carry no
+    ordering information; ``avgTrue``, ``N`` and ``N_RAW`` cover all rows. ``AUC`` and ``KS`` are NaN when they cannot be
+    computed (for example with a single class).
+    """
     weight = resolve_weights(data, weight_col=weight_col, expected_len=len(data))
     y_true = data[tgt_name].to_numpy()
     y_score = data[scr_name].to_numpy()
@@ -321,6 +701,46 @@ def dataset_summary(name, data, tgt_name, scr_name, weight_col=None, nbins=10,
 
 def get_perf_summary(train=None, validation=None, oot=None, tgt_name=None, scr_name=None, weight_col=None, nbins=10,
                      ascending=False, spec_values=None, **kwargs):
+    """Performance summary of the train, validation and OOT datasets, one row each.
+
+    Parameters
+    ----------
+    train : pandas.DataFrame or None, default None
+        Training dataset, reported in the row ``ins``; skipped when None.
+    validation : pandas.DataFrame or None, default None
+        Validation dataset, reported in the row ``oos``; skipped when None.
+    oot : pandas.DataFrame or None, default None
+        Out-of-time dataset, reported in the row ``oot``; skipped when None.
+    tgt_name : str or None, default None
+        Name of the target column (binary, 1 for bad); required as soon as a dataset is given.
+    scr_name : str or None, default None
+        Name of the score column; required as soon as a dataset is given.
+    weight_col : str or None, default None
+        Name of the sample weight column, which must exist in every given dataset; None gives every row the weight 1.
+    nbins : int, default 10
+        Number of bins of the Gains table behind ``LIFT`` and ``IV``.
+    ascending : bool, default False
+        Bin order of that Gains table (see ``get_gains_table``).
+    spec_values : list or None, default None
+        Special score values (such as ``-1``) that are left out of the ranking statistics (see ``dataset_summary``).
+    **kwargs
+        Accepted and ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per given dataset, in the order ``ins``, ``oos``, ``oot``, with the entries of ``dataset_summary`` as
+        columns (``index``, ``dataset``, ``DATASET``, ``AUC``, ``KS``, ``LIFT``, ``IV``, ``N``, ``N_RAW``, ``avgTrue``,
+        ``avgScore`` and, when special scores occur, ``N_SPECIAL`` and ``N_SPECIAL_RAW``). A DataFrame without rows or
+        columns when no dataset is given.
+
+    Raises
+    ------
+    KeyError
+        If a target, score or weight column is missing from a given dataset.
+    ValueError
+        If the weights are invalid (see ``dataset_summary``).
+    """
     rows = []
     for name, data in (("ins", train), ("oos", validation), ("oot", oot)):
         if data is not None:
@@ -332,6 +752,48 @@ def get_perf_summary(train=None, validation=None, oot=None, tgt_name=None, scr_n
 
 
 def evaluate_performance(datasets=None, tgt_name=None, scr_name=None, sample_weight=None, nbins=10, **kwargs):
+    """Performance summary of several named datasets given as DataFrames or as label/score arrays.
+
+    Parameters
+    ----------
+    datasets : dict or None, default None
+        Mapping of dataset name to a payload dict. A payload is either ``{"data": DataFrame}`` (the frame must hold the
+        ``tgt_name`` and ``scr_name`` columns; a payload whose ``data`` is None is skipped) or
+        ``{"y_true": array-like, "y_score": array-like}``. Either form may carry a ``"sample_weight"`` entry that
+        overrides the ``sample_weight`` argument for that dataset. None gives an empty result.
+    tgt_name : str or None, default None
+        Name of the target column (binary, 1 for bad); for array payloads, the name given to the target column of the frame
+        built from them.
+    scr_name : str or None, default None
+        Name of the score column; for array payloads, the name given to the score column of the frame built from them.
+    sample_weight : array-like or None, default None
+        Default weights, one per row, for the datasets whose payload has no ``"sample_weight"`` entry. None gives every
+        row the weight 1.
+    nbins : int, default 10
+        Number of bins of the Gains table behind ``LIFT`` and ``IV``.
+    **kwargs
+        Accepted and ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per dataset, in the order of ``datasets``, with the entries of ``dataset_summary`` as columns (``index``,
+        ``dataset``, ``DATASET``, ``AUC``, ``KS``, ``LIFT``, ``IV``, ``N``, ``N_RAW``, ``avgTrue``, ``avgScore``). A
+        DataFrame without rows or columns when ``datasets`` is None or empty.
+
+    Raises
+    ------
+    KeyError
+        If an array payload lacks ``"y_true"`` or ``"y_score"``, or a frame lacks the target or score column.
+    ValueError
+        If the weights are invalid: wrong length, NaN, infinity, negative values or a sum that is not positive.
+
+    Notes
+    -----
+    Each frame is copied and given the weight column ``_w`` (overwriting any column of that name). ``ascending`` and
+    ``spec_values`` are not available here: the Gains table behind ``LIFT`` and ``IV`` uses ``ascending=False`` and no
+    special values.
+    """
     rows = []
     if datasets is None:
         return pd.DataFrame(rows)
@@ -356,6 +818,36 @@ def evaluate_performance(datasets=None, tgt_name=None, scr_name=None, sample_wei
 
 
 class GainsTableCalculator:
+    """Gains-table calculator bound to one dataset.
+
+    Stores the arguments of ``get_gains_table`` and computes the table with ``calculate``.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame or None, default None
+        Dataset that holds the target, the score and, when given, the weight column. It must be set before ``calculate`` is
+        called.
+    dep : str or None, default None
+        Name of the target column (binary, 1 for bad).
+    score : str or None, default None
+        Name of the score column.
+    nbins : int, default 10
+        Number of bins.
+    weight_col : str or None, default None
+        Name of the sample weight column in ``data``; None gives every row the weight 1.
+    weighted_binning : bool or None, default None
+        Accepted for compatibility but without any effect: the bins are always equal-weight bins.
+    **kwargs
+        Extra keyword arguments of ``get_gains_table`` (for example ``ascending`` or ``spec_values``), stored and passed on
+        by ``calculate``. Nothing is validated before ``calculate`` is called.
+
+    Attributes
+    ----------
+    data, dep, score, nbins, weight_col, weighted_binning : object
+        The constructor arguments, as given.
+    kwargs : dict
+        The extra keyword arguments.
+    """
     def __init__(self, data=None, dep=None, score=None, nbins=10, weight_col=None, weighted_binning=None, **kwargs):
         self.data = data
         self.dep = dep
@@ -366,6 +858,28 @@ class GainsTableCalculator:
         self.kwargs = kwargs
 
     def calculate(self, weight_col=None, **kwargs):
+        """Compute the Gains table of the stored dataset with ``get_gains_table``.
+
+        Parameters
+        ----------
+        weight_col : str or None, default None
+            Weight column for this call; None keeps the ``weight_col`` given to the constructor.
+        **kwargs
+            Extra keyword arguments of ``get_gains_table`` for this call; they take precedence over the ones given to the
+            constructor. ``nbins`` and ``weighted_binning`` must not be passed (``TypeError``: they are already set).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The Gains table (see ``get_gains_table`` for the columns).
+
+        Raises
+        ------
+        KeyError
+            If the target, score or weight column is not a column of ``data``.
+        ValueError
+            If the weights are invalid (see ``get_gains_table``).
+        """
         return get_gains_table(
             self.data,
             self.dep,
@@ -378,6 +892,30 @@ class GainsTableCalculator:
 
 
 class PerformanceEvaluator:
+    """Collect named datasets and summarize their performance with ``dataset_summary``.
+
+    Parameters
+    ----------
+    tgt_name : str or None, default None
+        Name of the target column (binary, 1 for bad) in every dataset.
+    scr_name : str or None, default None
+        Name of the score column in every dataset.
+    weight_col : str or None, default None
+        Default sample weight column, used for the datasets added without one.
+    nbins : int, default 10
+        Number of bins of the Gains table behind ``LIFT`` and ``IV``.
+    **kwargs
+        Stored in ``self.kwargs`` but not used.
+
+    Attributes
+    ----------
+    tgt_name, scr_name, weight_col, nbins : object
+        The constructor arguments, as given.
+    kwargs : dict
+        The extra keyword arguments.
+    datasets : collections.OrderedDict
+        Added datasets in insertion order: name mapped to the tuple ``(data, weight_col)``.
+    """
     def __init__(self, tgt_name=None, scr_name=None, weight_col=None, nbins=10, **kwargs):
         self.tgt_name = tgt_name
         self.scr_name = scr_name
@@ -387,10 +925,62 @@ class PerformanceEvaluator:
         self.datasets = OrderedDict()
 
     def add_dataset(self, name, data, weight_col=None, **kwargs):
+        """Register a dataset to be summarized by ``evaluate``.
+
+        Parameters
+        ----------
+        name : str
+            Label of the dataset. Adding a name that already exists replaces that dataset and keeps its position.
+        data : pandas.DataFrame
+            Dataset that holds the target and score columns (and the weight column, when used).
+        weight_col : str or None, default None
+            Sample weight column of this dataset; None falls back to the ``weight_col`` of ``evaluate`` and then to the
+            one of the constructor.
+        **kwargs
+            Accepted and ignored.
+
+        Returns
+        -------
+        PerformanceEvaluator
+            The evaluator itself, so that calls can be chained.
+        """
         self.datasets[name] = (data, weight_col)
         return self
 
     def evaluate(self, weight_col=None, to_show=False, display=False, **kwargs):
+        """Summarize every added dataset.
+
+        Parameters
+        ----------
+        weight_col : str or None, default None
+            Weight column for the datasets added without their own; None falls back to the ``weight_col`` of the
+            constructor (and to equal weights when that is None too).
+        to_show : bool, default False
+            Accepted for API compatibility; it has no effect.
+        display : bool, default False
+            Accepted for API compatibility; it has no effect.
+        **kwargs
+            Accepted and ignored.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per added dataset, in insertion order, with the entries of ``dataset_summary`` as columns (``index``,
+            ``dataset``, ``DATASET``, ``AUC``, ``KS``, ``LIFT``, ``IV``, ``N``, ``N_RAW``, ``avgTrue``, ``avgScore``). A
+            DataFrame without rows or columns when no dataset was added.
+
+        Raises
+        ------
+        KeyError
+            If a target, score or weight column is missing from a dataset.
+        ValueError
+            If the weights of a dataset are invalid (see ``dataset_summary``).
+
+        Notes
+        -----
+        The Gains table behind ``LIFT`` and ``IV`` uses ``nbins`` of the constructor, ``ascending=False`` and no special
+        score values.
+        """
         rows = []
         for name, (data, ds_weight_col) in self.datasets.items():
             wc = ds_weight_col or weight_col or self.weight_col
@@ -399,7 +989,37 @@ class PerformanceEvaluator:
 
 
 def cross_risk_weighted_mean(data, agg_col, sample_weight, score_list, margin_name="Total_Avg_Risk"):
-    """Weighted-mean cross-risk table after bin columns are assigned."""
+    """Weighted-mean cross-risk table after bin columns are assigned.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Dataset that already holds the bin columns ``_bin_num1``, ``_bin_range1`` (first score) and ``_bin_num2``,
+        ``_bin_range2`` (second score), and the column ``agg_col``.
+    agg_col : str
+        Name of the column to average (for example the target or a risk measure); converted with
+        ``pandas.to_numeric(errors="coerce")``, so non-numeric entries become NaN.
+    sample_weight : array-like
+        Weights, one per row of ``data`` and aligned with it by position; converted to float and not validated.
+    score_list : list of str
+        Names of the two scores, ``[first, second]``; used as the names of the row index levels (``first``) and of the
+        column index levels (``second``).
+    margin_name : str, default "Total_Avg_Risk"
+        Label of the margin row and column, which hold the weighted means over a whole row, a whole column and the whole
+        table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        For every cell, the sum of ``weight * agg_col`` divided by the sum of the weights: the rows are indexed by
+        (``_bin_num1``, ``_bin_range1``) and the columns by (``_bin_num2``, ``_bin_range2``), each with two levels named
+        after ``score_list``. Cells without rows, or whose weights sum to zero, are NaN.
+
+    Notes
+    -----
+    A row whose ``agg_col`` value is NaN adds nothing to the numerator but its weight still counts in the denominator, so
+    NaN values pull the mean towards 0 instead of being skipped.
+    """
     weight = np.asarray(sample_weight, dtype=float)
     values = pd.to_numeric(data[agg_col], errors="coerce").to_numpy(dtype=float)
     frame = data[["_bin_num1", "_bin_range1", "_bin_num2", "_bin_range2"]].copy()
