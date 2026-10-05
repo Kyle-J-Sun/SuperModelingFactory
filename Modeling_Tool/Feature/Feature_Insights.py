@@ -391,7 +391,9 @@ class CorrelationFilter:
     missing_rate_ref : int or float, default -9999999
         Value that fills missing values before binning.
     spec_values : list, default []
-        Stored as the attribute ``spec_values``; the filter does not use it.
+        Special values (for example ``-1`` or ``999`` for "no record") that get rows of their own in the IV / KS
+        calculation of ``VarExtractionInsights`` instead of being mixed into the numeric bins, which decides the
+        winner of each correlated group. The correlation itself is still computed on the raw values.
     base_metric : {"iv", "ks"}, default "iv"
         Metric (case-insensitive) compared inside a group of correlated variables: the variable with the highest value
         is kept and the others are removed.
@@ -491,6 +493,7 @@ class CorrelationFilter:
                 include_missing=True,
                 seed=self.seed,
                 missing_rate_ref=self.missing_rate_ref,
+                spec_values=self.spec_values,
             )
             self._metric_summary_cache = insights.get_var_analysis_report(
                 data=self.data,

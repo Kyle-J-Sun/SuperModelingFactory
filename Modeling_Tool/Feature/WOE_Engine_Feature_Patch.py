@@ -713,8 +713,9 @@ class CorrelationFilter:
     missing_rate_ref : int or float, default -9999999
         Sentinel for missing values in the default IV and KS computation. Ignored when an engine supplies the bins.
     spec_values : list, default []
-        Special values that get their own bins. They are stored but not used by the default computation: they take
-        effect only with ``woe_binner`` or ``woe_engine="monotone"``.
+        Special values (for example ``-1`` or ``999`` for "no record") that get bins or rows of their own in the IV and
+        KS calculation, with the default computation and with an engine alike. The correlation itself is still
+        computed on the raw values.
     base_metric : {"iv", "ks"}, default "iv"
         Metric that decides which variable of a correlated group survives. Any other value raises ``KeyError`` when
         a pair is filtered.
