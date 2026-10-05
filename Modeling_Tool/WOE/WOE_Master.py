@@ -7,7 +7,7 @@ from .WOE_Plot_Tool import get_bivar_graph
 from .WOE_Tool import _vectorized_group_slopes, mapping_woe, woe_transform
 
 from Modeling_Tool.Core.Binning_Tool import run_binning, get_bin_range_list
-from Modeling_Tool.Core.utils import _calc_woe_iv_values
+from Modeling_Tool.Core.utils import _WOE_PURE_BIN_EPS, _calc_woe_iv_values
 from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 def get_overall_woe_table(woe_master, data, varlist=None):
@@ -42,7 +42,8 @@ def get_overall_woe_table(woe_master, data, varlist=None):
       mapping table, and the rows are not guaranteed to be in bin order. The interval closure (``(a, b]`` or
       ``[a, b)``) is copied from the first non-missing ``BIN_RANGE`` of the training table.
     - ``LIFT`` is ``AVG_BAD`` divided by the unweighted mean of ``AVG_BAD`` over the bins, not by the overall bad
-      rate. A bin without bads (or without goods) gets an infinite WOE, because no smoothing is applied.
+      rate. A bin without bads (or without goods) gets a finite WOE: ``eps`` (1e-06) is added to its two shares, as in
+      ``MonotoneWOEBinner``, and the WOE of every other bin is not smoothed.
     """
     if varlist is None:
         varlist = woe_master.varlist
@@ -94,7 +95,7 @@ def get_overall_woe_table(woe_master, data, varlist=None):
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / stats["N_BAD"].sum()
         stats["GOOD_PCT_PER_BIN"] = stats["N_GOOD"] / stats["N_GOOD"].sum()
         stats["WOE"], stats["IV"] = _calc_woe_iv_values(
-            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
+            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN", pure_bin_eps=_WOE_PURE_BIN_EPS
         )
         stats["LIFT"] = stats["AVG_BAD"] / stats["AVG_BAD"].mean()
         stats["VAR"] = var
@@ -206,7 +207,7 @@ def get_group_woe_table(woe_master, data, group, varlist=None):
         stats["BAD_PCT_PER_BIN"] = stats["N_BAD"] / total_bad
         stats["GOOD_PCT_PER_BIN"] = stats["N_GOOD"] / total_good
         stats["WOE"], stats["IV"] = _calc_woe_iv_values(
-            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
+            stats, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN", pure_bin_eps=_WOE_PURE_BIN_EPS
         )
         stats["LIFT"] = stats["AVG_BAD"] / stats["AVG_BAD"].mean()
         stats["VAR"] = var
@@ -484,7 +485,8 @@ class WOE_Master(object):
         - ``woe_dict[var]`` is replaced for every variable of ``varlist``, and the tables of other variables are kept.
           Each table has the columns ``BIN_NUM``, ``BIN_RANGE``, ``MIN``, ``MAX``, ``N``, ``AVG_SCORE``, ``N_BAD``,
           ``N_GOOD``, ``AVG_BAD``, ``AVG_GOOD``, ``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN``, ``LIFT``, ``WOE``, ``IV`` and
-          ``VAR``. No smoothing is applied, so a bin without bads (or without goods) gets an infinite WOE.
+          ``VAR``. A bin without bads (or without goods) gets a finite WOE: ``eps`` (1e-06) is added to its two shares, as in
+          ``MonotoneWOEBinner``; the WOE of every other bin is not smoothed.
         - With the default ``include_missing=True`` and ``missing_ref_value``, ``chi2_config`` raises ``ValueError: Bin
           edges must be unique``. Pass ``include_missing=False``, or create the object with ``missing_ref_value=-999999``.
         """

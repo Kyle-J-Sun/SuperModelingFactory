@@ -15,7 +15,7 @@ from Modeling_Tool.Core.Binning_Tool import (
     super_binning,
 )
 from Modeling_Tool.Core.Slope_Tool import calculate_slope_manual
-from Modeling_Tool.Core.utils import _calc_woe_iv_values, calc_iv, calc_woe
+from Modeling_Tool.Core.utils import _WOE_PURE_BIN_EPS, _calc_woe_iv_values, calc_iv, calc_woe
 
 
 def _vectorized_lookup(values, mapping_keys, mapping_values):
@@ -473,7 +473,7 @@ class WOETransformer:
         woe_table["GOOD_PCT_PER_BIN"] = woe_table["N_GOOD"] / woe_table["N_GOOD"].sum()
         woe_table["LIFT"] = woe_table['AVG_BAD'] / woe_table['AVG_BAD'].mean()
         woe_table["WOE"], woe_table["IV"] = _calc_woe_iv_values(
-            woe_table, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN"
+            woe_table, "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN", pure_bin_eps=_WOE_PURE_BIN_EPS
         )
 
         woe_table = woe_table.reset_index(drop=False)

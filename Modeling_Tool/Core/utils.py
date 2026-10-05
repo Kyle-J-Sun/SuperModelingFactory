@@ -1875,8 +1875,17 @@ def parse_sql_file(sql_path:str=None,
 
 
 
-def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
-    """Calculate WOE and IV together with one vectorized logarithm."""
+# eps of the WOE of a bin that holds only goods or only bads; the default eps of ``MonotoneWOEBinner``
+_WOE_PURE_BIN_EPS = 1e-6
+
+
+def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True, pure_bin_eps=None):
+    """Calculate WOE and IV together with one vectorized logarithm.
+
+    A bin in which exactly one class has a share of 0 gets a WOE of +/-inf, unless ``pure_bin_eps`` is given: then the
+    WOE of such a bin is ``ln((bad_pct + eps) / (good_pct + eps))``, as in ``MonotoneWOEBinner``, and every other bin keeps
+    ``ln(bad_pct / good_pct)``. A bin without any rows (both shares 0) stays NaN.
+    """
     if len(data[bad_pct]) > 0 and len(data[good_pct]) > 0:
         bad_values = data[bad_pct]
         good_values = data[good_pct]
@@ -1884,6 +1893,9 @@ def _calc_woe_iv_values(data, bad_pct, good_pct, fillwoe=True, filliv=True):
         # handle it themselves), so do not warn about it
         with np.errstate(divide="ignore"):
             woe = np.log(bad_values / good_values)
+        if pure_bin_eps:
+            pure = (bad_values == 0) ^ (good_values == 0)
+            woe = woe.where(~pure, np.log((bad_values + pure_bin_eps) / (good_values + pure_bin_eps)))
         iv = (bad_values - good_values) * woe
     else:
         woe = 0 if fillwoe else np.nan
