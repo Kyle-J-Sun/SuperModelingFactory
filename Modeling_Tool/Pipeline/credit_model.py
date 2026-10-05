@@ -43,6 +43,285 @@ def _any_column_has_value(frame: pd.DataFrame, columns: list[str], value: Any) -
 
 @dataclass
 class CreditModelPipelineConfig:
+    """Configuration of :class:`CreditModelPipeline`.
+
+    Parameters
+    ----------
+    output_dir : str, default "output"
+        Root of all outputs: the CSV files, the ``figs`` charts (``var_analysis``, ``woe``, ``mono_woe``, ``perf``),
+        ``explain``, ``artifacts``, ``models`` (unless ``model_output_dir`` is set) and the Excel report. Directories are
+        created as needed when ``write_outputs``, ``write_excel`` or ``save_models`` is on.
+    target_col : str, default "badflag"
+        Binary target column (1 = bad). It must be a column of the input data.
+    feature_cols : list of str or None, default None
+        Raw model input features. ``None`` (or an empty list) infers them as the numeric columns of the input data except
+        ``target_col``, ``sample_col``, ``split_col``, ``oot_col`` and ``weight_col``. Other helper columns, such as
+        ``eval_target_cols``, ``warm_start_score_col`` or a separate ``eval_weight_col``, are not excluded, so list the
+        features explicitly when the data has such numeric columns. A listed column that is missing raises ``KeyError``.
+    split_col : str or None, default None
+        Column with the sample labels ``ins`` / ``oos`` / ``oot`` (case and surrounding spaces ignored; a row with a
+        missing label belongs to no split). When set it replaces ``sample_col``; it must exist (``KeyError``), may hold
+        only those labels and must contain non-empty INS and OOS samples (``ValueError``).
+    sample_col : str, default "sample_ind"
+        Legacy sample label column with the same labels, used when ``split_col`` is ``None``. If it is absent or has no
+        INS or no OOS rows, the pipeline silently falls back to ``oot_col`` and a random INS/OOS split.
+    oot_col : str or None, default "oot_flag"
+        OOT flag column, used only when the sample labels do not define INS and OOS: rows with a non-zero flag (missing
+        counts as 0) become OOT and the others are split randomly into INS and OOS (see ``split_config``). The column
+        must be convertible to numbers, otherwise ``TypeError`` is raised; an absent column is ignored.
+    weight_col : str or None, default None
+        Sample-weight column of the input data (finite, non-negative, with a positive sum; ``KeyError`` if missing). It
+        weights feature screening, LR and GBM training, the LR and Optuna searches, backward elimination and, through
+        ``eval_weight_col``, the evaluation. The WOE fit is unweighted. ``None`` runs unweighted.
+    random_state : int, default 42
+        Seed of the random INS/OOS split (unless ``split_config`` sets its own), the Optuna searches, the explanation
+        sampling and CatBoost training. The built-in LightGBM and XGBoost parameters fix ``random_state`` at 42, so this
+        value does not reach those two models unless ``model_params`` sets it.
+    write_outputs : bool, default True
+        Whether to write the CSV files and the explanation files into ``output_dir``, for the results that exist:
+        ``psi_result.csv``, ``iv_report.csv``, ``lr_pvalue_elimination.csv``, ``woe_table_ins.csv``,
+        ``backward_summary.csv``, ``lr_param_search.csv``, ``warm_start_summary.csv``, ``model_feature_sources.csv``,
+        ``model_paths.csv``, ``<model>_optuna_search.csv``, ``perf/perf_<model>.csv`` and ``explain/``. Charts also need
+        ``plot_outputs``.
+    write_excel : bool, default True
+        Whether to write ``SMF_Model_Report.xlsx`` into ``output_dir`` (its path is ``result.report_path``), with the
+        sheets Feature_Selection, WOE_Table, Backward, LR_Param_Search, Warm_Start, Model_Feature_Source, Model_Paths,
+        ``Perf_<MODEL>`` and the ``Explain_*`` sheets.
+    plot_outputs : bool, default True
+        Whether to draw the charts: the IV and WOE analysis plots of the screening (``figs/var_analysis``), the WOE bin
+        plots (``figs/woe`` or ``figs/mono_woe``), the performance figure of each model (``figs/perf/perf_<model>.png``)
+        and the SHAP summary (``explain/<model>/shap_summary.png``). They are written only when ``write_outputs`` is also
+        True.
+    save_models : bool, default False
+        Whether to save every trained model as ``model_<name>.pkl`` in the model directory and to record the paths in
+        ``result.model_paths`` and ``result.artifact_paths``. ``model_paths.csv`` is then written to ``output_dir`` even
+        when ``write_outputs`` is False. No ``models`` directory is created otherwise.
+    model_output_dir : str or None, default None
+        Directory of the saved models. ``None`` uses ``<output_dir>/models``.
+    model_include_metadata : bool, default True
+        ``True`` saves each model and the WOE engine inside the SMF artifact envelope together with metadata (pipeline,
+        target, features, split governance, scoring options); ``False`` saves the bare object. Used only with
+        ``save_models``.
+    save_woe_artifacts : bool, default True
+        With ``save_models``, also save the WOE table (``artifacts/woe_table.csv``) and the WOE engine
+        (``artifacts/woe_engine.pkl``) under ``output_dir`` so that the models can be reproduced. No effect without
+        ``save_models``.
+    split_config : dict, default {'test_size': 0.3, 'stratify': True}
+        Settings of the random INS/OOS split, which runs only when the sample labels do not define INS and OOS:
+        ``test_size`` (OOS share, default 0.3), ``stratify`` (stratify by the target, default True) and ``random_state``
+        (default: the ``random_state`` field). Other keys are ignored.
+    feature_selection : dict, default {'psi_enabled': True, 'psi_threshold': 0.2, 'psi_compare_splits': ['oos'], 'iv_enabled': True, 'iv_threshold': 0.02, 'corr_enabled': True, 'corr_threshold': 0.75, 'corr_max_iterations': 10}
+        Settings of the PSI, IV and correlation screening, keyed like the fields of ``FeatureScreenConfig``; they are read
+        by ``screen_config_from_mapping``, which supplies the defaults of missing keys (``iv_nbins`` is an alias of
+        ``iv_bins``). The WOE settings of the screening come from ``woe_engine``, ``woe_fit_query``, ``woe_params`` and
+        ``monotone_woe_params`` of this config, not from the dict. Any exception raised by the screening (for example an
+        invalid setting, or a G03 or G04 gate setting, which needs evidence that this pipeline does not provide) is
+        caught: it is recorded in ``feature_selection_summary['error']`` and every feature is kept.
+    woe_engine : str, default "equal_freq"
+        WOE binning engine: ``"monotone"`` (case-insensitive) uses ``MonotoneWOEBinner`` with ``monotone_woe_params``,
+        any other value uses ``WOE_Master`` with ``woe_params``. It is also the engine that the screening fits when
+        ``feature_selection`` sets a ``*_use_woe_bins`` flag.
+    woe_fit_query : str or None, default None
+        pandas ``query`` expression that selects the INS rows used to fit the WOE binning (and the screening engine);
+        the transform, training and evaluation still use all rows. It is checked when ``run`` starts: a referenced column
+        that is missing from the input data raises ``KeyError`` and an invalid expression raises ``ValueError``.
+    extra_eval_datasets : dict of str to pandas.DataFrame or None, default None
+        Evaluation-only frames ``{name: DataFrame}``. They are WOE-transformed with the fitted engine and evaluated like
+        the splits (their rows appear under ``name`` in each model's table of ``perf_results``), but take no part in
+        screening, WOE fit, training, backward elimination, Optuna or the explanations, and ``evaluation_splits`` does
+        not limit them. A name must not be ``ins``, ``oos`` or ``oot`` (``ValueError``); each frame must hold the
+        evaluation targets (``target_col`` and ``eval_target_cols``) and, with warm start, ``warm_start_score_col``
+        (``KeyError``).
+    woe_params : dict, default {'nbins': 10, 'equal_freq': True, 'min_bin_prop': 0.05, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0}
+        Parameters of the ``WOE_Master`` engine. The keys ``woe_suffix`` (default ``"_woe"``, which also names the WOE
+        features of the monotone engine) and ``missing_ref_value`` (default -999999) go to the ``WOE_Master``
+        constructor, all other keys to ``WOE_Master.fit``. The default dict holds ``nbins``, ``equal_freq`` and
+        ``min_bin_prop`` plus the four special-value bin settings ``sv_*``, which reproduce the behavior before 0.8.0. A
+        dict you pass replaces the default; omitted keys take the ``fit`` defaults.
+    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'normal_bin'}
+        Parameters of the ``MonotoneWOEBinner`` engine: its constructor keys, and the fit-only keys ``chi2_binning``
+        (default False), ``chi2_p``, ``chi2_init_size`` and ``n_jobs``, which are passed to ``fit``. Without a
+        ``special_values`` key, the sentinel -999999 is declared only when it occurs in the fit sample. A dict you pass
+        replaces the default.
+    train_models : list of str, default ['lr', 'lgb', 'xgb', 'cat']
+        Models to train, any of ``"lr"`` (``LRMaster``) and ``"lgb"``, ``"xgb"``, ``"cat"`` (``GradientBoostingModel``),
+        case-insensitive; another name raises ``ValueError`` when training starts. INS is the training set and OOS the
+        validation set.
+    model_params : dict of str to dict, default {}
+        Per-model parameter overrides ``{model_name: {parameter: value}}``, merged over the built-in defaults of that
+        model (for example ``n_estimators=300`` and ``learning_rate=0.05`` for ``lgb``). For ``lr`` the key
+        ``standardize`` (bool, default False) is passed to ``LRMaster`` and the other keys are its sklearn parameters.
+    gbm_feature_source : str or dict of str to str, default "woe"
+        Input features of the GBM models: ``"woe"`` (WOE-encoded) or ``"raw"``, for all three models, or a dict keyed by
+        ``lgb``, ``xgb`` and ``cat`` (a missing key means ``"woe"``). LR always uses the WOE features. Other keys or
+        values raise ``ValueError`` when the pipeline is created.
+    lr_search_enabled : bool, default False
+        Whether to run a hyper-parameter grid search for the LR model (``LRMaster.grid_search_params``) before training.
+        It needs ``"lr"`` in ``train_models``; the table is returned as ``result.lr_search_results``.
+    lr_search_param_grid : dict of str to list, default {'C': [0.01, 0.1, 1.0, 10.0]}
+        Parameter grid of the LR search, searched as a Cartesian product.
+    lr_search_params : dict, default {}
+        Overrides of the LR search settings. The allowed keys are ``objective``, ``primary_set``, ``gap_ref_sets``,
+        ``metric``, ``refit`` and ``verbose``; any other key raises ``ValueError`` (the search is a holdout search and
+        does not accept ``cv``). The defaults are ``objective="oot_gap_penalized"``, ``primary_set="oos"`` and
+        ``gap_ref_sets=["oot"]`` when OOT is among ``search_eval_splits``, otherwise
+        ``objective=search_objective_when_no_oot`` with ``primary_set="oos"`` and no gap reference, and
+        ``metric="auc"``.
+    use_lr_search_params : bool, default True
+        Whether the best parameters of the LR search are merged over ``model_params["lr"]`` for the final LR model. No
+        effect without the search.
+    lr_elimination_mode : str or None, default None
+        Backward elimination of the final LR model: ``None`` keeps every feature, ``"pvalue"`` refits the LR without its
+        feature of highest coefficient p-value until every p-value is at most ``pvalue_threshold`` (see
+        ``lr_elimination_params``). Any other value raises ``ValueError``. The dropped features are recorded in
+        ``feature_selection_summary["lr_elimination"]``; the model's final features are ``result.models["lr"][2]``, while
+        ``result.selected_features``, ``selected_woe_features`` and ``model_feature_sets`` still show the list from
+        before the elimination.
+    lr_elimination_params : dict, default {}
+        Settings of the p-value elimination: ``pvalue_threshold`` (default 0.05), ``min_features`` (default 1; the
+        elimination stops when this many features remain) and ``max_iterations`` (default 20). ``tie_breaker`` is
+        accepted but has no effect; any other key raises ``ValueError``.
+    warm_start_enabled : bool, default False
+        Whether to start the GBM models from a prior score (LightGBM ``init_score``, XGBoost base margin), in training
+        and in evaluation, so that a model's probability combines the prior score with its increment. It needs
+        ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only.
+    warm_start_score_col : str or None, default None
+        Column of the input data that holds the prior score. It is required when ``warm_start_enabled`` is on
+        (``ValueError``), must exist (``KeyError``) and must have no missing values in any evaluated frame. It is copied
+        by position onto the WOE-transformed splits, with a length check (``ValueError``).
+    warm_start_score_type : {"probability", "log_odds"}, default "probability"
+        ``"probability"`` scores are clipped to [1e-6, 1 - 1e-6] and converted to log-odds, ``"log_odds"`` scores are used
+        as the init score as they are. Any other value raises ``ValueError`` when warm start is enabled.
+    warm_start_models : list of str, default ['lgb', 'xgb']
+        GBM models that use the warm start, compared case-insensitively. ``"cat"`` is not supported (see
+        ``warm_start_on_unsupported``). Names that are not in ``train_models`` appear in ``warm_start_summary`` with the
+        status ``"not_in_train_models"``.
+    warm_start_on_unsupported : {"skip", "raise"}, default "skip"
+        What to do when ``"cat"`` is requested for warm start: ``"skip"`` trains it without the prior score and records
+        ``"skipped_unsupported"`` in ``warm_start_summary``, ``"raise"`` raises ``NotImplementedError``. Any other value
+        raises ``ValueError`` when warm start is enabled.
+    warm_start_apply_to_optuna : bool, default False
+        Whether to pass the prior score as ``init_score`` to the Optuna search of the warm-start models (``lgb`` and
+        ``xgb``).
+    backward_enabled : bool, default True
+        Whether to run backward variable elimination on the WOE features before the models are trained.
+    backward_model : str, default "lgb"
+        Proxy model of the backward elimination: ``"lgb"`` runs the LightGBM elimination and ``"xgb"`` the XGBoost one.
+        Any other value (``"lr"``, ``"cat"``, an upper-case ``"LGB"``) silently runs the XGBoost elimination as well.
+    backward_params : dict, default {}
+        ``{"init": {...}, "run": {...}}``: ``init`` overrides the arguments of ``BackwardVariableEliminator`` and ``run``
+        those of its ``run`` call (defaults ``n_rounds=3``, ``stopping_metric="auc"``, ``num_boost_round=200``,
+        ``early_stopping_rounds=20``, ``cum_importance_threshold=0.99``, ``min_vars=max(3, n_features // 2)`` and
+        ``ret_perf=True``). A split named in ``init["test_data_dict"]`` must not be forbidden. Any failure of the
+        backward stage is caught: ``backward_summary`` then holds a one-row frame with the columns ``step`` and ``error``
+        and all WOE features are kept.
+    use_backward_features : bool, default True
+        ``True`` trains the models on the features that survive the backward elimination (WOE names; a raw GBM gets them
+        mapped back to raw names), ``False`` on all screened features, so that the elimination only reports.
+    candidate_mode : bool, default False
+        ``True`` forbids any consumption of OOT in the candidate stage: ``"oot"`` is added to ``forbidden_splits`` and the
+        OOT frame is removed from the working splits. Explicit settings that request OOT
+        (``synthesize_missing_oot=True``, ``"oot"`` in ``evaluation_splits``, ``search_eval_splits`` or
+        ``backward_report_splits``, or ``backward_validation_split="oot"``) raise ``ValueError`` when the pipeline is
+        created.
+    synthesize_missing_oot : bool or None, default False
+        When the data has no real OOT rows: ``True`` copies the OOS rows in as a stand-in OOT (with a ``UserWarning``;
+        its metrics are OOS metrics), ``False`` or ``None`` leaves OOT out, so the evaluation runs on INS and OOS only.
+    evaluation_splits : list of str or None, default None
+        Splits that the performance evaluation, the charts and the Excel report use. ``None`` means ``['ins', 'oos']``,
+        so a real OOT must be listed explicitly. Names are case-insensitive and must be ``ins``, ``oos`` or ``oot``
+        (``ValueError``); a listed split that does not exist in the run is silently skipped. ``extra_eval_datasets``
+        are not limited by it.
+    forbidden_splits : list of str, default []
+        Splits that no stage may consume, such as ``['oot']``. They are removed from the working splits. A split list that
+        names one raises ``ValueError`` when the pipeline is created; one named in the nested ``optuna_params`` or
+        ``backward_params`` settings is rejected when that stage runs (in the backward stage the error is caught and
+        shown in ``backward_summary``).
+    search_eval_splits : list of str or None, default None
+        Splits that the LR search and the Optuna search evaluate on. ``None`` means ``['oos']``. An explicitly listed
+        split that is absent from the run raises ``ValueError``, whereas an absent split of the default is silently
+        dropped.
+    search_objective_when_no_oot : str, default "max_primary"
+        Objective of the LR and Optuna searches when ``oot`` is not among the search eval splits (with OOT it is
+        ``"oot_gap_penalized"``). ``"max_primary"`` maximizes the AUC on ``oos``; ``"oot_gap_penalized"`` needs a gap
+        reference split and therefore raises ``ValueError`` here.
+    backward_validation_split : str, default "oos"
+        Split used as the validation data of the backward elimination: ``"ins"``, ``"oos"`` or ``"oot"``.
+    backward_report_splits : list of str or None, default None
+        Splits on which the backward elimination reports performance after each round. ``None`` means none (``[]``), so
+        OOT is not read. An explicitly listed split that is absent from the run makes the backward stage fail (caught
+        and reported in ``backward_summary``).
+    optuna_models : list of str, default ['lgb', 'xgb', 'cat']
+        Models to tune with Optuna; ``[]`` turns the search off. Only trained models that have a search space run (see
+        ``optuna_params``). The search only reports: ``result.optuna_results`` holds its tables, and the models in
+        ``result.models`` are not retrained with the tuned parameters.
+    optuna_n_trials : int, default 5
+        Number of Optuna trials per model.
+    optuna_params : dict, default {}
+        Optuna settings: ``search_spaces`` (``{model: {parameter: space}}``, which replaces the built-in spaces, so a
+        model missing from it is skipped), ``common`` (overrides of the ``param_search`` arguments such as
+        ``objective``, ``primary_set``, ``gap_ref_sets``, ``metric``, ``refit`` and ``eval_sets``; named splits must
+        not be forbidden) and ``fit_kwargs`` (extra ``fit`` arguments). A search that fails is caught and its table holds
+        the single column ``error``.
+    explain_models : list of str, default ['lr', 'lgb', 'cat']
+        Trained models explained with SHAP: ``feature_importance`` and, with charts, ``shap_summary.png``. ``[]``
+        together with ``owen_enabled=False`` skips the explanations altogether.
+    explain_params : dict, default {'sample_n': 500, 'background_n': 200}
+        Explanation settings: ``sample_n`` (OOS rows sampled for the explanations, capped at the OOS size),
+        ``background_n`` (INS rows used as background, capped at the INS size) and the Owen options ``owen_threshold``
+        (0.35), ``owen_method`` (``"complete"``), ``owen_corr_method`` (``"spearman"``), ``owen_min_group_size`` (1),
+        ``owen_intra_dist`` (0.01), ``owen_inter_dist`` (0.99) and ``owen_model_output`` (``"probability"``). Omitted
+        keys take the values given here.
+    owen_enabled : bool, default True
+        Whether to compute Owen values (Shapley values over groups of related features) for every trained model except
+        ``xgb``. While it is True, the explanations run for all trained models, also those that are not in
+        ``explain_models`` (Owen values only).
+    business_prior_groups : dict of str to list of str or None, default None
+        Business groups ``{group: [feature, ...]}`` for the Owen coalition structure, named like the model's input
+        features (for example ``income_woe``). Features that the model does not use are dropped from the groups, and the
+        remaining features are clustered automatically. ``None`` uses a built-in example grouping that only matches
+        features with those exact names.
+    perf_pct_bins : int, default 10
+        Number of percentile bins of the performance evaluation.
+    perf_min_bin_prop : float, default 0.03
+        Minimum bin share of the performance evaluation bins.
+    eval_target_cols : list of str or None, default None
+        Extra label columns evaluated against the same model scores in addition to ``target_col`` (duplicates removed;
+        the results are stacked with a ``tgt_name`` column). They must exist in the input data and in every
+        ``extra_eval_datasets`` frame, are not used for training, and are not excluded from inferred ``feature_cols``.
+    all_missing_score_value : float or None, default None
+        Score given in the evaluation to rows whose raw model features are all missing (for example -1), the rule of the
+        scoring API; ``None`` applies no override. It is stored in the saved model metadata. The raw features must be
+        present in every evaluated frame (``KeyError`` otherwise).
+    special_score_values : list of float or None, default None
+        Sentinel scores (for example ``[-1]``) that get their own evaluation bin and are left out of the quantile edges
+        and the ranking metrics.
+    gains_ascending : bool or None, default True
+        Score direction of the evaluation summary, the gains tables and the figures: ``True`` ascending (bin 1 holds the
+        lowest scores, the lowest risk), ``False`` descending, ``None`` keeps the historical direction of each code path.
+    eval_weight_col : str or None, default "inherit"
+        Weight column of the evaluation, of the validation weights of the backward elimination and of the LR and Optuna
+        searches. ``"inherit"`` reuses ``weight_col``, ``None`` evaluates unweighted even when the training is weighted,
+        and any other string names a separate column that must exist in the input data (``KeyError``).
+    screening_artifact : FeatureScreeningArtifact or None, default None
+        Output of ``FeatureValidationPipeline``. When given, the pipeline does not screen itself: it uses the artifact's
+        selected features (all ``feature_cols`` if it selected none) after ``validate_for_cm`` has checked
+        ``target_col`` and ``weight_col``, and reuses its fitted WOE engine when ``reuse_screening_woe`` is True. It
+        forces ``feature_selection_mode`` to ``"from_artifact"``.
+    feature_validation_result : FeatureValidationPipelineResult or None, default None
+        Convenience field: the result of ``FeatureValidationPipeline``, converted internally to a
+        ``FeatureScreeningArtifact`` with this config's ``target_col`` and ``weight_col``. Ignored when
+        ``screening_artifact`` is given.
+    feature_selection_mode : {"run", "from_artifact", "skip"}, default "run"
+        ``"run"`` screens with ``feature_selection``, ``"from_artifact"`` takes the selection from the artifact
+        (``ValueError`` without one) and ``"skip"`` keeps all ``feature_cols``. Whenever an artifact is available the mode
+        becomes ``"from_artifact"``, and any other value behaves like ``"run"``.
+    reuse_screening_woe : bool, default True
+        With an artifact, reuse the WOE engine it carries for the target instead of fitting again, provided it covers
+        at least one selected feature (features it did not fit are left out); otherwise the engine is fitted as usual. No
+        effect without an artifact.
+    """
+
     output_dir: str = "output"
     target_col: str = "badflag"
     feature_cols: list[str] | None = None
@@ -193,6 +472,74 @@ class CreditModelPipelineConfig:
 
 @dataclass
 class CreditModelPipelineResult:
+    """Result returned by :meth:`CreditModelPipeline.run`.
+
+    Parameters
+    ----------
+    splits : dict of str to pandas.DataFrame
+        The raw (not WOE-transformed) working splits: ``"ins"`` and ``"oos"``, plus ``"oot"`` when the data has a real OOT
+        (or one was synthesized with ``synthesize_missing_oot=True``) and it is not forbidden.
+    feature_selection_summary : dict
+        Outcome of the feature selection: ``initial_features`` and ``final_features``; the tables ``psi``, ``iv`` and
+        ``corr_dropped`` (when they exist), ``corr_features`` and ``screen_summary``; ``error`` when the screening failed
+        (all features were then kept); ``skipped`` or ``from_artifact`` and ``artifact_source`` for those modes; and
+        ``lr_elimination`` (the dropped-feature trace) when the LR p-value elimination ran.
+    woe_artifacts : dict
+        The WOE step: ``engine`` (a ``WOE_Master`` or an adapter of the monotone binner), ``engine_name``, ``features``,
+        ``woe_features``, ``woe_suffix``, ``splits`` (the WOE-transformed frames by split name), ``extra_eval`` (the
+        transformed ``extra_eval_datasets``), ``woe_table`` and, when the screening engine was reused,
+        ``reused_from_screening``.
+    models : dict of str to tuple
+        ``{model_name: (wrapper, raw_model, feature_cols)}`` for the trained models. ``feature_cols`` is the final feature
+        list of that model, after the LR p-value elimination for ``lr``.
+    selected_features : list of str
+        The WOE features chosen before the models were trained (after the backward elimination when
+        ``use_backward_features`` is on); the same as ``selected_woe_features``. The LR p-value elimination is not
+        reflected here.
+    backward_summary : pandas.DataFrame or None, default None
+        Summary of the backward elimination; a one-row frame with the columns ``step`` and ``error`` when that stage
+        failed. ``None`` when ``backward_enabled`` is off.
+    optuna_results : dict of str to pandas.DataFrame, default {}
+        Optuna search table per model; a single-column ``error`` frame for a search that failed. These searches do not
+        change the trained models.
+    perf_results : dict of str to pandas.DataFrame, default {}
+        Performance summary table per model (``PerformanceEvaluator.evaluate``), with the metrics of every evaluated
+        dataset: the splits listed in ``evaluation_splits`` and the ``extra_eval_datasets``.
+    explain_outputs : dict, default {}
+        Explanation outputs per model: ``feature_importance`` (DataFrame), ``shap_summary`` (chart path), ``plot_error``,
+        ``owen`` (``feature_importance`` and ``group_importance`` frames, or ``error``) or ``error``; a top-level
+        ``import_error`` entry when the explainer could not be imported.
+    explain_paths : dict of str to dict of str to str, default {}
+        Index of the files written under ``explain/`` per model (importance tables, SHAP chart, error files), with the
+        manifest under the key ``_manifest``; empty when ``write_outputs`` is off.
+    report_path : str or None, default None
+        Path of the Excel report. ``None`` when ``write_excel`` is off.
+    lr_search_results : pandas.DataFrame or None, default None
+        Table of the LR grid search. ``None`` when the search did not run.
+    warm_start_summary : pandas.DataFrame or None, default None
+        One row per requested warm-start model (``model``, ``status``, ``score_col``, ``score_type``,
+        ``missing_rate_ins``, ``apply_to_optuna``, ``n_features``). ``None`` when ``warm_start_enabled`` is off.
+    model_feature_sources : dict of str to str, default {}
+        ``{model_name: "woe" or "raw"}``: the kind of features each model was given.
+    model_feature_sets : dict of str to list of str, default {}
+        The features each model was given for training, evaluation and explanation; the LR p-value elimination is not
+        reflected here (see ``models``).
+    selected_raw_features : list of str, default []
+        The final feature set under the raw column names (what a raw GBM uses).
+    selected_woe_features : list of str, default []
+        The final feature set under the WOE column names (what LR and WOE-based GBMs use).
+    model_paths : dict of str to str, default {}
+        ``{model_name: path}`` of the saved model files; empty unless ``save_models`` is on.
+    artifact_paths : dict of str to str, default {}
+        Paths of the saved ``woe_table`` and ``woe_engine``; empty unless ``save_models`` and ``save_woe_artifacts`` are
+        on.
+    split_governance : dict, default {}
+        The effective OOT-governance settings of the run: ``candidate_mode``, ``synthesize_missing_oot``,
+        ``evaluation_splits``, ``forbidden_splits``, ``search_eval_splits``, ``search_eval_splits_explicit``,
+        ``backward_validation_split``, ``backward_report_splits``, ``backward_report_splits_explicit``,
+        ``oot_synthesized`` and ``oot_withheld``.
+    """
+
     splits: dict[str, pd.DataFrame]
     feature_selection_summary: dict[str, Any]
     woe_artifacts: dict[str, Any]
@@ -216,7 +563,30 @@ class CreditModelPipelineResult:
 
 
 class CreditModelPipeline:
-    """Reusable credit modeling workflow: split, feature selection, WOE, models, evaluation."""
+    """Reusable credit modeling workflow: split, feature selection, WOE, models, evaluation.
+
+    Parameters
+    ----------
+    config : CreditModelPipelineConfig or None, default None
+        Pipeline settings. ``None`` uses ``CreditModelPipelineConfig()``. The object is stored as ``config`` and is not
+        modified. Creating the pipeline raises ``ValueError`` for an invalid ``gbm_feature_source`` and for contradictory
+        or unknown OOT-governance settings (``candidate_mode``, ``forbidden_splits`` and the split lists).
+
+    Attributes
+    ----------
+    config : CreditModelPipelineConfig
+        The settings in use.
+    predict_positive_nan_stats : dict of str to dict of str to int
+        Filled by ``run`` during the evaluation: for each model, the number of NaN or infinite predictions in each
+        evaluated dataset.
+
+    Notes
+    -----
+    Several stages catch their own failures instead of stopping the run, and record the error in the result: the
+    feature selection (``feature_selection_summary["error"]``, every feature is kept), the backward elimination
+    (``backward_summary`` with the columns ``step`` and ``error``), each Optuna search (a table with the column
+    ``error``) and the explanations (an ``error`` entry per model).
+    """
 
     _DEFAULT_MODEL_PARAMS = {
         "lgb": {
@@ -269,6 +639,44 @@ class CreditModelPipeline:
         self._governance = self._resolve_split_governance()
 
     def run(self, data: pd.DataFrame) -> CreditModelPipelineResult:
+        """Run the whole workflow on one dataset and return everything it produced.
+
+        The steps are the INS/OOS/OOT split, the feature screening, the WOE fit and transform, the backward
+        elimination, the LR search, the model training, the Optuna search, the evaluation, the explanations, the model
+        saving, the CSV output and the Excel report; the settings of ``CreditModelPipelineConfig`` switch them on or off.
+
+        Parameters
+        ----------
+        data : pandas.DataFrame
+            Modeling data with ``target_col``, the feature columns (``feature_cols``, or every numeric column when it is
+            ``None``) and, when configured, the split, OOT flag, weight, warm-start score and evaluation columns. It is
+            not modified.
+
+        Returns
+        -------
+        CreditModelPipelineResult
+            The splits, the feature selection summary, the WOE artifacts, the trained models, the selected features and
+            the optional search, performance, explanation and path outputs.
+
+        Raises
+        ------
+        KeyError
+            If a required column is missing from ``data``: the target, a feature, the weight or evaluation-weight column,
+            the split column, the warm-start score, an evaluation target, or a column used by ``woe_fit_query``.
+        ValueError
+            If the data or the settings are invalid: weights, sample labels, ``woe_fit_query``, ``lr_elimination_mode``,
+            the keys of ``lr_search_params`` or ``lr_elimination_params``, unsupported model names, an unusable search
+            or evaluation split, or a request for a forbidden split.
+        TypeError
+            If ``oot_col`` is used for the split and is not numeric.
+        NotImplementedError
+            If ``"cat"`` is requested for warm start and ``warm_start_on_unsupported`` is ``"raise"``.
+
+        Notes
+        -----
+        The failures that the feature selection, the backward elimination, each Optuna search and the explanations catch
+        are not raised; they are recorded in the result (see the class notes).
+        """
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
         self._validate_input(data, feature_cols)

@@ -62,6 +62,179 @@ _MONOTONE_FIT_KEYS = frozenset({"chi2_binning", "chi2_p", "chi2_init_size", "n_j
 
 @dataclass
 class FeatureScreenConfig:
+    """Settings of :func:`feature_screen`: the missing-rate, PSI, IV and correlation stages and the optional gates.
+
+    The stages run in the order missing rate, PSI, IV, correlation, then the post-selection gates (VIF, group stability,
+    multi-target, truncation). A stage whose threshold is ``None`` or whose switch is off is skipped, and every gate is
+    off by default. ``CreditModelPipeline`` builds this object from its ``feature_selection`` dict with
+    :func:`screen_config_from_mapping`.
+
+    Parameters
+    ----------
+    psi_enabled : bool, default True
+        Whether to run the PSI stage, which compares INS with the splits in ``psi_compare_splits``.
+    psi_threshold : float, default 0.2
+        A feature is kept when its largest PSI over the compared splits is strictly below this value.
+    psi_compare_splits : list of str, default ['oos']
+        Splits compared with ``"ins"``: ``"oos"``, ``"oot"`` or both. A listed split that has no rows is skipped.
+    psi_buckets : int, default 10
+        Number of equal-frequency buckets of the default PSI binning. Only unweighted runs that do not bin PSI on WOE
+        bins read it; a weighted run without WOE bins takes its PSI bins from ``iv_bins`` and ``min_bin_prop``.
+    psi_use_woe_bins : bool, default False
+        Compute PSI on the bins of the screening WOE engine (``prefit_woe_engine``, or one fitted from ``woe_engine``)
+        instead of the default binning. A weighted run that has an engine always bins PSI with it.
+    iv_enabled : bool, default True
+        Whether to run the IV stage.
+    iv_threshold : float, default 0.02
+        Lower IV limit: a feature is kept when its IV is at least this value.
+    iv_upper_threshold : float or None, default None
+        Upper IV limit (gate G02, a leakage guard): features whose IV is above it are dropped and recorded in
+        ``dropped_detail`` with the reason ``"iv_above_upper"``. The test uses an IV whose zero-count cells are floored
+        at ``content`` where that can be computed, so that near-perfect separators are caught, while ``iv_table`` keeps
+        the regular IV. ``None`` disables the limit.
+    iv_bins : int, default 10
+        Maximum number of bins of the default IV binning: decision-tree leaves on unweighted runs, weighted
+        equal-frequency bins on weighted runs (which also derive their PSI bins from it).
+    iv_min_bin_prop : float, default 0.05
+        Minimum share of rows per bin in the default IV binning of unweighted runs. Weighted runs read ``min_bin_prop``
+        instead.
+    iv_equal_freq : bool, default True
+        Passed as ``equal_freq`` to the IV binning of unweighted runs. That binning uses decision-tree bins, which take
+        precedence, so the flag currently changes nothing; weighted runs ignore it and always use weighted
+        equal-frequency bins.
+    iv_use_woe_bins : bool, default False
+        Compute IV on the bins of the screening WOE engine instead of the default binning. A weighted run that has an
+        engine always bins IV with it.
+    corr_enabled : bool, default True
+        Whether to run the correlation stage.
+    corr_threshold : float, default 0.75
+        Two features are redundant when the absolute value of their correlation is above this value; of such a group
+        the feature with the higher IV is kept.
+    corr_max_iterations : int, default 10
+        Maximum number of filtering rounds of the correlation stage.
+    corr_use_woe_bins : bool, default False
+        Let the screening WOE engine take part in the correlation stage: non-numeric features are WOE-encoded so that
+        they enter the correlation matrix (otherwise they are skipped with a warning and kept), and on unweighted runs
+        the engine's bins also give the IV that decides between two correlated features.
+    corr_nan_policy : {"pairwise", "median_fill", "raise"}, default "pairwise"
+        Missing values in the weighted correlation matrix: ``"pairwise"`` correlates each pair on the rows where both
+        values exist, ``"median_fill"`` fills them with the weighted median and ``"raise"`` raises ``ValueError``.
+        Weighted runs only; unweighted runs, and weighted runs with constant weights and ``"pairwise"``, use
+        ``CorrelationFilter``.
+    corr_block_size : int, default 256
+        Number of feature columns per block of the weighted pairwise correlation matrix. A smaller value lowers peak
+        memory without changing the result; it must be positive. Weighted runs only.
+    on_empty_stage : {"keep_all_warn", "raise"}, default "keep_all_warn"
+        What to do when a stage would drop every feature: ``"keep_all_warn"`` keeps all of them, adds a
+        ``<stage>_fallback`` row to the summary and warns; ``"raise"`` raises ``ValueError``.
+    missing_rate_threshold : float or None, default None
+        Maximum missing rate on INS: features with a higher missing rate are dropped before the PSI stage. ``None``
+        skips the stage, and ``missing_rate_table`` and ``missing_rate_dropped`` then stay empty.
+    missing_rate_ref : float or int, default -999999
+        Value that counts as missing in addition to ``NaN`` when the missing rate is computed.
+    woe_engine : str, default "equal_freq"
+        Engine fitted when a ``*_use_woe_bins`` flag is set and no ``prefit_woe_engine`` is given: ``"monotone"``
+        (case-insensitive) fits a ``MonotoneWOEBinner``, any other value fits a ``WOE_Master``.
+    woe_fit_query : str or None, default None
+        ``DataFrame.query`` expression that selects the INS rows used to fit the screening engine. A query that fails is
+        silently ignored and all INS rows are used.
+    woe_params : dict, default {'nbins': 10, 'equal_freq': True, 'min_bin_prop': 0.05}
+        Keyword arguments of ``WOE_Master.fit`` for the ``WOE_Master`` engine; the keys ``woe_suffix`` and
+        ``missing_ref_value`` go to the ``WOE_Master`` constructor instead. The monotone engine ignores it.
+    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2}
+        Arguments of the ``MonotoneWOEBinner`` engine: its tuning keys (for example ``n_init_bins``, ``min_bin_size``,
+        ``min_n_bins``, ``special_values``; the columns are supplied by the screen) plus the fit keys ``chi2_binning``,
+        ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Any other key is silently dropped. The ``WOE_Master`` engine
+        ignores it.
+    categorical_features : list of str or None, default None
+        Features that a self-fitted monotone engine treats as categorical (only names among the screened features
+        count). The ``WOE_Master`` engine ignores it.
+    plot_path : str or None, default None
+        Directory for the IV-stage charts. Charts are written to ``<plot_path>/overall`` only when ``plot_outputs`` is
+        also True, and only by unweighted runs.
+    plot_outputs : bool, default False
+        Whether to draw the WOE charts of the features that enter the IV stage (needs ``plot_path``; unweighted runs
+        only).
+    content : float, default 1e-6
+        Floor for bin shares that avoids division by zero and ``log(0)``: in the weighted PSI and in the zero-cell-floored
+        IV behind ``iv_upper_threshold``.
+    precision : int, default 5
+        Number of decimals to which the weighted equal-frequency bin edges are rounded. Read only by weighted runs
+        that do not use WOE bins.
+    min_bin_prop : float, default 0.05
+        Minimum bin share of the weighted equal-frequency bins: it caps their number at ``int(1 / min_bin_prop)``. Read
+        only by weighted runs that do not use WOE bins; unweighted IV reads ``iv_min_bin_prop``.
+    monthly_iv_min : float or None, default None
+        Gate G03 (group stability): minimum IV that a feature must reach in every group of the evidence (for example
+        every month); a feature whose lowest group IV is below it is dropped. Needs ``selection_evidence``. ``None``
+        switches the check off.
+    monthly_iv_cv_max : float or None, default None
+        G03: maximum coefficient of variation (population standard deviation divided by the mean) of a feature's group
+        IVs; features above it are dropped, and a zero mean IV counts as an infinite coefficient. Needs
+        ``selection_evidence``.
+    direction_consistency_min : float or None, default None
+        G03: minimum share of a feature's groups (those with a non-zero direction) whose direction, the sign of the
+        association with the target, equals the most common one. Needs ``selection_evidence``.
+    min_group_n : int or None, default None
+        G03: minimum number of rows for a group to count. ``None`` (or 0) uses the default of the evidence. A feature
+        with fewer than two eligible groups is handled by ``insufficient_group_policy``.
+    insufficient_group_policy : {"keep_warn", "drop", "raise"}, default "keep_warn"
+        G03: what to do with a feature that has fewer than two eligible groups: keep it with a warning, drop it, or
+        raise ``ValueError``.
+    target_rules : {"all", "any", "min_pass_count"} or None, default None
+        Gate G04 (multi-target): a feature must pass its per-target IV range and direction check on all targets, on any
+        target, or on at least ``min_pass_count`` targets. Needs ``selection_evidence``. ``None`` switches the gate off;
+        any other value raises ``ValueError``.
+    min_pass_count : int or None, default None
+        G04: number of targets a feature must pass when ``target_rules="min_pass_count"``; ``None`` counts as 1.
+    per_target_iv_range : tuple or dict or None, default None
+        G04: allowed IV range ``(low, high)`` for every target, or ``{target: (low, high)}`` per target; a ``None`` bound
+        is open and a target missing from the dict is not range-checked. ``None`` applies no IV range.
+    direction_reference_target : str or None, default None
+        G04: target whose direction the other targets must not contradict; a target with a different non-zero direction
+        for a feature counts as failed for that feature.
+    max_selected_features : int or None, default None
+        Gate G05 (truncation): keep at most this many features, ranked by ``ranking_metric`` (highest first). It runs
+        after every other gate, never backfills, and records the cut features in ``dropped_detail`` with the reason
+        ``"max_selected_features"``. ``None`` sets no cap.
+    min_selected_features : int or None, default None
+        G05: when fewer features survive the gates, only a warning and a ``truncation_fallback`` row in the summary are
+        produced; nothing is added back.
+    ranking_metric : str, default "iv"
+        G05: metric that ranks the features for truncation. Only ``"iv"`` exists; any other value raises ``ValueError``
+        when the cap actually cuts features.
+    tie_breaker : str, default "name"
+        G05: intended tie-breaker for equal ranking values. Ties are always broken by ascending feature name, whatever the
+        value.
+    vif_enabled : bool, default False
+        Gate G06: after the correlation stage, repeatedly drop the feature with the highest VIF until no VIF is above
+        ``vif_threshold`` or only ``vif_min_features`` features remain. Needs the optional ``statsmodels`` package
+        (``ImportError`` otherwise).
+    vif_threshold : float, default 10.0
+        G06: the feature with the highest VIF is dropped while that VIF is above this value; an infinite VIF is always
+        dropped.
+    vif_min_features : int, default 2
+        G06: the gate stops dropping when this many features are left, and is skipped (summary note
+        ``"skipped_at_floor"``) when it starts with this many or fewer.
+    vif_tie_break_metric : str, default "iv"
+        G06: metric that decides among features with an equal VIF; the one with the lower value is dropped first. Only
+        ``"iv"`` is supported, any other value raises ``ValueError`` when the gate is enabled.
+    vif_use_woe_bins : bool, default False
+        G06: ``False`` computes the VIF on the raw numeric columns (non-numeric survivors stay out of the VIF matrix,
+        are kept in the selection and are reported with a warning). ``True`` computes it on the WOE-encoded INS view, so
+        categorical features take part; this needs a screening WOE engine (fitted when none is given), and when the
+        screen fits that engine, ``categorical_features`` additionally requires ``woe_engine="monotone"`` (``ValueError``
+        otherwise).
+
+    Notes
+    -----
+    The G03 and G04 settings (``monthly_iv_min``, ``monthly_iv_cv_max``, ``direction_consistency_min``,
+    ``target_rules``) need group or per-target evidence that only ``FeatureValidationPipeline`` builds. Setting any of
+    them where no ``selection_evidence`` is passed (``feature_screen`` without it, or ``feature_screen_from_dataframe``,
+    which has no such argument) raises ``ValueError``; inside ``CreditModelPipeline`` the error is caught and the whole
+    screening is skipped (see its ``feature_selection`` setting).
+    """
+
     psi_enabled: bool = True
     psi_threshold: float = 0.2
     psi_compare_splits: list[str] = field(default_factory=lambda: ["oos"])
@@ -136,7 +309,37 @@ def screen_config_from_mapping(
     plot_path: str | None = None,
     plot_outputs: bool = False,
 ) -> FeatureScreenConfig:
-    """Build ``FeatureScreenConfig`` from a CM-style ``feature_selection`` dict."""
+    """Build ``FeatureScreenConfig`` from a CM-style ``feature_selection`` dict.
+
+    Parameters
+    ----------
+    mapping : Mapping[str, Any] or None
+        ``feature_selection`` settings keyed by the field names of ``FeatureScreenConfig``. ``None`` is treated as an
+        empty mapping. Missing keys take the config defaults (``psi_buckets`` defaults to ``iv_bins``, and
+        ``min_bin_prop`` to ``iv_min_bin_prop``), unknown keys are ignored, and each value is cast with ``bool``,
+        ``int``, ``float``, ``str`` or ``list`` as its field requires. ``iv_nbins`` is accepted as an alias of
+        ``iv_bins`` and wins when both are given. ``plot_path`` and ``plot_outputs`` are never read from it.
+    woe_engine : str or None, default None
+        Value of ``woe_engine``. ``None`` (or an empty string) falls back to ``mapping["woe_engine"]`` and then to
+        ``"equal_freq"``.
+    woe_fit_query : str or None, default None
+        Value of ``woe_fit_query``. ``None`` falls back to ``mapping["woe_fit_query"]``.
+    woe_params : Mapping[str, Any] or None, default None
+        Overrides of ``woe_params``, merged key by key over the config default. ``None`` or an empty mapping falls back
+        to ``mapping["woe_params"]``.
+    monotone_woe_params : Mapping[str, Any] or None, default None
+        Overrides of ``monotone_woe_params``, merged key by key over the config default. ``None`` or an empty mapping
+        falls back to ``mapping["monotone_woe_params"]``.
+    plot_path : str or None, default None
+        Value of ``plot_path``.
+    plot_outputs : bool, default False
+        Value of ``plot_outputs``.
+
+    Returns
+    -------
+    FeatureScreenConfig
+        The configuration; its values are not validated here.
+    """
     cfg = dict(mapping or {})
     iv_nbins = int(cfg.get("iv_nbins", cfg.get("iv_bins", 10)))
     return FeatureScreenConfig(
@@ -207,7 +410,38 @@ def fit_screening_woe_engine(
     monotone_woe_params: Mapping[str, Any] | None = None,
     categorical_features: list[str] | None = None,
 ) -> Any:
-    """Fit a WOE engine on INS for screening steps that reuse bin boundaries."""
+    """Fit a WOE engine on INS for screening steps that reuse bin boundaries.
+
+    Parameters
+    ----------
+    train : pandas.DataFrame
+        INS frame to fit on. It is not modified (a copy is fitted).
+    features : list of str
+        Features to bin.
+    target_col : str
+        Binary target column (1 = bad).
+    woe_engine : str, default "monotone"
+        ``"monotone"`` (case-insensitive) fits a ``MonotoneWOEBinner``; any other value fits a ``WOE_Master``.
+    woe_fit_query : str or None, default None
+        ``DataFrame.query`` expression that selects the rows of ``train`` used for the fit. A query that fails is
+        silently ignored and all rows are used.
+    woe_params : Mapping[str, Any] or None, default None
+        Keyword arguments of ``WOE_Master.fit`` (``WOE_Master`` engine only); the keys ``woe_suffix`` and
+        ``missing_ref_value`` are passed to the ``WOE_Master`` constructor instead. ``None`` uses the ``fit`` defaults.
+    monotone_woe_params : Mapping[str, Any] or None, default None
+        Arguments of the monotone engine (monotone only): the tuning keys of the ``MonotoneWOEBinner`` constructor (for
+        example ``n_init_bins``, ``min_bin_size``, ``min_n_bins``, ``special_values``; the columns are supplied by this
+        function) and the ``fit`` keys ``chi2_binning``, ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Any other key is
+        silently dropped.
+    categorical_features : list of str or None, default None
+        Names among ``features`` that the monotone engine fits as categorical; the other features are fitted as numeric.
+        The ``WOE_Master`` engine ignores it.
+
+    Returns
+    -------
+    MonotoneWOEBinner or WOE_Master
+        The fitted engine, ready to be passed to ``feature_screen`` as ``prefit_woe_engine``.
+    """
     from Modeling_Tool.Pipeline._common import apply_woe_fit_query
 
     fit_ins, _ = apply_woe_fit_query(train, woe_fit_query, target=target_col)
@@ -795,7 +1029,59 @@ def feature_screen(
     prefit_woe_engine: Any | None = None,
     selection_evidence: Any | None = None,
 ) -> FeatureScreenResult:
-    """Run PSI -> IV -> correlation screening on pre-split INS/OOS/OOT frames."""
+    """Run PSI -> IV -> correlation screening on pre-split INS/OOS/OOT frames.
+
+    The stages run in the order missing rate, PSI, IV, correlation and then the optional gates (VIF, group stability,
+    multi-target, truncation); a stage that is not configured is skipped. Bins and IV always come from ``splits["ins"]``.
+
+    Parameters
+    ----------
+    splits : dict of str to pandas.DataFrame
+        Frames keyed ``"ins"``, ``"oos"`` and ``"oot"``. All three keys are required: pass an empty frame for a split
+        you do not have (``df.iloc[0:0]``), because a missing key raises ``KeyError``.
+    feature_cols : list of str
+        Candidate features, columns of the INS frame.
+    target_col : str
+        Binary target column (1 = bad), present in the INS frame.
+    weight_col : str or None, default None
+        Sample-weight column, present in the INS frame and in each compared OOS or OOT frame (finite, non-negative, with
+        a positive sum; ``ValueError`` or ``KeyError`` otherwise). ``None`` runs the unweighted screen.
+    config : FeatureScreenConfig or None, default None
+        Screening settings. ``None`` uses ``FeatureScreenConfig()``.
+    prefit_woe_engine : WOE_Master, MonotoneWOEBinner or WOEEngineAdapter or None, default None
+        A fitted WOE engine. On an unweighted run each stage uses it only when its ``*_use_woe_bins`` flag is set, and
+        without any flag it is merely recorded on the result (a monotone binner or adapter as ``woe_engine``; a
+        ``WOE_Master`` is never attached, only its ``woe_table`` in ``woe_engine_meta``). A weighted run that has an
+        engine always bins PSI and IV with it. ``None`` fits an engine only when a ``*_use_woe_bins`` flag needs one.
+    selection_evidence : SelectionEvidence or None, default None
+        Evidence for the group-stability (G03) and multi-target (G04) gates. Only ``FeatureValidationPipeline`` builds
+        it; without it, setting a G03 or G04 threshold raises ``ValueError``.
+
+    Returns
+    -------
+    FeatureScreenResult
+        The surviving features (``selected_features``) with the stage tables and the audit trail; ``FeatureScreenResult``
+        is the same class as ``WeightedScreenResult``.
+
+    Raises
+    ------
+    KeyError
+        If ``splits`` lacks one of the three keys, or a frame that needs the weights lacks ``weight_col``.
+    ValueError
+        If the weights are invalid, if ``on_empty_stage="raise"`` and a stage would drop every feature, if a G03 or G04
+        threshold is set without ``selection_evidence``, or if a gate setting is invalid (``target_rules``,
+        ``ranking_metric``, ``vif_tie_break_metric``).
+    ImportError
+        If ``vif_enabled`` is True and ``statsmodels`` is not installed.
+
+    Notes
+    -----
+    Four code paths exist. An unweighted run without WOE bins uses ``PSICalculator``, ``VarExtractionInsights``
+    (decision-tree IV bins) and ``CorrelationFilter``. A weighted run without WOE bins uses weighted equal-frequency
+    bins and needs numeric features. When a ``*_use_woe_bins`` flag is set or a ``prefit_woe_engine`` is given, an
+    unweighted run switches only the flagged stages to the bins of the WOE engine, while a weighted run bins PSI and
+    IV with the engine. ``corr_dropped`` is filled by weighted runs only.
+    """
     cfg = config or FeatureScreenConfig()
     use_woe_bins = _needs_woe_bins(cfg)
 
@@ -887,7 +1173,47 @@ def feature_screen_from_dataframe(
     config: FeatureScreenConfig | None = None,
     prefit_woe_engine: Any | None = None,
 ) -> FeatureScreenResult:
-    """Convenience wrapper that resolves INS/OOS/OOT from a tagged dataframe."""
+    """Convenience wrapper that resolves INS/OOS/OOT from a tagged dataframe.
+
+    The rows are assigned to the splits by an exact match of ``split_col`` with ``"ins"``, ``"oos"`` and ``"oot"`` (rows
+    with any other value are left out), and the screen then runs as in :func:`feature_screen`.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        Frame that holds the features, the target and the split column. It is not modified (the splits are copies).
+    feature_cols : list of str
+        Candidate features. ``target_col``, ``split_col`` and ``weight_col`` are removed from the list, and names that are
+        not columns of ``data`` are silently ignored.
+    target_col : str
+        Binary target column (1 = bad).
+    split_col : str
+        Column whose values ``"ins"``, ``"oos"`` and ``"oot"`` mark the splits (case-sensitive). At least one row must be
+        ``"ins"``; an absent OOS or OOT split gives an empty frame.
+    weight_col : str or None, default None
+        Sample-weight column of ``data``. ``None`` runs the unweighted screen.
+    config : FeatureScreenConfig or None, default None
+        Screening settings. ``None`` uses ``FeatureScreenConfig()``.
+    prefit_woe_engine : WOE_Master, MonotoneWOEBinner or WOEEngineAdapter or None, default None
+        A fitted WOE engine, handled as in :func:`feature_screen`.
+
+    Returns
+    -------
+    FeatureScreenResult
+        The result of :func:`feature_screen`.
+
+    Raises
+    ------
+    KeyError
+        If ``split_col`` or ``weight_col`` is not a column of ``data``.
+    ValueError
+        If no row has ``split_col == "ins"``, plus the errors of :func:`feature_screen`.
+
+    Notes
+    -----
+    This wrapper has no ``selection_evidence`` argument, so a ``config`` with a G03 or G04 threshold raises
+    ``ValueError``.
+    """
     exclude = {target_col, split_col}
     if weight_col:
         exclude.add(weight_col)

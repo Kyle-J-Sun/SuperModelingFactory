@@ -474,6 +474,81 @@ def proc_means_odps(
 
     ``batch_size`` is the number of feature columns included in one aggregate
     SQL statement.  It does not split or download source-table rows.
+
+    Parameters
+    ----------
+    input_table_name : str
+        Table to analyze: ``table``, ``project.table`` or ``project.schema.table``, made of letters, digits and
+        underscores only (``ValueError`` otherwise).
+    skip_cols : list of str or None, default None
+        Columns excluded from the analyzed variables. They win over ``select_cols`` and must exist in the table; a single
+        name may be passed as a string. Names are matched case-insensitively.
+    select_cols : list of str or None, default None
+        Columns to analyze. ``None`` analyzes every numeric ordinary column (string and partition columns are skipped,
+        and a numeric target column is analyzed too, so list it in ``skip_cols``). A non-numeric column raises
+        ``ValueError``.
+    batch_size : int, default 50
+        Number of variables per aggregate SQL statement; each batch scans the table once. Must be a positive integer.
+    group : str or list of str or None, default None
+        Grouping column(s). ``None`` gives one global row per variable. Group columns are never analyzed as variables,
+        come first in the result, and the rows are sorted by group values and then by variable.
+    q : list of float or None, default None
+        Quantile points in ``[0, 1]``, strictly increasing. ``None`` means ``[0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]``.
+        The result column of a point is named ``Q<int(q * 100)>`` (``0.05`` gives ``Q5``), so every point must map to a
+        distinct whole percent.
+    quantile_method : {"approx", "exact"}, default "approx"
+        ``"approx"`` uses MaxCompute ``PERCENTILE_APPROX`` (suited to large tables); ``"exact"`` uses
+        ``PERCENTILE_CONT`` (linear interpolation as in pandas), which can need much more compute on very large tables
+        or many groups. Case-insensitive.
+    percentile_accuracy : int, default 10000
+        Accuracy argument of ``PERCENTILE_APPROX``; used only with ``quantile_method="approx"``. Must be a positive
+        integer.
+    where_clause : str or None, default None
+        One SQL condition, wrapped in parentheses and combined with ``AND`` (useful for partition pruning). It must be
+        non-empty and must not contain ``;``.
+    spec_missing_value : number, list of numbers, dict or None, default None
+        Numeric sentinel value(s) turned into NULL before aggregation, so they count neither in ``N`` nor in the
+        statistics. A number or a list applies to every analyzed column; a ``{column: number or list}`` dict applies per
+        column, and its keys must be analyzed columns. Non-numeric or non-finite values raise ``ValueError``.
+    include_missing_group : bool, default False
+        Whether to keep the groups in which a group column is NULL. By default such rows are left out, as in a pandas
+        ``groupby``.
+    sqlrunner : ODPSRunner or None, default None
+        Runner to reuse; it must expose the ODPS client as ``sqlrunner.o`` and provide ``run_sql``. ``None`` creates an
+        ``ODPSRunner`` from the environment (needs the optional pyODPS package).
+    output_csv : str or pathlib.Path or None, default None
+        Path of a CSV file for the result (without the index); missing parent folders are created. ``None`` writes no
+        file.
+    output_table_name : str or None, default None
+        MaxCompute table that receives the result; it must differ from ``input_table_name``. ``None`` writes no table.
+    output_table_mode : {"overwrite", "append"} or None, default None
+        Required with ``output_table_name`` and invalid without it. ``"overwrite"`` creates the table or replaces it
+        atomically with a schema inferred from the result; ``"append"`` needs an existing unpartitioned table whose
+        column names, order and types match the result (``ValueError`` otherwise).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per variable (and group): the group columns, then ``attribute``, ``N_ALL`` (rows), ``N`` (valid values),
+        ``MEAN``, ``STD`` (sample standard deviation, ``NaN`` when ``N < 2``), ``MIN``, the quantile columns, ``MAX`` and
+        ``MISSING_RATE`` (``1 - N / N_ALL``).
+
+    Raises
+    ------
+    ValueError
+        If an argument is invalid (table or column names, ``batch_size``, ``q``, ``where_clause``, ``spec_missing_value``,
+        output settings), if no numeric variable remains, or if an ``"append"`` target does not match.
+    TypeError
+        If ``sqlrunner`` does not provide the ODPS client or the methods the function needs.
+    ImportError
+        If ``sqlrunner`` is None and the optional pyODPS package is not installed.
+    RuntimeError
+        If a batch fails; the message names the batch and its first and last variable, and neither the CSV nor the result
+        table is written.
+
+    Notes
+    -----
+    Only numeric variables are analyzed: no ``UNIQUE``, ``TOP`` or ``FREQ`` is computed for categorical columns.
     """
     input_table_name = _validate_table_name(input_table_name, "input_table_name")
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
