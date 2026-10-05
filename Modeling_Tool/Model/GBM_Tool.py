@@ -220,19 +220,21 @@ def set_num_leaves(max_depth=5, wgt=1):
     max_depth : int, default 5
         Maximum depth of the tree.
     wgt : float, default 1
-        Weight coefficient, in the range [0, 1].
+        Weight coefficient, in the range [0, 1]. It is the fraction of the ``2 ** max_depth`` leaves of a full tree
+        that is removed: ``wgt=0`` keeps all of them and the default ``wgt=1`` gives 0 leaves. Values outside [0, 1]
+        are not rejected.
 
     Returns
     -------
     int
-        Suggested number of leaves.
+        Suggested number of leaves (the formula result truncated to an integer).
 
     Examples
     --------
-    >>> set_num_leaves(max_depth=5)
-    32
     >>> set_num_leaves(max_depth=5, wgt=0.5)
     16
+    >>> set_num_leaves(max_depth=5)  # default wgt=1: 2**5 - 2**5 * 1
+    0
     """
     return int(2 ** max_depth - 2 ** max_depth * wgt)
 
@@ -253,11 +255,17 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sam
     valy : array-like
         Validation-set labels.
     params_dict : dict
-        LightGBM parameter dictionary.
+        LightGBM parameter dictionary, passed to ``LGBMClassifier`` except for the ``eval_metric`` key. It must contain
+        ``early_stopping_rounds`` (a missing key raises ``KeyError``). The evaluation metric given to ``fit``, which
+        early stopping monitors, is ``params_dict['eval_metric']`` if present, else ``params_dict['metric']``, else
+        ``'auc'``.
     wgt : array-like, optional
-        Sample weights.
+        Sample weights of the training set.
     init_score : array-like, optional
-        Initial scores.
+        Initial scores (log-odds offset) of the training set. The validation set gets no offset.
+    eval_sample_weight : array-like, optional
+        Sample weights of the validation set. They weight the validation metric that drives early stopping; with
+        ``None`` the validation set is unweighted.
 
     Returns
     -------
@@ -309,7 +317,8 @@ def lgb_varimp(model):
     Returns
     -------
     pd.DataFrame
-        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order. The importance
+        is the total gain of the splits that use the feature.
 
     Examples
     --------
@@ -339,11 +348,15 @@ def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, 
     y : str
         Name of the target column.
     params : dict
-        LightGBM parameter dictionary.
+        LightGBM parameter dictionary, passed to ``lgb_model``; it must contain ``early_stopping_rounds``.
     wgt_col : str, optional
-        Name of the sample-weight column.
+        Name of the sample-weight column of ``train_data``. With ``None`` the training set is unweighted.
+    val_wgt_col : str, optional
+        Name of the sample-weight column of ``validation_data``. The weights apply to the validation metric that drives
+        early stopping; with ``None`` the validation set is unweighted.
     cat_x_train : list of str, optional
-        List of categorical feature column names.
+        List of categorical feature column names. Accepted for backward compatibility but currently ignored: the
+        value is never used, so no categorical features are declared.
 
     Returns
     -------
@@ -392,18 +405,26 @@ def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_e
     valy : array-like
         Validation-set labels.
     params_dict : dict
-        XGBoost parameter dictionary.
+        XGBoost parameter dictionary, passed to ``XGBClassifier`` except for the ``eval_metric`` key, which is dropped.
+        Early stopping is active only when ``early_stopping_rounds`` is in this dictionary.
     sample_weight : array-like, optional
         Sample weights for the training set.
     sample_weight_eval_set : list, optional
-        List of sample weights for the validation set.
+        List of sample weights for the validation set. It holds one array-like, because the single evaluation set is
+        ``(valx, valy)``.
     base_margin : array-like, optional
-        Base margin (initial prediction offset).
+        Base margin (initial prediction offset) of the training set. No margin is passed for the validation set.
 
     Returns
     -------
     xgb.XGBClassifier
         The trained XGBoost model.
+
+    Notes
+    -----
+    The ``eval_metric`` key is removed from ``params_dict`` before the classifier is built, so a metric given there has
+    no effect: early stopping uses XGBoost's own default metric for the objective (``logloss`` for the default binary
+    objective). The model is fitted with ``verbose=False``.
 
     Examples
     --------
@@ -412,7 +433,7 @@ def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_e
     ...     'max_depth': 5,
     ...     'learning_rate': 0.1,
     ...     'early_stopping_rounds': 20,
-    ...     'eval_metric': 'auc'
+    ...     'eval_metric': 'auc'  # dropped: has no effect on XGBoost
     ... }
     >>> model = xgb_model(x_train, y_train, x_val, y_val, params)
     """
@@ -444,7 +465,8 @@ def xgb_varimp(model):
     Returns
     -------
     pd.DataFrame
-        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order. The importance
+        is the number of splits that use the feature (``get_fscore``), so features that no tree uses are absent.
 
     Examples
     --------
@@ -475,12 +497,16 @@ def xgbm_quick_train(train_data, validation_data, x, y, wgt_col=None, params=Non
         List of feature column names.
     y : str
         Name of the target column.
-    wgt_col : str
-        Name of the sample-weight column.
-    params : dict
-        XGBoost parameter dictionary.
+    wgt_col : str, optional
+        Name of the sample-weight column of ``train_data``. With ``None`` the training set is unweighted.
+    params : dict, optional
+        XGBoost parameter dictionary, passed to ``xgb_model``. Despite the default ``None`` it must be supplied:
+        ``None`` raises ``AttributeError``.
     sample_weight_eval_set : list, optional
-        List of sample weights for the validation set.
+        List of sample weights for the validation set. When given, it takes precedence over ``val_wgt_col``.
+    val_wgt_col : str, optional
+        Name of the sample-weight column of ``validation_data``. Used only when ``sample_weight_eval_set`` is ``None``;
+        the weights are then passed as ``[validation_data[val_wgt_col]]``.
 
     Returns
     -------
@@ -531,14 +557,23 @@ def catboost_model(x, y, valx, valy, params_dict, sample_weight=None):
     valy : array-like
         Validation-set labels.
     params_dict : dict
-        CatBoost parameter dictionary (the aliases n_estimators / max_depth / random_state are supported).
+        CatBoost parameter dictionary (the aliases n_estimators / max_depth / random_state are supported). The keys
+        ``early_stopping_rounds`` and ``cat_features`` are passed to ``fit`` (early stopping is active only when
+        ``early_stopping_rounds`` is present). The evaluation metric is ``eval_metric``, else ``metric``, else
+        ``'AUC'``.
     sample_weight : array-like, optional
-        Sample weights for the training set.
+        Sample weights for the training set. The validation set is never weighted.
 
     Returns
     -------
     CatBoostClassifier
         The trained CatBoost model.
+
+    Notes
+    -----
+    ``params_dict`` itself is not modified. When absent, ``loss_function='Logloss'`` and ``verbose=False`` are added to
+    the CatBoost parameters, and so is ``allow_writing_files=False`` unless ``train_dir`` is given, so no
+    ``catboost_info`` folder is written by default.
 
     Examples
     --------
@@ -585,7 +620,9 @@ def catboost_varimp(model):
     Returns
     -------
     pd.DataFrame
-        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
+        DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order. The importance
+        is CatBoost's default ``PredictionValuesChange``. When the feature names cannot be read from the model, the
+        column indices are used as names.
 
     Examples
     --------
@@ -618,11 +655,15 @@ def catboost_quick_train(train_data, validation_data, x, y, params, wgt_col=None
     y : str
         Name of the target column.
     params : dict
-        CatBoost parameter dictionary.
+        CatBoost parameter dictionary, passed to ``catboost_model`` (the dictionary itself is not modified).
     wgt_col : str, optional
-        Name of the sample-weight column.
+        Name of the sample-weight column of ``train_data``. With ``None`` the training set is unweighted.
+    val_wgt_col : str, optional
+        Name of the validation-set sample-weight column. Accepted for symmetry with ``lgbm_quick_train`` and
+        ``xgbm_quick_train`` but ignored: the validation set is never weighted for CatBoost.
     cat_features : list, optional
-        List of categorical feature column names or indices.
+        List of categorical feature column names or indices. It is stored as ``cat_features`` in the CatBoost parameters
+        (replacing a ``cat_features`` key already present in ``params``) and passed to ``fit``.
 
     Returns
     -------
@@ -670,6 +711,17 @@ class LightGBMModel:
     model : lgb.LGBMClassifier, optional
         Preloaded model instance.
 
+    Attributes
+    ----------
+    params : dict
+        The parameter dictionary given to the constructor, used by ``fit``.
+    model : lgb.LGBMClassifier or None
+        The underlying estimator: the preloaded ``model``, the classifier trained by ``fit``, the object read by
+        ``load`` or, after ``calibrate``, the ``CalibratedClassifierCV`` that wraps it. ``None`` until one of
+        these happens.
+    feature_names_ : list of str or None
+        Column names of the training features, recorded by ``fit`` when ``x`` is a DataFrame; ``None`` before that.
+
     Examples
     --------
     >>> lgb_clf = LightGBMModel(params)
@@ -709,13 +761,26 @@ class LightGBMModel:
         valy : array-like
             Validation-set labels.
         wgt : array-like, optional
-            Sample weights.
+            Sample weights of the training set.
         init_score : array-like, optional
-            Initial scores.
+            Initial scores (log-odds offset) of the training set. The validation set gets no offset.
+        sample_weight : array-like, optional
+            Alias of ``wgt`` for the training-set sample weights. It is used only when ``wgt`` is ``None``; ``wgt`` wins
+            when both are given.
+        eval_sample_weight : array-like, optional
+            Sample weights of the validation set. They weight the validation metric that drives early stopping; with
+            ``None`` the validation set is unweighted.
 
         Returns
         -------
         self
+            The fitted wrapper.
+
+        Notes
+        -----
+        ``params`` must contain ``early_stopping_rounds`` (see ``lgb_model``). Training replaces ``model``; when
+        ``x`` has a ``columns`` attribute (a DataFrame) it also sets ``feature_names_``, otherwise ``feature_names_`` is
+        left as it was.
         """
         if wgt is None:
             wgt = sample_weight
@@ -749,12 +814,13 @@ class LightGBMModel:
         Parameters
         ----------
         importance_type : str, default 'gain'
-            Feature importance type, 'gain' or 'split'.
+            Ignored. It is accepted for API symmetry only: the importance is always the total gain computed by
+            ``lgb_varimp``.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame with ``feature`` and ``importance`` columns.
+            DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
         """
         return lgb_varimp(self.model)
 
@@ -764,7 +830,8 @@ class LightGBMModel:
         Parameters
         ----------
         path : str
-            Path to save the model to.
+            Path to save the model to. Only the underlying estimator ``model`` is written, with ``joblib.dump``;
+            ``params`` and ``feature_names_`` are not stored.
         """
         save_model(self.model, path)
 
@@ -774,11 +841,13 @@ class LightGBMModel:
         Parameters
         ----------
         path : str
-            Path to the model file.
+            Path to the model file, as written by ``save``. The file is read with ``joblib.load``: only load files
+            from a trusted source.
 
         Returns
         -------
         self
+            The wrapper, with ``model`` replaced by the loaded object. ``params`` and ``feature_names_`` are unchanged.
         """
         self.model = load_model(path)
         return self
@@ -795,11 +864,19 @@ class LightGBMModel:
         method : str, default 'sigmoid'
             Calibration method, 'sigmoid' or 'isotonic'.
         cv : str or int, default 'prefit'
-            Cross-validation strategy.
+            Cross-validation strategy passed to ``CalibratedClassifierCV``. With ``'prefit'`` the fitted model is kept
+            as it is and only the calibrator is fitted on ``(x, y)``. With an integer the estimator is cloned and
+            refitted on each fold without a validation set, which fails while ``early_stopping_rounds`` is set.
 
         Returns
         -------
         self
+            The wrapper, whose ``model`` is now the fitted ``CalibratedClassifierCV``.
+
+        Notes
+        -----
+        After calibration ``model`` is the ``CalibratedClassifierCV`` and not the LightGBM classifier: ``predict``
+        returns calibrated probabilities, but ``get_feature_importance`` no longer works.
         """
         self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
@@ -815,7 +892,7 @@ class LightGBMModel:
         y : array-like
             Labels.
         n_bins : int, default 10
-            Number of bins.
+            Number of bins. Bins without samples are dropped, so the returned arrays can be shorter than ``n_bins``.
 
         Returns
         -------
@@ -876,6 +953,17 @@ class XGBoostModel:
     model : xgb.XGBClassifier, optional
         Preloaded model instance.
 
+    Attributes
+    ----------
+    params : dict
+        The parameter dictionary given to the constructor, used by ``fit``.
+    model : xgb.XGBClassifier or None
+        The underlying estimator: the preloaded ``model``, the classifier trained by ``fit``, the object read by
+        ``load`` or, after ``calibrate``, the ``CalibratedClassifierCV`` that wraps it. ``None`` until one of
+        these happens.
+    feature_names_ : list of str or None
+        Column names of the training features, recorded by ``fit`` when ``x`` is a DataFrame; ``None`` before that.
+
     Examples
     --------
     >>> xgb_clf = XGBoostModel(params)
@@ -913,15 +1001,24 @@ class XGBoostModel:
         valy : array-like
             Validation-set labels.
         sample_weight : array-like, optional
-            Sample weights.
+            Sample weights of the training set.
         sample_weight_eval_set : list, optional
-            List of sample weights for the validation set.
+            List of sample weights for the validation set. It holds one array-like, because the single evaluation set
+            is ``(valx, valy)``.
         base_margin : array-like, optional
-            Base margin (init_score / log-odds offset), used for incremental training (warm start).
+            Base margin (init_score / log-odds offset) of the training set, used for incremental training (warm start).
+            No margin is passed for the validation set.
 
         Returns
         -------
         self
+            The fitted wrapper.
+
+        Notes
+        -----
+        The ``eval_metric`` key of ``params`` is dropped (see ``xgb_model``), and early stopping is active only when
+        ``params`` contains ``early_stopping_rounds``. Training replaces ``model``; when ``x`` has a ``columns``
+        attribute (a DataFrame) it also sets ``feature_names_``, otherwise ``feature_names_`` is left as it was.
         """
         self.model = xgb_model(
             x=x, y=y, valx=valx, valy=valy,
@@ -955,12 +1052,14 @@ class XGBoostModel:
         Parameters
         ----------
         importance_type : str, default 'gain'
-            Feature importance type.
+            Ignored. It is accepted for API symmetry only: the importance is always the number of splits that use each
+            feature, as computed by ``xgb_varimp``.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame with ``feature`` and ``importance`` columns.
+            DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order. Features
+            that no tree uses are absent.
         """
         return xgb_varimp(self.model)
 
@@ -970,7 +1069,8 @@ class XGBoostModel:
         Parameters
         ----------
         path : str
-            Path to save the model to.
+            Path to save the model to. Only the underlying estimator ``model`` is written, with ``joblib.dump``;
+            ``params`` and ``feature_names_`` are not stored.
         """
         save_model(self.model, path)
 
@@ -980,11 +1080,13 @@ class XGBoostModel:
         Parameters
         ----------
         path : str
-            Path to the model file.
+            Path to the model file, as written by ``save``. The file is read with ``joblib.load``: only load files
+            from a trusted source.
 
         Returns
         -------
         self
+            The wrapper, with ``model`` replaced by the loaded object. ``params`` and ``feature_names_`` are unchanged.
         """
         self.model = load_model(path)
         return self
@@ -999,13 +1101,21 @@ class XGBoostModel:
         y : array-like
             Calibration labels.
         method : str, default 'sigmoid'
-            Calibration method.
+            Calibration method, 'sigmoid' or 'isotonic'.
         cv : str or int, default 'prefit'
-            Cross-validation strategy.
+            Cross-validation strategy passed to ``CalibratedClassifierCV``. With ``'prefit'`` the fitted model is kept
+            as it is and only the calibrator is fitted on ``(x, y)``. With an integer the estimator is cloned and
+            refitted on each fold without a validation set, which fails while ``early_stopping_rounds`` is set.
 
         Returns
         -------
         self
+            The wrapper, whose ``model`` is now the fitted ``CalibratedClassifierCV``.
+
+        Notes
+        -----
+        After calibration ``model`` is the ``CalibratedClassifierCV`` and not the XGBoost classifier: ``predict``
+        returns calibrated probabilities, but ``get_feature_importance`` no longer works.
         """
         self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
@@ -1020,10 +1130,13 @@ class XGBoostModel:
             Features.
         y : array-like
             Labels.
+        n_bins : int, default 10
+            Number of bins. Bins without samples are dropped, so the returned arrays can be shorter than ``n_bins``.
 
         Returns
         -------
         tuple
+            (fraction_of_positives, mean_predicted_value)
         """
         y_prob = self.predict(x)
         return calibration_curve(y, y_prob, n_bins=n_bins)
@@ -1034,11 +1147,14 @@ class XGBoostModel:
         Parameters
         ----------
         x : array-like
+            Features.
         y : array-like
+            Labels.
 
         Returns
         -------
         float
+            Brier score.
         """
         y_prob = self.predict(x)
         return brier_score_loss(y, y_prob)
@@ -1049,11 +1165,14 @@ class XGBoostModel:
         Parameters
         ----------
         x : array-like
+            Features.
         y : array-like
+            Labels.
 
         Returns
         -------
         float
+            ROC AUC score.
         """
         y_prob = self.predict(x)
         return roc_auc_score(y, y_prob)
@@ -1072,6 +1191,17 @@ class CatBoostModel:
         CatBoost model parameter dictionary.
     model : CatBoostClassifier, optional
         Preloaded model instance.
+
+    Attributes
+    ----------
+    params : dict
+        The parameter dictionary given to the constructor, used by ``fit``.
+    model : CatBoostClassifier or None
+        The underlying estimator: the preloaded ``model``, the classifier trained by ``fit``, the object read by
+        ``load`` or, after ``calibrate``, the ``CalibratedClassifierCV`` that wraps it. ``None`` until one of
+        these happens.
+    feature_names_ : list of str or None
+        Column names of the training features, recorded by ``fit`` when ``x`` is a DataFrame; ``None`` before that.
 
     Examples
     --------
@@ -1110,11 +1240,18 @@ class CatBoostModel:
         valy : array-like
             Validation-set labels.
         sample_weight : array-like, optional
-            Sample weights.
+            Sample weights of the training set. The validation set is never weighted.
 
         Returns
         -------
         self
+            The fitted wrapper.
+
+        Notes
+        -----
+        ``params`` is interpreted as in ``catboost_model`` (``early_stopping_rounds``, ``eval_metric`` and
+        ``cat_features`` are read from it). Training replaces ``model``; when ``x`` has a ``columns`` attribute (a
+        DataFrame) it also sets ``feature_names_``, otherwise ``feature_names_`` is left as it was.
         """
         self.model = catboost_model(
             x=x, y=y, valx=valx, valy=valy,
@@ -1146,12 +1283,13 @@ class CatBoostModel:
         Parameters
         ----------
         importance_type : str, default 'gain'
-            Feature importance type (CatBoost uses PredictionValuesChange).
+            Ignored. It is accepted for API symmetry only: the importance is always CatBoost's default
+            ``PredictionValuesChange``, as computed by ``catboost_varimp``.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame with ``feature`` and ``importance`` columns.
+            DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order.
         """
         return catboost_varimp(self.model)
 
@@ -1161,7 +1299,8 @@ class CatBoostModel:
         Parameters
         ----------
         path : str
-            Path to save the model to.
+            Path to save the model to. Only the underlying estimator ``model`` is written, with ``joblib.dump``;
+            ``params`` and ``feature_names_`` are not stored.
         """
         save_model(self.model, path)
 
@@ -1171,11 +1310,13 @@ class CatBoostModel:
         Parameters
         ----------
         path : str
-            Path to the model file.
+            Path to the model file, as written by ``save``. The file is read with ``joblib.load``: only load files
+            from a trusted source.
 
         Returns
         -------
         self
+            The wrapper, with ``model`` replaced by the loaded object. ``params`` and ``feature_names_`` are unchanged.
         """
         self.model = load_model(path)
         return self
@@ -1190,13 +1331,21 @@ class CatBoostModel:
         y : array-like
             Calibration labels.
         method : str, default 'sigmoid'
-            Calibration method.
+            Calibration method, 'sigmoid' or 'isotonic'.
         cv : str or int, default 'prefit'
-            Cross-validation strategy.
+            Cross-validation strategy passed to ``CalibratedClassifierCV``. With ``'prefit'`` the fitted model is kept
+            as it is and only the calibrator is fitted on ``(x, y)``. With an integer the estimator is cloned and
+            refitted on each fold.
 
         Returns
         -------
         self
+            The wrapper, whose ``model`` is now the fitted ``CalibratedClassifierCV``.
+
+        Notes
+        -----
+        After calibration ``model`` is the ``CalibratedClassifierCV`` and not the CatBoost classifier: ``predict``
+        returns calibrated probabilities, but ``get_feature_importance`` no longer works.
         """
         self.model = _calibrated_classifier(self.model, method, cv)
         self.model.fit(x, y)
@@ -1212,11 +1361,12 @@ class CatBoostModel:
         y : array-like
             Labels.
         n_bins : int, default 10
-            Number of bins.
+            Number of bins. Bins without samples are dropped, so the returned arrays can be shorter than ``n_bins``.
 
         Returns
         -------
         tuple
+            (fraction_of_positives, mean_predicted_value)
         """
         y_prob = self.predict(x)
         return calibration_curve(y, y_prob, n_bins=n_bins)
@@ -1227,11 +1377,14 @@ class CatBoostModel:
         Parameters
         ----------
         x : array-like
+            Features.
         y : array-like
+            Labels.
 
         Returns
         -------
         float
+            Brier score.
         """
         y_prob = self.predict(x)
         return brier_score_loss(y, y_prob)
@@ -1242,11 +1395,14 @@ class CatBoostModel:
         Parameters
         ----------
         x : array-like
+            Features.
         y : array-like
+            Labels.
 
         Returns
         -------
         float
+            ROC AUC score.
         """
         y_prob = self.predict(x)
         return roc_auc_score(y, y_prob)
@@ -1265,6 +1421,19 @@ class GradientBoostingModel:
         Model type: 'lgb', 'xgb', or 'cat' ('catboost' is an alias).
     params : dict
         Model parameter dictionary.
+
+    Attributes
+    ----------
+    model_type : str
+        The framework, 'lgb', 'xgb', or 'cat' (the alias 'catboost' is stored as 'cat').
+    params : dict
+        The parameter dictionary given to the constructor.
+
+    Notes
+    -----
+    Attributes that the wrapper does not define are delegated to the fitted underlying estimator, so ``get_params()``,
+    ``predict_proba(x)`` or ``feature_names_in_`` work on a fitted instance as on the original LightGBM / XGBoost /
+    CatBoost estimator. ``save`` and ``load`` handle only that estimator, not the wrapper.
 
     Examples
     --------
@@ -1361,19 +1530,32 @@ class GradientBoostingModel:
         model : object
             A fitted ``XGBClassifier`` / ``LGBMClassifier`` / ``CatBoostClassifier``, or a
             ``LightGBMModel`` / ``XGBoostModel`` / ``CatBoostModel`` / ``GradientBoostingModel`` wrapper.
-        model_type : {'lgb', 'xgb', 'cat'}, optional
-            If omitted, inferred automatically from the estimator type.
+        model_type : str or None, default None
+            One of 'lgb', 'xgb' or 'cat' ('catboost' is accepted as an alias of 'cat'). If omitted, inferred
+            automatically from the estimator type. Ignored when ``model`` is already a ``GradientBoostingModel``.
         params : dict, optional
-            Parameter dictionary. If omitted, it is read from the estimator's ``get_params()`` where possible.
+            Parameter dictionary. If omitted, it is read from the estimator's ``get_params()`` where possible (an empty
+            dict when the estimator has no ``get_params``). Ignored when ``model`` is already a
+            ``GradientBoostingModel``.
 
         Returns
         -------
         GradientBoostingModel
+            A wrapper around the estimator. When ``model`` already is a ``GradientBoostingModel`` it is returned
+            unchanged.
 
         Raises
         ------
         ValueError
-            If an unfitted or empty model is passed.
+            If an unfitted or empty model is passed (a wrapper whose ``model`` attribute is ``None``), if
+            ``model_type`` is omitted and cannot be inferred from the estimator, or if a loaded
+            ``GradientBoostingModel`` lost its inner model.
+
+        Notes
+        -----
+        When the feature names can be read from the estimator, they are stored as ``feature_names_`` of the inner
+        wrapper, and an estimator that lacks ``feature_names_in_`` gets that attribute set when it allows it (a side
+        effect on the estimator that was passed in).
         """
         if isinstance(model, cls):
             try:
@@ -1480,14 +1662,25 @@ class GradientBoostingModel:
             Initial log-odds offset (the starting point of incremental learning). Usually produced
             by the base model's :meth:`get_base_margin`. With ``None`` this is ordinary training
             from scratch.
+        sample_weight : array-like, optional
+            Sample weights of the training set, used by all three frameworks.
+        eval_sample_weight : array-like, optional
+            Sample weights of the validation set, which weight the validation metric that drives early
+            stopping. Used by 'lgb'; for 'xgb' it is passed as ``sample_weight_eval_set=[eval_sample_weight]``
+            when ``sample_weight_eval_set`` is ``None``; silently ignored by 'cat'.
+        sample_weight_eval_set : list, optional
+            XGBoost only: list of sample weights for the validation set (one array-like, because there is one
+            validation set). It takes precedence over ``eval_sample_weight``. Silently ignored by 'lgb' and 'cat'.
         **kwargs
-            Remaining arguments are passed through to the underlying model (for example ``wgt``
-            for lgb, ``sample_weight`` / ``sample_weight_eval_set`` for xgb, and
-            ``sample_weight`` for cat).
+            Remaining keyword arguments are passed through to the ``fit`` of the underlying wrapper
+            (``LightGBMModel`` / ``XGBoostModel`` / ``CatBoostModel``). In practice only ``wgt`` (for 'lgb', an
+            alias of ``sample_weight`` that takes precedence over it) is accepted; any other name raises
+            ``TypeError``, and 'xgb' and 'cat' accept no extra keyword at all.
 
         Returns
         -------
         self
+            The fitted wrapper.
 
         Raises
         ------
@@ -1598,40 +1791,123 @@ class GradientBoostingModel:
         Parameters
         ----------
         x : array-like or pd.DataFrame
+            Features to predict on.
 
         Returns
         -------
         np.ndarray
+            Predicted probabilities of the positive class.
         """
         return self._model.predict(x)
 
     def get_feature_importance(self, importance_type='gain'):
         """Get the feature importance.
 
+        Parameters
+        ----------
+        importance_type : str, default 'gain'
+            Ignored. It is accepted for API symmetry only: each framework returns one fixed kind of importance, the
+            total gain for 'lgb', the number of splits that use the feature for 'xgb' and CatBoost's default
+            ``PredictionValuesChange`` for 'cat'.
+
         Returns
         -------
         pd.DataFrame
+            DataFrame with ``feature`` and ``importance`` columns, sorted by importance in descending order. For 'xgb'
+            features that no tree uses are absent.
         """
         return self._model.get_feature_importance(importance_type=importance_type)
 
     def save(self, path):
-        """Save the model."""
+        """Save the model.
+
+        Parameters
+        ----------
+        path : str
+            Path to save the model to. Only the fitted underlying estimator is written, with ``joblib.dump``; the
+            wrapper itself, ``model_type`` and ``params`` are not stored.
+        """
         self._model.save(path)
 
     def load(self, path):
-        """Load the model."""
+        """Load the model.
+
+        Parameters
+        ----------
+        path : str
+            Path to the model file, as written by ``save``. The file is read with ``joblib.load``: only load files
+            from a trusted source.
+
+        Returns
+        -------
+        self
+            The wrapper, with its underlying estimator replaced by the loaded object. ``model_type`` and ``params`` are
+            not changed, so load a file saved from a model of the same framework.
+        """
         self._model.load(path)
         return self
 
     def calibrate(self, x, y, method='sigmoid', cv='prefit'):
-        """Calibrate the model probabilities."""
+        """Calibrate the model probabilities.
+
+        Parameters
+        ----------
+        x : array-like
+            Calibration features.
+        y : array-like
+            Calibration labels.
+        method : str, default 'sigmoid'
+            Calibration method, 'sigmoid' or 'isotonic'.
+        cv : str or int, default 'prefit'
+            Cross-validation strategy passed to ``CalibratedClassifierCV``. With ``'prefit'`` the fitted model is kept
+            as it is and only the calibrator is fitted on ``(x, y)``. With an integer the estimator is cloned and
+            refitted on each fold without a validation set, which fails for 'lgb' and 'xgb' while
+            ``early_stopping_rounds`` is set.
+
+        Returns
+        -------
+        self
+            The wrapper, whose underlying estimator is now the fitted ``CalibratedClassifierCV``.
+
+        Notes
+        -----
+        After calibration the underlying estimator is the ``CalibratedClassifierCV`` and not the boosting classifier:
+        ``predict`` returns calibrated probabilities, but ``get_feature_importance``, ``get_base_margin``
+        and ``predict_with_base_margin`` no longer work.
+        """
         self._model.calibrate(x, y, method=method, cv=cv)
         return self
 
     def brier_score(self, x, y):
-        """Compute the Brier score."""
+        """Compute the Brier score.
+
+        Parameters
+        ----------
+        x : array-like
+            Features.
+        y : array-like
+            Labels.
+
+        Returns
+        -------
+        float
+            Brier score of the predicted positive-class probabilities.
+        """
         return self._model.brier_score(x, y)
 
     def roc_auc(self, x, y):
-        """Compute the ROC AUC."""
+        """Compute the ROC AUC.
+
+        Parameters
+        ----------
+        x : array-like
+            Features.
+        y : array-like
+            Labels.
+
+        Returns
+        -------
+        float
+            ROC AUC score of the predicted positive-class probabilities.
+        """
         return self._model.roc_auc(x, y)

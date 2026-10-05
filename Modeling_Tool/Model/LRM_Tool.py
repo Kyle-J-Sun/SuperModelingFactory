@@ -62,11 +62,14 @@ def lr_model(mdlx, mdly, valx, valy, params_dict, sample_weight=None):
     mdly : pandas.Series or numpy.ndarray
         Training target variable
     valx : pandas.DataFrame or numpy.ndarray
-        Validation feature matrix (used for reference only)
+        Validation feature matrix (used for reference only: it is accepted for interface symmetry and never read, so
+        ``None`` is fine)
     valy : pandas.Series or numpy.ndarray
-        Validation target variable (used for reference only)
+        Validation target variable (used for reference only: it is accepted for interface symmetry and never read, so
+        ``None`` is fine)
     params_dict : dict
-        Dictionary of parameters for LogisticRegression
+        Dictionary of parameters for LogisticRegression. ``None`` is treated as an empty dict (library defaults) and a
+        ``multi_class='deprecated'`` entry is replaced by ``'auto'``.
     sample_weight : array-like, optional
         Per-sample weights passed to ``LogisticRegression.fit``.
 
@@ -97,7 +100,8 @@ def lr_varimp(model):
     -------
     pandas.DataFrame
         DataFrame with columns ['varlist', 'coef', 'importance'] sorted by
-        importance in descending order
+        importance in descending order. The names in ``varlist`` come from
+        ``model.feature_names_in_`` when it exists, otherwise they are ``x0``, ``x1``, ...
     """
     if hasattr(model, 'feature_names_in_'):
         varnames = model.feature_names_in_.tolist()
@@ -128,9 +132,24 @@ def _predict_positive_proba(model, x_arr):
 def fast_lr_pvalues(model, x, feature_names):
     """Coefficient p-values for a fitted sklearn LogisticRegression via the
     observed Fisher information — same formula as get_lr_statsmodel_summary
-    but vectorized (no n x n diagonal weight matrix), so it stays O(n*k)
+    but vectorized (no n x n diagonal weight matrix), so it stays ``O(n*k)``
     at pipeline sample sizes. Returns a Series indexed by
-    ['Intercept', *feature_names]."""
+    ``['Intercept', *feature_names]``.
+
+    Parameters
+    ----------
+    model : sklearn.linear_model.LogisticRegression
+        Fitted logistic regression model.
+    x : pandas.DataFrame or numpy.ndarray
+        Feature matrix whose columns follow the order of the model coefficients.
+    feature_names : list of str
+        Names of the columns of ``x``; they label the p-values after ``'Intercept'``.
+
+    Returns
+    -------
+    pandas.Series
+        Two-sided p-values of the intercept and of the coefficients, indexed by ``['Intercept', *feature_names]``.
+    """
     from scipy import stats
 
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
@@ -164,15 +183,23 @@ def get_lr_statsmodel_summary(model, x, y, feature_names=None):
     x : pandas.DataFrame or numpy.ndarray
         Feature matrix used for training
     y : pandas.Series or numpy.ndarray
-        Target variable used for training
+        Target variable used for training (not used in the computation: the Fisher information depends only on the
+        predicted probabilities for ``x``)
     feature_names : list of str, optional
-        Feature names (inferred from x if not provided)
+        Feature names (inferred from x if not provided: the columns of ``x``, else ``model.feature_names_in_``, else
+        ``x0``, ``x1``, ...)
 
     Returns
     -------
     pandas.DataFrame
         Summary table with columns: ['coef', 'std_err', 'z', 'p_value',
-        'ci_lower', 'ci_upper']
+        'ci_lower', 'ci_upper'], indexed by ``'Intercept'`` followed by the feature names. ``ci_lower`` and
+        ``ci_upper`` are the 95% Wald bounds ``coef -/+ 1.96 * std_err``.
+
+    Notes
+    -----
+    The weight matrix is a dense ``n x n`` array (``n`` is the number of rows), so memory use grows with the square of
+    the sample size. ``fast_lr_pvalues`` returns the same p-values without that matrix.
     """
     from scipy import stats
 
@@ -253,7 +280,8 @@ def compute_aic(model, x, y, sample_weight=None):
     Returns
     -------
     float
-        AIC value (lower is better)
+        AIC value (lower is better): ``2 * k - 2 * log_likelihood``, where ``k`` is the number of coefficients plus one
+        for the intercept and the log-likelihood is weighted when ``sample_weight`` is given.
     """
     log_likelihood = _compute_log_likelihood(model, x, y, sample_weight=sample_weight)
     k = model.coef_.shape[1] + 1  # number of params including intercept
@@ -279,7 +307,8 @@ def compute_bic(model, x, y, sample_weight=None):
     Returns
     -------
     float
-        BIC value (lower is better)
+        BIC value (lower is better): ``k * log(n) - 2 * log_likelihood``, where ``k`` is the number of coefficients plus
+        one for the intercept. ``n`` is the number of rows, or the sum of ``sample_weight`` when weights are given.
     """
     x_arr = x.values if hasattr(x, 'values') else np.array(x)
     weight = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
@@ -329,6 +358,16 @@ class FeatureSelectionAnalyzer:
     significance_level : float, default 0.05
         Significance level for statistical tests
 
+    Attributes
+    ----------
+    significance_level : float
+        Significance level; ``chi2_selection`` marks a feature as selected when its p-value is below it.
+    selected_features_ : list of str or None
+        Features selected by the last ``chi2_selection`` call, in the order of its result table (``None`` until
+        that method runs).
+    chi2_results_ : pandas.DataFrame or None
+        Result table of the last ``chi2_selection`` call (``None`` until that method runs).
+
     Examples
     --------
     >>> analyzer = FeatureSelectionAnalyzer(significance_level=0.05)
@@ -361,11 +400,27 @@ class FeatureSelectionAnalyzer:
             Feature column names to evaluate
         target_col : str
             Target variable column name
+        nan_handling : str, default "fillna_median"
+            How missing values in the feature columns are handled before the test. ``"fillna_0"``, ``"fillna_mean"`` and
+            ``"fillna_median"`` fill them with 0, the column mean and the column median (0 for a column that is entirely
+            missing); ``"drop_rows"`` drops every row with a missing feature value (the target is taken from the
+            remaining rows); ``"raise"`` raises ``ValueError`` if any feature column has a missing value. Any other
+            value raises ``ValueError``.
+        nan_warn_threshold : float, default 0.05
+            A ``RuntimeWarning`` is issued for each feature column whose share of NaN/Inf values exceeds this fraction
+            (measured before ``nan_handling`` is applied). The warning does not change how the values are handled.
 
         Returns
         -------
         pd.DataFrame
-            Results with columns ['feature', 'chi2', 'p_value', 'selected']
+            Results with columns ['feature', 'chi2', 'p_value', 'selected'], sorted by ``chi2`` in descending order.
+            ``selected`` is ``p_value < significance_level``.
+
+        Notes
+        -----
+        The features are scaled to [0, 1] with ``MinMaxScaler`` before the test, because the chi-squared statistic needs
+        non-negative values. The result table is also stored in ``chi2_results_`` and the selected feature names in
+        ``selected_features_``.
         """
         from sklearn.feature_selection import chi2
         from sklearn.preprocessing import MinMaxScaler
@@ -408,8 +463,17 @@ class FeatureSelectionAnalyzer:
         ----------
         data : pd.DataFrame
             Feature matrix (should not include target variable)
+        nan_handling : str, default "fillna_median"
+            How missing values are handled before the VIF is computed. Same options as in ``chi2_selection``:
+            ``"fillna_0"``, ``"fillna_mean"``, ``"fillna_median"``, ``"drop_rows"`` (rows with a missing value are
+            dropped, together with their ``sample_weight`` entries) or ``"raise"`` (``ValueError`` if any column has a
+            missing value). Any other value raises ``ValueError``.
+        nan_warn_threshold : float, default 0.05
+            A ``RuntimeWarning`` is issued for each column whose share of NaN/Inf values exceeds this fraction
+            (measured before ``nan_handling`` is applied). The warning does not change how the values are handled.
         sample_weight : array-like, optional
-            Per-row frequency/sample weights. Constant weights deliberately
+            Per-row frequency/sample weights, one per row of ``data`` (finite and non-negative with a positive sum,
+            otherwise ``ValueError``). Constant weights deliberately
             use the legacy OLS implementation for strict parity. Non-constant
             weights use WLS auxiliary regressions with the same no-intercept
             design as variance_inflation_factor.
@@ -417,7 +481,13 @@ class FeatureSelectionAnalyzer:
         Returns
         -------
         pd.DataFrame
-            DataFrame with columns ['feature', 'VIF'] sorted by VIF descending
+            DataFrame with columns ['feature', 'VIF'] sorted by VIF descending. Perfectly collinear features get a
+            very large or infinite VIF.
+
+        Raises
+        ------
+        ImportError
+            If ``statsmodels`` (an optional extra) is not installed.
         """
         try:
             from statsmodels.stats.outliers_influence import variance_inflation_factor
@@ -471,17 +541,22 @@ class FeatureSelectionAnalyzer:
         """
         Remove highly correlated features.
 
+        The absolute pairwise Pearson correlations of the columns are compared with ``threshold``: when two columns
+        correlate above it, the one that comes later in ``data`` is dropped. ``data`` itself is not modified; the
+        names of the kept columns are returned.
+
         Parameters
         ----------
         data : pd.DataFrame
             Feature matrix
         threshold : float, default 0.8
-            Correlation threshold above which features are removed
+            Correlation threshold above which features are removed (an absolute correlation strictly greater than
+            the threshold)
 
         Returns
         -------
         list of str
-            List of features to keep (low correlation subset)
+            List of features to keep (low correlation subset), in the column order of ``data``
         """
         corr_matrix = data.corr().abs()
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
@@ -494,6 +569,7 @@ class LRMaster:
     Logistic Regression Master Class.
 
     A unified wrapper for logistic regression modeling that encapsulates:
+
     - Model training and prediction
     - Variable importance analysis
     - Statistical summary generation
@@ -506,13 +582,34 @@ class LRMaster:
     ----------
     params : dict, optional
         Parameters for sklearn LogisticRegression, e.g., {'C': 1.0, 'solver': 'lbfgs'}
+    model : sklearn-like LogisticRegression object, optional
+        Existing fitted LR model object. If provided, LRMaster will wrap this model directly.
+    varlist : list, optional
+        Feature names used by the existing model. Required when model does not have
+        `feature_names_in_`.
+    tgt_name : str, optional
+        Target variable name. Useful when wrapping an existing fitted model and later
+        calling summary/evaluation methods.
+    standardize : bool, default False
+        If True, fit a scaler on the training features during `fit` /
+        `stepwise_selection` and apply it consistently in every prediction /
+        evaluation entry point. Default False keeps the original behavior
+        (no standardization) for full backward compatibility.
+    scaler : sklearn-like transformer, optional
+        Custom scaler prototype to use when `standardize=True` (e.g.
+        `MinMaxScaler()`). The prototype is cloned before fitting, so the
+        passed instance is never mutated. Defaults to `StandardScaler` when
+        not provided.
 
     Attributes
     ----------
     params : dict
-        Model parameters
+        Model parameters (a sanitized copy of the ``params`` argument; ``grid_search_params`` merges the best
+        combination into it)
     model : sklearn.linear_model.LogisticRegression
         Trained model (None until fit() is called)
+    calibrated_model : sklearn.calibration.CalibratedClassifierCV or None
+        Calibrated model stored by calibrate_model() (None until it runs; fit() does not reset it)
     varlist : list
         List of feature names
     tgt_name : str
@@ -705,10 +802,19 @@ class LRMaster:
         weight_col : str, optional
             Column in ``data`` with per-sample training weights (non-negative).
             Mutually exclusive with passing ``sample_weight`` to lower-level helpers.
+            With ``None`` the training is unweighted.
 
         Returns
         -------
         self
+            The fitted ``LRMaster``.
+
+        Notes
+        -----
+        Besides fitting ``model``, this call sets ``varlist`` and ``tgt_name`` and keeps a reference to ``data``, which
+        ``get_statsmodel_summary``, ``get_aic``, ``get_bic`` and ``calibrate_model`` use when they are called without
+        data (the reference is not pickled). ``calibrated_model`` is not reset: call ``calibrate_model`` again after
+        refitting.
         """
         self.varlist = varlist
         self.tgt_name = tgt_name
@@ -730,7 +836,52 @@ class LRMaster:
         return self
     
     def calibrate_model(self, model=None, train_df=None, method='sigmoid', cv=5, weight_col=None, sample_weight=None):
-        """Model calibration with optional sample weights."""
+        """Model calibration with optional sample weights.
+
+        Wrap the model in a scikit-learn ``CalibratedClassifierCV`` and fit it; the result is stored as
+        ``self.calibrated_model`` and is used by ``predict`` and ``predict_proba`` when they are called with
+        ``calibrated_model=True``.
+
+        Parameters
+        ----------
+        model : sklearn-like LogisticRegression object, optional
+            Model to calibrate. Defaults to ``self.model``.
+        train_df : pandas.DataFrame, optional
+            Calibration data, with the model's feature columns and the target column ``self.tgt_name``. Defaults to
+            the frame stored by ``fit``, ``stepwise_selection`` or ``set_data``. Calibrating on the
+            training frame is rarely what you want: pass a separate holdout frame.
+        method : str, default 'sigmoid'
+            Calibration method, ``'sigmoid'`` (Platt scaling) or ``'isotonic'``.
+        cv : int or str, default 5
+            Cross-validation strategy of ``CalibratedClassifierCV``. An integer clones the model and refits it on the
+            folds of ``train_df``; ``'prefit'`` keeps the fitted model as it is and only fits the calibrator on
+            ``train_df``.
+        weight_col : str, optional
+            Name of a column of ``train_df`` with non-negative per-row sample weights used when fitting. Mutually
+            exclusive with ``sample_weight``.
+        sample_weight : array-like, optional
+            Per-row sample weights aligned with ``train_df``, used like ``weight_col``. Mutually exclusive with
+            ``weight_col``.
+
+        Returns
+        -------
+        self
+            The ``LRMaster``, whose ``calibrated_model`` is now set (an earlier calibrated model is replaced).
+
+        Raises
+        ------
+        ValueError
+            If the feature list cannot be inferred (the model has no ``feature_names_in_`` and ``varlist`` is not set),
+            if ``cv='prefit'`` is used with a model that is not fitted, or if the sample weights are invalid or both
+            ``weight_col`` and ``sample_weight`` are given.
+        KeyError
+            If ``weight_col`` is not a column of ``train_df``.
+
+        Notes
+        -----
+        The calibration features are scaled with the fitted standardizer when ``standardize=True``, so the calibrated
+        model works in the same feature space as ``model``.
+        """
         from sklearn.calibration import CalibratedClassifierCV
         from sklearn.base import clone
         
@@ -798,7 +949,35 @@ class LRMaster:
         return self
     
     def eval_calibrated_outcome(self, evalset, plot=False, weight_col=None, sample_weight=None):
-        """Evaluate calibrated vs raw probabilities on a holdout set."""
+        """Evaluate calibrated vs raw probabilities on a holdout set.
+
+        Compute the Brier score of the raw and of the calibrated positive-class probabilities of ``evalset`` and,
+        optionally, plot the reliability curves of both. ``calibrate_model`` must have been called first.
+
+        Parameters
+        ----------
+        evalset : pandas.DataFrame
+            Holdout data with the feature columns of ``self.varlist`` and the target column ``self.tgt_name``.
+        plot : bool, default False
+            If True, show a matplotlib reliability plot (10 bins) with the raw curve, the calibrated curve and the
+            diagonal of perfect calibration.
+        weight_col : str, optional
+            Name of a column of ``evalset`` with non-negative per-row weights, used for the Brier scores and for the
+            calibration curves. Mutually exclusive with ``sample_weight``.
+        sample_weight : array-like, optional
+            Per-row weights aligned with ``evalset``, used like ``weight_col``. Mutually exclusive with ``weight_col``.
+
+        Returns
+        -------
+        None
+            Nothing is returned. The two Brier scores are written with ``logging`` at INFO level (logger
+            ``Modeling_Tool.Model.LRM_Tool``), so they appear only when INFO logging is enabled; they are not printed.
+
+        Notes
+        -----
+        The calibration curves are weighted only when the installed scikit-learn accepts ``sample_weight`` in
+        ``calibration_curve``; otherwise the curves are computed unweighted (the Brier scores stay weighted).
+        """
         from sklearn.calibration import calibration_curve
         from sklearn.metrics import brier_score_loss
 
@@ -865,11 +1044,16 @@ class LRMaster:
             Input data for prediction
         varlist : list, optional
             Feature names (uses training features if None)
+        calibrated_model : bool, default False
+            If True, predict with the calibrated model stored by ``calibrate_model`` instead of the raw model.
+            ``calibrate_model`` must have been called first: otherwise ``calibrated_model`` is ``None`` and an
+            ``AttributeError`` is raised.
 
         Returns
         -------
         numpy.ndarray
-            Predicted class labels
+            Predicted class labels (hard labels such as 0/1, not probabilities; use ``predict_proba`` for
+            probabilities)
         """
         if varlist is None:
             varlist = self.varlist
@@ -895,11 +1079,16 @@ class LRMaster:
             Input data for prediction
         varlist : list, optional
             Feature names (uses training features if None)
+        calibrated_model : bool, default False
+            If True, return the probabilities of the calibrated model stored by ``calibrate_model`` instead of
+            those of the raw model. ``calibrate_model`` must have been called first: otherwise
+            ``calibrated_model`` is ``None`` and an ``AttributeError`` is raised.
 
         Returns
         -------
         numpy.ndarray
-            Array of shape (n_samples, 2) with class probabilities
+            Array of shape (n_samples, 2) with class probabilities (the columns follow the model's ``classes_``, so
+            column 1 is the probability of class 1 for a 0/1 target)
         """
         if varlist is None:
             varlist = self.varlist
@@ -946,7 +1135,15 @@ class LRMaster:
         Returns
         -------
         pandas.DataFrame
-            Summary table with coefficients, standard errors, z-scores and p-values
+            Summary table with coefficients, standard errors, z-scores and p-values (columns ``coef``, ``std_err``,
+            ``z``, ``p_value``, ``ci_lower``, ``ci_upper``), indexed by ``'Intercept'`` followed by the feature names;
+            see ``get_lr_statsmodel_summary``.
+
+        Raises
+        ------
+        ValueError
+            If ``data`` is ``None`` and no training frame is stored (for example on a model loaded from disk, because
+            the stored frame is not pickled).
 
         Notes
         -----
@@ -973,12 +1170,27 @@ class LRMaster:
         Parameters
         ----------
         data : pd.DataFrame, optional
+            Data to evaluate the model on (uses the stored training data if None).
         varlist : list of str, optional
+            Feature names (uses the stored varlist if None).
         tgt_name : str, optional
+            Target variable name (uses the stored tgt_name if None).
+        weight_col : str, optional
+            Name of a column of ``data`` with non-negative per-row weights; the weighted log-likelihood is used. With
+            ``None`` the AIC is unweighted.
 
         Returns
         -------
         float
+            AIC value (lower is better).
+
+        Raises
+        ------
+        ValueError
+            If ``data`` is ``None`` and no training frame is stored (for example on a model loaded from disk, because
+            the stored frame is not pickled), or if the weights are invalid.
+        KeyError
+            If ``weight_col`` is not a column of ``data``.
         """
         data = self._require_data(data)
         if varlist is None:
@@ -999,12 +1211,27 @@ class LRMaster:
         Parameters
         ----------
         data : pd.DataFrame, optional
+            Data to evaluate the model on (uses the stored training data if None).
         varlist : list of str, optional
+            Feature names (uses the stored varlist if None).
         tgt_name : str, optional
+            Target variable name (uses the stored tgt_name if None).
+        weight_col : str, optional
+            Name of a column of ``data`` with non-negative per-row weights; the weighted log-likelihood is used and the
+            sample size in the penalty is the sum of the weights. With ``None`` the BIC is unweighted.
 
         Returns
         -------
         float
+            BIC value (lower is better).
+
+        Raises
+        ------
+        ValueError
+            If ``data`` is ``None`` and no training frame is stored (for example on a model loaded from disk, because
+            the stored frame is not pickled), or if the weights are invalid.
+        KeyError
+            If ``weight_col`` is not a column of ``data``.
         """
         data = self._require_data(data)
         if varlist is None:
@@ -1043,22 +1270,36 @@ class LRMaster:
         data : pd.DataFrame
             Training data
         varlist : list of str
-            Initial feature list
+            Initial feature list (the candidate variables). With ``direction='forward'`` the search starts from an
+            empty model and adds variables from this list; otherwise it starts from all of them.
         tgt_name : str
             Target variable name
         criterion : str, default 'aic'
-            Selection criterion, 'aic' or 'bic'
+            Selection criterion, 'aic' or 'bic'. Any value other than 'aic' selects by BIC.
         direction : str, default 'both'
-            Direction of stepwise selection: 'forward', 'backward', or 'both'
+            Direction of stepwise selection: 'forward', 'backward', or 'both'. 'both' starts from all variables like
+            'backward' but can add a removed variable back. Any other value performs no step and keeps all of
+            ``varlist``.
         max_iter : int, default 100
-            Maximum number of iterations
+            Maximum number of iterations. Each iteration makes at most one forward step and one backward step, and the
+            search stops earlier when no step lowers the criterion.
         verbose : bool, default True
-            Whether to print progress
+            Whether to log progress (one INFO message per step and a final summary, through the module logger);
+            nothing is printed.
+        weight_col : str, optional
+            Name of a column of ``data`` with non-negative per-row weights, used to fit every candidate model and for
+            the weighted AIC/BIC. With ``None`` the selection is unweighted.
 
         Returns
         -------
         list of str
             Selected feature list
+
+        Notes
+        -----
+        The instance is updated: ``varlist``, ``tgt_name`` and the stored training frame are replaced, the standardizer
+        is refitted on the selected columns when ``standardize=True``, and ``model`` is retrained on the selected
+        features. A candidate whose fit or scoring raises an exception is skipped silently.
         """
         if criterion == 'aic':
             score_fn = lambda model, x, y: compute_aic(
@@ -1207,12 +1448,28 @@ class LRMaster:
             If True, refit ``self`` on ``data`` with the best parameters after searching.
         verbose : bool, default True
             Print progress / best result.
+        weight_col : str, optional
+            Name of a column of ``data`` with non-negative per-row sample weights, used to train every candidate model
+            (and the final refit). With ``None`` the training is unweighted.
+        eval_weight_col : str, optional
+            Name of a column that every dataset in ``eval_sets`` must contain, holding non-negative per-row weights for
+            the AUC computed on that set. With ``None`` the AUCs are unweighted. The training weights are not applied to
+            the evaluation sets, and these weights are not applied to training.
 
         Returns
         -------
         pandas.DataFrame
             Search results sorted by ``score`` descending, with columns: the param name(s)
-            + ``AUC_<name>`` per eval set + ``gap`` (gap objective only) + ``score``.
+            + ``AUC_<name>`` per eval set + ``gap`` (gap objective only: the mean AUC of ``gap_ref_sets`` minus the
+            primary AUC) + ``score``.
+
+        Raises
+        ------
+        ValueError
+            If ``metric`` is not ``'auc'``, ``eval_sets`` is empty, or ``primary_set`` is not a key of ``eval_sets``.
+        KeyError
+            If ``data`` or an evaluation dataset lacks a column of ``varlist`` or ``tgt_name``, or if ``weight_col`` /
+            ``eval_weight_col`` names a column that is missing.
 
         Side Effects
         ------------
