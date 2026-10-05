@@ -206,8 +206,9 @@ class CreditModelPipelineConfig:
     backward_enabled : bool, default True
         Whether to run backward variable elimination on the WOE features before the models are trained.
     backward_model : str, default "lgb"
-        Proxy model of the backward elimination: ``"lgb"`` runs the LightGBM elimination and ``"xgb"`` the XGBoost one.
-        Any other value (``"lr"``, ``"cat"``, an upper-case ``"LGB"``) silently runs the XGBoost elimination as well.
+        Proxy model of the backward elimination: ``"lgb"`` runs the LightGBM elimination and ``"xgb"`` the XGBoost one
+        (case and surrounding spaces are ignored). Any other value raises ``ValueError`` when ``run`` starts, if
+        ``backward_enabled`` is on.
     backward_params : dict, default {}
         ``{"init": {...}, "run": {...}}``: ``init`` overrides the arguments of ``BackwardVariableEliminator`` and ``run``
         those of its ``run`` call (defaults ``n_rounds=3``, ``stopping_metric="auc"``, ``num_boost_round=200``,
@@ -824,6 +825,10 @@ class CreditModelPipeline:
         numeric_cols = data.select_dtypes(include=[np.number]).columns
         return [col for col in numeric_cols if col not in excluded]
 
+    def _backward_model_name(self) -> str:
+        """Normalized ``backward_model``: stripped and lower-case (``"None"`` for a missing value)."""
+        return str(self.config.backward_model).strip().lower()
+
     def _validate_input(self, data: pd.DataFrame, feature_cols: list[str]) -> None:
         cfg = self.config
         missing = [cfg.target_col] + [col for col in feature_cols if col not in data.columns]
@@ -836,6 +841,8 @@ class CreditModelPipeline:
             from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 
             resolve_sample_weight(data=data, weight_col=cfg.weight_col, expected_len=len(data))
+        if cfg.backward_enabled and self._backward_model_name() not in {"lgb", "xgb"}:
+            raise ValueError(f"backward_model must be 'lgb' or 'xgb', got {cfg.backward_model!r}")
         if cfg.warm_start_enabled:
             if not cfg.warm_start_score_col:
                 raise ValueError("warm_start_score_col is required when warm_start_enabled=True")
@@ -1652,7 +1659,7 @@ class CreditModelPipeline:
                     "train_data": splits["ins"],
                     "varlist": feature_cols,
                     "dep": cfg.target_col,
-                    "model_type": f"{cfg.backward_model}m" if cfg.backward_model == "lgb" else cfg.backward_model,
+                    "model_type": f"{self._backward_model_name()}m",
                     "validation_data": splits[validation_split],
                     "test_data_dict": test_data_dict,
                     "weight_col": cfg.weight_col,
@@ -1664,7 +1671,7 @@ class CreditModelPipeline:
             run_params = merge_dict(
                 {
                     "n_rounds": 3,
-                    "varreduct_params": self._DEFAULT_MODEL_PARAMS.get(cfg.backward_model, {}),
+                    "varreduct_params": self._DEFAULT_MODEL_PARAMS.get(self._backward_model_name(), {}),
                     "stopping_metric": "auc",
                     "num_boost_round": 200,
                     "early_stopping_rounds": 20,

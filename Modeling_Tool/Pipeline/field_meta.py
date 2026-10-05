@@ -474,7 +474,7 @@ _FIELD_DESCRIPTIONS = {
 _FIELD_OPTIONS = {
     "woe_engine": ["equal_freq", "monotone"],
     "train_models": ["lr", "lgb", "xgb", "cat"],
-    "backward_model": ["lr", "lgb", "xgb", "cat"],
+    "backward_model": ["lgb", "xgb"],
     "optuna_models": ["lgb", "xgb", "cat"],
     "explain_models": ["lr", "lgb", "xgb", "cat"],
     "gbm_feature_source": ["woe", "raw"],
@@ -1357,6 +1357,8 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("target_col must not be empty.")
         if vals.get("warm_start_enabled") and missing("warm_start_score_col"):
             errors.append("warm_start_score_col is required when warm_start_enabled is on.")
+        if vals.get("backward_enabled", True) and str(vals.get("backward_model", "lgb")).strip().lower() not in {"lgb", "xgb"}:
+            errors.append("backward_model must be 'lgb' or 'xgb'.")
         if int(vals.get("optuna_n_trials", 5) or 0) < 1:
             errors.append("optuna_n_trials must be >= 1.")
         if int(vals.get("optuna_n_trials", 5) or 0) < 5:
