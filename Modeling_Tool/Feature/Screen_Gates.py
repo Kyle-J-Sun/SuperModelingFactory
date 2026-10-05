@@ -40,7 +40,23 @@ def point_biserial_direction(
     ``sample_weight`` is positional-aligned with the passed ``x``/``y``
     (before NaN masking). A class whose total weight is zero — like a class
     with no rows — and a weighted tie both return 0, mirroring the
-    unweighted NaN/tie semantics."""
+    unweighted NaN/tie semantics.
+
+    Parameters
+    ----------
+    x : pandas.Series
+        Feature values; converted with ``pandas.to_numeric(errors="coerce")``.
+    y : pandas.Series
+        Binary target (1 = bad, 0 = good); rows that are not numeric are ignored.
+    sample_weight : numpy.ndarray or None, default None
+        Weights aligned by position with ``x`` and ``y``; None gives the unweighted comparison of the class means.
+
+    Returns
+    -------
+    int
+        ``1`` when the mean of ``x`` is higher among bad rows, ``-1`` when it is lower, ``0`` when it is undefined (no
+        usable rows, a class without rows or weight, or equal means).
+    """
     xv = pd.to_numeric(x, errors="coerce")
     yv = pd.to_numeric(y, errors="coerce")
     mask = xv.notna() & yv.notna()
@@ -76,6 +92,22 @@ class SelectionEvidence:
     per_group_iv_fn(features) -> DataFrame[var, group, n, iv, direction]
     per_target_fn(features)   -> DataFrame[var, target, iv, direction, status]
     Both closures are lazy so they only price the post-corr survivor set.
+
+    Parameters
+    ----------
+    group_dims : list of str, default empty list
+        Group dimensions (for example ``["apply_month"]``) over which the per-group evidence is computed.
+    scope : str, default "ins"
+        Split the evidence was computed on.
+    per_group_iv_fn : callable or None, default None
+        ``fn(features) -> DataFrame`` with the columns ``var``, ``group``, ``n``, ``iv`` and ``direction`` (one row per
+        feature and group). With None the group-stability gate sees no evidence and every feature counts as having too few
+        groups.
+    per_target_fn : callable or None, default None
+        ``fn(features) -> DataFrame`` with the columns ``var``, ``target``, ``iv``, ``direction`` and ``status`` (one row per
+        feature and target). With None the multi-target gate warns and keeps every feature.
+    min_group_n_default : int, default 0
+        Minimum group size used by the group-stability gate when the config sets no ``min_group_n``; 0 means no minimum.
     """
 
     group_dims: list[str] = field(default_factory=list)
@@ -119,6 +151,47 @@ def apply_vif_stage(
     matches the LR design-matrix collinearity semantics). The legacy raw-value
     basis excludes non-numeric survivors from the matrix — raw string columns
     used to crash statsmodels — keeping them in the selection untouched.
+
+    Parameters
+    ----------
+    ins : pandas.DataFrame
+        The INS frame the VIF is computed on (also the source of ``weight_col``).
+    current : list of str
+        Features that survived the earlier stages.
+    config : object
+        Screening config read with ``getattr``: ``vif_enabled`` (the stage does nothing unless it is true),
+        ``vif_threshold``, ``vif_min_features``, ``vif_tie_break_metric`` (only ``"iv"`` is supported) and
+        ``vif_use_woe_bins``.
+    iv_map : dict of str to float
+        Feature to IV; of the features tied on the highest VIF, the one with the lowest IV (then the smallest name) is
+        dropped.
+    summary_rows : list of dict
+        Accumulator of per-stage summary rows; the stage appends its own row(s) in place.
+    dropped_rows : list of dict
+        Accumulator of one row per dropped feature (``var``, ``stage``, ``metric``, ``value``, ``threshold``,
+        ``reason``); appended in place.
+    stage_tables : dict of str to pandas.DataFrame
+        Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
+    weight_col : str or None
+        Sample-weight column of ``ins``; when given the VIF is computed with these weights.
+    on_empty_stage : {"keep_all_warn", "raise"}
+        What happens when the stage would remove every feature (see ``_apply_stage_keep``).
+    woe_frame_fn : callable or None, default None
+        ``fn(features) -> DataFrame`` returning the WOE-encoded INS columns; required when ``vif_use_woe_bins`` is true.
+
+    Returns
+    -------
+    list of str
+        The surviving features. Non-numeric features are never removed by the raw-value basis. ``current`` is returned
+        unchanged (with a ``skipped_*`` summary row) when too few features are left to compute a VIF.
+
+    Raises
+    ------
+    ValueError
+        For an unsupported ``vif_tie_break_metric``, or when ``vif_use_woe_bins`` is true but ``woe_frame_fn`` is missing
+        or does not return numeric WOE columns for every feature.
+    ImportError
+        If ``statsmodels`` is not installed.
     """
     if not getattr(config, "vif_enabled", False):
         return current
@@ -300,7 +373,41 @@ def apply_group_stability_stage(
 ) -> list[str]:
     """G03: per-group (e.g. monthly) IV floor, IV CV cap, and direction
     consistency floor. Features with too few eligible groups are handled per
-    ``insufficient_group_policy``."""
+    ``insufficient_group_policy``.
+
+    Parameters
+    ----------
+    current : list of str
+        Features that survived the earlier stages.
+    config : object
+        Screening config read with ``getattr``: ``monthly_iv_min``, ``monthly_iv_cv_max`` and
+        ``direction_consistency_min`` (the stage does nothing when all three are None), ``min_group_n`` and
+        ``insufficient_group_policy`` (``"keep_warn"`` by default, ``"drop"`` or ``"raise"``).
+    evidence : SelectionEvidence
+        Source of the per-group IV table (``per_group_iv_fn``).
+    summary_rows : list of dict
+        Accumulator of per-stage summary rows; the stage appends its own row(s) in place.
+    dropped_rows : list of dict
+        Accumulator of one row per dropped feature (``var``, ``stage``, ``metric``, ``value``, ``threshold``,
+        ``reason``); appended in place.
+    stage_tables : dict of str to pandas.DataFrame
+        Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
+    weight_col : str or None
+        Weight column name, recorded in the summary row.
+    on_empty_stage : {"keep_all_warn", "raise"}
+        What happens when the stage would remove every feature.
+
+    Returns
+    -------
+    list of str
+        The features that pass; features with fewer than two groups of at least ``min_group_n`` rows are kept with a
+        warning, dropped, or cause ``ValueError``, according to ``insufficient_group_policy``.
+
+    Raises
+    ------
+    ValueError
+        If ``insufficient_group_policy="raise"`` and a feature has too few eligible groups.
+    """
     thresholds_active = any(
         getattr(config, name, None) is not None
         for name in ("monthly_iv_min", "monthly_iv_cv_max", "direction_consistency_min")
@@ -408,7 +515,40 @@ def apply_multi_target_stage(
     on_empty_stage: str,
 ) -> list[str]:
     """G04: joint gate across several labels — a feature must pass its
-    per-target IV range / direction alignment on all / any / >=K targets."""
+    per-target IV range / direction alignment on all / any / >=K targets.
+
+    Parameters
+    ----------
+    current : list of str
+        Features that survived the earlier stages.
+    config : object
+        Screening config read with ``getattr``: ``target_rules`` (``"all"``, ``"any"`` or ``"min_pass_count"``; the stage
+        does nothing when it is None), ``per_target_iv_range`` (a ``(low, high)`` pair, or a dict per target),
+        ``direction_reference_target`` and ``min_pass_count`` (default 1).
+    evidence : SelectionEvidence
+        Source of the per-target IV table (``per_target_fn``).
+    summary_rows : list of dict
+        Accumulator of per-stage summary rows; the stage appends its own row(s) in place.
+    dropped_rows : list of dict
+        Accumulator of one row per dropped feature (``var``, ``stage``, ``metric``, ``value``, ``threshold``,
+        ``reason``); appended in place.
+    stage_tables : dict of str to pandas.DataFrame
+        Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
+    weight_col : str or None
+        Weight column name, recorded in the summary row.
+    on_empty_stage : {"keep_all_warn", "raise"}
+        What happens when the stage would remove every feature.
+
+    Returns
+    -------
+    list of str
+        The features that pass. When the evidence is empty, a warning is issued and ``current`` is returned unchecked.
+
+    Raises
+    ------
+    ValueError
+        If ``target_rules`` is not one of the three allowed values.
+    """
     rule = getattr(config, "target_rules", None)
     if rule is None or not current:
         return current
@@ -499,7 +639,39 @@ def apply_truncation_stage(
     weight_col: str | None,
 ) -> list[str]:
     """G05: hard cap on the final feature count, ranked by ranking_metric
-    with a deterministic tie-breaker. Runs last; never backfills."""
+    with a deterministic tie-breaker. Runs last; never backfills.
+
+    Parameters
+    ----------
+    current : list of str
+        Features that survived the earlier stages.
+    config : object
+        Screening config read with ``getattr``: ``max_selected_features`` (the cap), ``min_selected_features`` (only
+        triggers a warning), ``ranking_metric`` (only ``"iv"`` is supported) and ``tie_breaker`` (accepted but without
+        effect: ties are broken by feature name).
+    iv_map : dict of str to float
+        Feature to IV, the ranking metric; a feature missing from the map ranks as 0.
+    summary_rows : list of dict
+        Accumulator of per-stage summary rows; the stage appends its own row(s) in place.
+    dropped_rows : list of dict
+        Accumulator of one row per dropped feature (``var``, ``stage``, ``metric``, ``value``, ``threshold``,
+        ``reason``); appended in place.
+    stage_tables : dict of str to pandas.DataFrame
+        Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
+    weight_col : str or None
+        Weight column name, recorded in the summary row.
+
+    Returns
+    -------
+    list of str
+        The ``max_selected_features`` features with the highest IV (original order kept); ``current`` when there is no cap
+        or it is not exceeded. Dropped features are never replaced.
+
+    Raises
+    ------
+    ValueError
+        If ``ranking_metric`` is not ``"iv"`` while a cap is applied.
+    """
     cap = getattr(config, "max_selected_features", None)
     floor = getattr(config, "min_selected_features", None)
     if cap is None and floor is None:
@@ -566,7 +738,45 @@ def apply_post_corr_gates(
 ) -> list[str]:
     """Orchestrate the post-corr gates: vif -> group_stability ->
     multi_target -> truncation. Raises when G03/G04 thresholds are set but no
-    SelectionEvidence was provided (CMP path — FVP-only gates this release)."""
+    SelectionEvidence was provided (CMP path — FVP-only gates this release).
+
+    Parameters
+    ----------
+    ins : pandas.DataFrame
+        The INS frame, used by the VIF stage.
+    current : list of str
+        Features that survived PSI, IV and correlation screening.
+    config : object
+        Screening config with the gate fields described in the individual stage functions.
+    evidence : SelectionEvidence or None
+        Evidence for the group-stability and multi-target stages; with None only the VIF and truncation stages run.
+    iv_map : dict of str to float
+        Feature to IV, used by the VIF tie-break and by the truncation ranking.
+    summary_rows : list of dict
+        Accumulator of per-stage summary rows; the stage appends its own row(s) in place.
+    dropped_rows : list of dict
+        Accumulator of one row per dropped feature (``var``, ``stage``, ``metric``, ``value``, ``threshold``,
+        ``reason``); appended in place.
+    stage_tables : dict of str to pandas.DataFrame
+        Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
+    weight_col : str or None
+        Sample-weight column name.
+    on_empty_stage : {"keep_all_warn", "raise"}
+        What happens when a stage would remove every feature.
+    woe_frame_fn : callable or None, default None
+        Provider of the WOE-encoded frame for ``vif_use_woe_bins``.
+
+    Returns
+    -------
+    list of str
+        The features that pass all four stages.
+
+    Raises
+    ------
+    ValueError
+        If group-stability or multi-target thresholds are configured but ``evidence`` is None, plus the errors of the
+        individual stages.
+    """
     needed = _config_needs_evidence(config)
     if needed and evidence is None:
         raise ValueError(
