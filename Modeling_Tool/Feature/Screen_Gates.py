@@ -26,7 +26,7 @@ import pandas as pd
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 
-from .Weighted_Screen import _apply_stage_keep, _summary_row
+from .Weighted_Screen import _apply_stage_keep, _check_tie_breaker, _summary_row
 
 
 def point_biserial_direction(
@@ -647,8 +647,8 @@ def apply_truncation_stage(
         Features that survived the earlier stages.
     config : object
         Screening config read with ``getattr``: ``max_selected_features`` (the cap), ``min_selected_features`` (only
-        triggers a warning), ``ranking_metric`` (only ``"iv"`` is supported) and ``tie_breaker`` (accepted but without
-        effect: ties are broken by feature name).
+        triggers a warning), ``ranking_metric`` (only ``"iv"`` is supported) and ``tie_breaker`` (only ``"name"`` is
+        supported: ties are broken by ascending feature name).
     iv_map : dict of str to float
         Feature to IV, the ranking metric; a feature missing from the map ranks as 0.
     summary_rows : list of dict
@@ -670,7 +670,7 @@ def apply_truncation_stage(
     Raises
     ------
     ValueError
-        If ``ranking_metric`` is not ``"iv"`` while a cap is applied.
+        If ``ranking_metric`` is not ``"iv"`` or ``tie_breaker`` is not ``"name"`` while a cap is applied.
     """
     cap = getattr(config, "max_selected_features", None)
     floor = getattr(config, "min_selected_features", None)
@@ -683,10 +683,10 @@ def apply_truncation_stage(
             raise ValueError(
                 f"ranking_metric {metric!r} is not available in this release; use 'iv'."
             )
-        tie = str(getattr(config, "tie_breaker", "name") or "name")
+        _check_tie_breaker(getattr(config, "tie_breaker", "name"))
         ranked = sorted(
             current,
-            key=lambda name: (-iv_map.get(name, 0.0), name if tie == "name" else name),
+            key=lambda name: (-iv_map.get(name, 0.0), name),
         )
         kept_set = ranked[: int(cap)]
         truncated = [name for name in ranked[int(cap):]]

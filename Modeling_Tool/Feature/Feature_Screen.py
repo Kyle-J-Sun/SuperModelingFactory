@@ -16,6 +16,8 @@ from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 from .Weighted_Screen import (
     WeightedScreenResult,
     _DROPPED_DETAIL_COLS,
+    _check_iv_equal_freq,
+    _check_tie_breaker,
     _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
@@ -99,9 +101,9 @@ class FeatureScreenConfig:
         Minimum share of rows per bin in the default IV binning of unweighted runs. Weighted runs read ``min_bin_prop``
         instead.
     iv_equal_freq : bool, default True
-        Passed as ``equal_freq`` to the IV binning of unweighted runs. That binning uses decision-tree bins, which take
-        precedence, so the flag currently changes nothing; weighted runs ignore it and always use weighted
-        equal-frequency bins.
+        Must stay True: the IV binning cannot switch equal-frequency bins off (unweighted runs use decision-tree bins and
+        weighted runs weighted equal-frequency bins), so any other value raises ``ValueError`` when the config is built.
+        Use ``iv_bins`` and ``iv_min_bin_prop`` to tune the bins, or ``iv_use_woe_bins`` to take them from the WOE engine.
     iv_use_woe_bins : bool, default False
         Compute IV on the bins of the screening WOE engine instead of the default binning. A weighted run that has an
         engine always bins IV with it.
@@ -204,8 +206,9 @@ class FeatureScreenConfig:
         G05: metric that ranks the features for truncation. Only ``"iv"`` exists; any other value raises ``ValueError``
         when the cap actually cuts features.
     tie_breaker : str, default "name"
-        G05: intended tie-breaker for equal ranking values. Ties are always broken by ascending feature name, whatever the
-        value.
+        G05: how features with equal ranking values are ordered when the cap cuts between them. The only rule is ascending
+        feature name, so ``"name"`` (or None) is the only accepted value; any other raises ``ValueError`` when the config is
+        built.
     vif_enabled : bool, default False
         Gate G06: after the correlation stage, repeatedly drop the feature with the highest VIF until no VIF is above
         ``vif_threshold`` or only ``vif_min_features`` features remain. Needs the optional ``statsmodels`` package
@@ -297,6 +300,10 @@ class FeatureScreenConfig:
     # True computes VIF on the WOE-encoded INS view (all-numeric, matches
     # the LR design-matrix collinearity semantics).
     vif_use_woe_bins: bool = False
+
+    def __post_init__(self) -> None:
+        _check_iv_equal_freq(self.iv_equal_freq)
+        _check_tie_breaker(self.tie_breaker)
 
 
 def screen_config_from_mapping(
@@ -390,7 +397,7 @@ def screen_config_from_mapping(
         max_selected_features=cfg.get("max_selected_features"),
         min_selected_features=cfg.get("min_selected_features"),
         ranking_metric=str(cfg.get("ranking_metric", "iv")),
-        tie_breaker=str(cfg.get("tie_breaker", "name")),
+        tie_breaker=str(cfg.get("tie_breaker") or "name"),
         vif_enabled=bool(cfg.get("vif_enabled", False)),
         vif_threshold=float(cfg.get("vif_threshold", 10.0)),
         vif_min_features=int(cfg.get("vif_min_features", 2)),

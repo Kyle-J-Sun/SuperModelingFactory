@@ -1791,7 +1791,7 @@ class FeatureValidationPipeline:
             "iv_upper_threshold": params.get("iv_upper_threshold"),
             "iv_nbins": params.get("iv_nbins", psi_params.get("buckets", 10)),
             "iv_min_bin_prop": params.get("iv_min_bin_prop", psi_params.get("min_bin_prop", 0.05)),
-            "iv_equal_freq": params.get("iv_equal_freq", psi_params.get("equal_freq", True)),
+            "iv_equal_freq": params.get("iv_equal_freq", True),
             "iv_use_woe_bins": params.get("iv_use_woe_bins", cfg.ivks_use_woe_bins),
             "corr_enabled": params.get("corr_enabled", cfg.corr_enabled),
             "corr_threshold": params.get(

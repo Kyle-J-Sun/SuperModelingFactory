@@ -92,6 +92,25 @@ class WeightedScreenResult:
     stage_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
+def _check_iv_equal_freq(value: Any) -> None:
+    """Raise ``ValueError`` when ``iv_equal_freq`` asks for something the IV binning cannot do."""
+    if not value:
+        raise ValueError(
+            f"iv_equal_freq={value!r} is not supported: the IV binning cannot switch equal-frequency bins off "
+            "(unweighted runs use decision-tree bins and weighted runs weighted equal-frequency bins). Leave it True, "
+            "or set iv_use_woe_bins=True to compute the IV on the bins of the screening WOE engine."
+        )
+
+
+def _check_tie_breaker(value: Any) -> None:
+    """Raise ``ValueError`` unless ``tie_breaker`` is ``"name"`` (or unset): the only rule that exists."""
+    if value is not None and str(value).strip().lower() not in ("", "name"):
+        raise ValueError(
+            f"tie_breaker={value!r} is not supported: features with equal ranking values are always ordered by "
+            "ascending feature name. Use 'name'."
+        )
+
+
 def _summary_row(stage: str, n_in: int, n_out: int, threshold: Any, weight_col: str | None, **extra: Any) -> dict:
     row = {
         "stage": stage,
@@ -1437,8 +1456,8 @@ def weighted_feature_screen(
         Whether to draw the WOE charts of the features that enter the IV stage into ``<plot_path>/overall``
         (unweighted runs only).
     iv_equal_freq : bool, default True
-        Passed to the IV binning of unweighted runs, which uses decision-tree bins that take precedence, so it currently
-        changes nothing; weighted runs ignore it.
+        Must stay True: the IV binning cannot switch equal-frequency bins off (unweighted runs use decision-tree bins and
+        weighted runs weighted equal-frequency bins), so any other value raises ``ValueError``.
     psi_use_woe_bins : bool, default False
         Compute PSI on the bins of the screening WOE engine instead of the default binning.
     iv_use_woe_bins : bool, default False
@@ -1481,8 +1500,8 @@ def weighted_feature_screen(
     KeyError
         If ``split_col`` or ``weight_col`` is not a column of ``data``.
     ValueError
-        If no row has ``split_col == "ins"``, if the weights are invalid, or if ``on_empty_stage="raise"`` and a stage
-        would drop every feature.
+        If no row has ``split_col == "ins"``, if the weights are invalid, if ``iv_equal_freq`` is False, or if
+        ``on_empty_stage="raise"`` and a stage would drop every feature.
 
     Notes
     -----

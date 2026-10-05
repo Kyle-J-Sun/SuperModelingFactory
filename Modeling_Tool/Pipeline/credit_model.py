@@ -179,8 +179,9 @@ class CreditModelPipelineConfig:
         before the elimination.
     lr_elimination_params : dict, default {}
         Settings of the p-value elimination: ``pvalue_threshold`` (default 0.05), ``min_features`` (default 1; the
-        elimination stops when this many features remain) and ``max_iterations`` (default 20). ``tie_breaker`` is
-        accepted but has no effect; any other key raises ``ValueError``.
+        elimination stops when this many features remain) and ``max_iterations`` (default 20). ``tie_breaker`` may only
+        be ``"pvalue"`` (or None), which is what happens anyway: equal p-values are resolved by column order. Any other
+        ``tie_breaker`` value and any other key raise ``ValueError``.
     warm_start_enabled : bool, default False
         Whether to start the GBM models from a prior score (LightGBM ``init_score``, XGBoost base margin), in training
         and in evaluation, so that a model's probability combines the prior score with its increment. It needs
@@ -878,6 +879,12 @@ class CreditModelPipeline:
             if unknown:
                 raise ValueError(
                     f"Unknown lr_elimination_params keys {sorted(unknown)}; allowed: {sorted(allowed)}"
+                )
+            tie_breaker = (cfg.lr_elimination_params or {}).get("tie_breaker")
+            if tie_breaker is not None and str(tie_breaker).strip().lower() != "pvalue":
+                raise ValueError(
+                    f"lr_elimination_params['tie_breaker'] must be 'pvalue' or None; got {tie_breaker!r} "
+                    "(equal p-values are always resolved by column order)"
                 )
         if cfg.woe_fit_query:
             validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
