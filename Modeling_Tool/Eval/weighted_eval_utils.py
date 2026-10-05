@@ -320,7 +320,8 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         - ``N_BAD``, ``N_GOOD``: weighted counts of bad (``weight * target``) and good (``weight * (1 - target)``) rows.
         - ``AVG_SCORE``: weighted mean score of the bin (NaN when the bin has NaN scores); ``UNIQUE_SCORE``: number of
           distinct scores.
-        - ``PROP``: ``N`` divided by the total weight; ``AVG_BAD`` and ``AVG_GOOD``: ``N_BAD`` and ``N_GOOD`` divided by ``N``.
+        - ``PROP``: ``N`` divided by the total weight of all rows, special scores included, so ``PROP`` adds up to 1;
+          ``AVG_BAD`` and ``AVG_GOOD``: ``N_BAD`` and ``N_GOOD`` divided by ``N``.
         - ``BAD_PCT_IN_EACH_BIN``, ``GOOD_PCT_IN_EACH_BIN``: share of all bad and all good weight that falls in the bin.
         - ``N_CUM_BAD``, ``N_CUM_GOOD``, ``CUM_BAD_PCT``, ``CUM_GOOD_PCT``: cumulative sums, from bin 1 down, of ``N_BAD``,
           ``N_GOOD``, ``BAD_PCT_IN_EACH_BIN`` and ``GOOD_PCT_IN_EACH_BIN``.
@@ -347,8 +348,9 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     after the bins, indexed by ``"special:<value>"`` in both index levels (in ascending order of the value), with the
     columns ``MIN``, ``MAX`` (both the value), ``N``, ``N_RAW``, ``PERF_CNT``, ``N_BAD``, ``N_GOOD``, ``AVG_SCORE``,
     ``UNIQUE_SCORE`` (1), ``PROP``, ``AVG_BAD``, ``AVG_GOOD`` and ``AUC`` (the AUC of the regular rows); every other column
-    is NaN. In these rows ``PROP`` is the share of the weight of all rows, whereas in the regular bins ``PROP`` is the
-    share of the weight of the non-special rows, so the column can add up to more than 1.
+    is NaN. ``PROP`` is the share of the weight of all rows in the regular bins and in the special rows alike, so the
+    column adds up to 1. The other shares (``BAD_PCT_IN_EACH_BIN`` and ``GOOD_PCT_IN_EACH_BIN``), ``LIFT`` and the overall
+    bad rate still refer to the rows without a special score.
 
     Rows with a NaN score are not dropped: they are ranked last (highest bin numbers), the ``AVG_SCORE`` of their bin is NaN
     and the ``AUC`` is NaN. Rows with the same score can be split across two adjacent bins.
@@ -398,7 +400,14 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     total_good = float(out["N_GOOD"].sum()) or 1.0
     overall_bad_rate = float(out["N_BAD"].sum()) / total_weight if total_weight else np.nan
 
-    out["PROP"] = out["N"] / total_weight
+    # PROP is the share of the weight of ALL rows, special ones included, so the bins and the special rows add up to 1.
+    grand_total = float(out["N"].sum())
+    if special_df is not None and len(special_df):
+        spec_weight = resolve_weights(special_df, weight_col=weight_col, expected_len=len(special_df))
+        if spec_weight is None:
+            spec_weight = np.ones(len(special_df), dtype=float)
+        grand_total += float(np.sum(spec_weight))
+    out["PROP"] = out["N"] / grand_total if grand_total else np.nan
     out["AVG_BAD"] = out["N_BAD"] / out["N"].replace(0, np.nan)
     out["AVG_GOOD"] = out["N_GOOD"] / out["N"].replace(0, np.nan)
     out["BAD_PCT_IN_EACH_BIN"] = out["N_BAD"] / total_bad
@@ -426,10 +435,6 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         # Special sentinel scores (e.g. -1 for all-missing rows) get their own
         # descriptive rows: never part of quantile edges, cumulative columns,
         # or ranking metrics (those stay NaN by construction).
-        spec_weight = resolve_weights(special_df, weight_col=weight_col, expected_len=len(special_df))
-        if spec_weight is None:
-            spec_weight = np.ones(len(special_df), dtype=float)
-        grand_total = total_weight + float(np.sum(spec_weight))
         spec_rows = []
         for value, part in special_df.groupby(score, sort=True):
             part_w = resolve_weights(part, weight_col=weight_col, expected_len=len(part))
@@ -1013,18 +1018,19 @@ def cross_risk_weighted_mean(data, agg_col, sample_weight, score_list, margin_na
     pandas.DataFrame
         For every cell, the sum of ``weight * agg_col`` divided by the sum of the weights: the rows are indexed by
         (``_bin_num1``, ``_bin_range1``) and the columns by (``_bin_num2``, ``_bin_range2``), each with two levels named
-        after ``score_list``. Cells without rows, or whose weights sum to zero, are NaN.
+        after ``score_list``. Cells without rows, whose weights sum to zero, or whose ``agg_col`` values are all NaN, are NaN.
 
     Notes
     -----
-    A row whose ``agg_col`` value is NaN adds nothing to the numerator but its weight still counts in the denominator, so
-    NaN values pull the mean towards 0 instead of being skipped.
+    A row whose ``agg_col`` value is NaN is skipped: it adds nothing to the numerator and its weight is left out of the
+    denominator, so the result is the weighted mean of the values that exist.
     """
     weight = np.asarray(sample_weight, dtype=float)
     values = pd.to_numeric(data[agg_col], errors="coerce").to_numpy(dtype=float)
+    valid = ~np.isnan(values)
     frame = data[["_bin_num1", "_bin_range1", "_bin_num2", "_bin_range2"]].copy()
-    frame["_w"] = weight
-    frame["_wv"] = values * weight
+    frame["_w"] = np.where(valid, weight, 0.0)
+    frame["_wv"] = np.where(valid, values * weight, 0.0)
 
     numerator = pd.crosstab(
         [frame["_bin_num1"], frame["_bin_range1"]],

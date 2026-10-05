@@ -73,7 +73,7 @@ ExcelMaster    (ExcelMaster.py)       worksheet-level API: cursor, tables, text,
 
 | Method | Description |
 |---|---|
-| `add_worksheet(name, hide_grid=True, reset_loc=True, cell_scale=True, auto_fit=False, zoom_perc=100, tab_color=None)` | Add a sheet and (by default) reset the cursor |
+| `add_worksheet(name, hide_grid=True, reset_loc=True, cell_scale=True, auto_fit=False, zoom_perc=100, tab_color=None)` | Add a sheet and (by default) reset the cursor. `auto_fit=True` widens the columns to fit their content when `close_workbook()` runs |
 | `get_curr_loc(toCell=False)` | Current cursor, as `(row, col)` or as an `A1` string |
 | `reset_curr_loc(loc=(0, 0))` | Move the cursor |
 | `close_workbook()` | Finalize and save the `.xlsx` file |
@@ -93,7 +93,7 @@ ExcelMaster    (ExcelMaster.py)       worksheet-level API: cursor, tables, text,
 | Method | Description |
 |---|---|
 | `write_chart(worksheet, df, y_list, x=None, title='', chart_size=(30, 13), chart_type='line', ...)` | `chart_type` is `'line'`, `'column'`, `'stacked_column'`, or `'pie'` |
-| `write_duo_chart(worksheet, df, y1_list, y2_list=None, x=None, c1_type='column', c2_type='line', y1_axis_range=(0, 1), y2_axis_range=None, ..., title='', chart_size=(30, 13))` | Combined chart with a secondary y axis |
+| `write_duo_chart(worksheet, df, y1_list, y2_list=None, x=None, c1_type='column', c2_type='line', y1_axis_range=(0, 1), y2_axis_range=None, ..., title='', chart_size=(30, 13))` | Combined chart with a secondary y axis; without `y2_list` only the first chart is drawn |
 | `write_combined_chart(worksheet, chart1, chart2, ...)` | Merge two chart objects obtained with `retChart=True` |
 
 `chart_size` is `(rows, columns)` in worksheet cells (not pixels).

@@ -327,9 +327,11 @@ class ExcelWorkbook(ExcelFormat):
     def close_workbook(self):
         '''Finish writing the contents of the workbook and close the file.
 
-        Saves the workbook to ``filepath`` (until then the file is empty) and then calls ``remove_tmp_img`` to delete the
-        temporary box plot images from the working directory.
+        Fits the columns of the worksheets added with ``auto_fit=True``, saves the workbook to ``filepath`` (until then the
+        file is empty) and then calls ``remove_tmp_img`` to delete the temporary box plot images from the working directory.
         '''
+        for worksheet in getattr(self, "_autofit_sheets", []):
+            worksheet.autofit()
         self.workbook.close()
         self.remove_tmp_img(img_pattern = r".tmp_image_[0-9]+.png")
         logging.info("All temp images have been removed.")
@@ -394,6 +396,7 @@ class ExcelMaster(ExcelWorkbook):
 
         self.max_nrows = 1048576
         self.max_ncols = 16384
+        self._autofit_sheets = []
 
     def add_worksheet(self, name, hide_grid = True, reset_loc = True, cell_scale = True, auto_fit = False, zoom_perc = 100, tab_color = None):
         """Add a worksheet.
@@ -412,8 +415,10 @@ class ExcelMaster(ExcelWorkbook):
             ``(1, 2)`` makes the columns twice as wide). Any other value (``False``, None) leaves the sizes of the sheet and
             ``default_row_height`` / ``default_col_width`` untouched.
         auto_fit : bool, default False
-            Meant to fit the column widths automatically. ``True`` calls ``worksheet.auto_fit()``, which xlsxwriter does not
-            provide (it has ``autofit()``), so it raises ``AttributeError``; keep it False.
+            If True, widen the columns of the sheet to fit their content. The widths are fitted by ``close_workbook`` (with
+            ``worksheet.autofit()`` of xlsxwriter), once everything is written, because xlsxwriter measures the cells that
+            exist at that moment. A column is only widened, never narrowed below the width the sheet already has, so with
+            ``cell_scale=True`` the 64 px base width is the minimum.
         zoom_perc : int, default 100
             Zoom of the worksheet in percent (xlsxwriter accepts 10 to 400).
         tab_color : str or None, default None
@@ -443,7 +448,7 @@ class ExcelMaster(ExcelWorkbook):
             self.set_cell_size(ws)
             
         if auto_fit:
-            ws.auto_fit()
+            self._autofit_sheets.append(ws)
 
         if tab_color:
             ws.set_tab_color(tab_color)
@@ -1119,9 +1124,9 @@ class ExcelMaster(ExcelWorkbook):
         chart1 : xlsxwriter.chart.Chart
             Primary chart, obtained with ``retChart=True``. ``chart2`` is combined into it and it is the object inserted, so
             its title, size and primary axis apply.
-        chart2 : xlsxwriter.chart.Chart
+        chart2 : xlsxwriter.chart.Chart or None
             Secondary chart, obtained with ``retChart=True``, combined into ``chart1`` (xlsxwriter supports only some
-            combinations, for example a column chart with a line chart).
+            combinations, for example a column chart with a line chart). None inserts ``chart1`` alone.
         loc : tuple of int or None, default None
             ``(row, col)`` (zero-based) of the top-left cell. None starts at the cursor.
         chart_size : tuple of int, default (30, 13)
@@ -1143,7 +1148,8 @@ class ExcelMaster(ExcelWorkbook):
         start_row = loc[0] if loc else self.curr_row
         start_col = loc[1] if loc else self.curr_col
         
-        chart1.combine(chart2)
+        if chart2 is not None:
+            chart1.combine(chart2)
         worksheet.insert_chart(xl_rowcol_to_cell(start_row, start_col), chart1)
 
         written_range = [start_row, start_col, (start_row + chart_size[0]), (start_col + chart_size[1])]
@@ -1179,7 +1185,8 @@ class ExcelMaster(ExcelWorkbook):
 
         Builds two charts from ``df`` and ``x`` with ``write_chart`` (the first from ``y1_list`` on the primary y axis, the
         second from ``y2_list`` on the secondary y axis), combines them and inserts the result. Typical use: columns for counts
-        on the left axis and a line for a rate on the right axis.
+        on the left axis and a line for a rate on the right axis. Without ``y2_list`` only the first chart is built and
+        inserted.
 
         Parameters
         ----------
@@ -1190,8 +1197,8 @@ class ExcelMaster(ExcelWorkbook):
         y1_list : list of str
             Columns drawn on the primary y axis, in the chart type ``c1_type``.
         y2_list : list of str, default None
-            Columns drawn on the secondary y axis, in the chart type ``c2_type``. In practice it is required: the default None
-            makes the second chart fail (``KeyError`` or ``TypeError``).
+            Columns drawn on the secondary y axis, in the chart type ``c2_type``. With the default None there is no second
+            chart and no secondary axis: the first chart is inserted alone.
         x : str or list of str or None, default None
             Column(s) that give the category labels, as in ``write_chart``. None uses the index of ``df``.
         c1_type : str or dict, default "column"
@@ -1239,12 +1246,12 @@ class ExcelMaster(ExcelWorkbook):
         Returns
         -------
         tuple of xlsxwriter.chart.Chart or int or str or list of int
-            The tuple ``(chart1, chart2)`` when ``retChart`` is True; otherwise the result of ``write_combined_chart``: 0, or the
-            covered range as selected by ``retCellRange``.
+            The tuple ``(chart1, chart2)`` when ``retChart`` is True (``chart2`` is None when ``y2_list`` is None); otherwise
+            the result of ``write_combined_chart``: 0, or the covered range as selected by ``retCellRange``.
 
         Notes
         -----
-        Two hidden worksheets ``__CHRT_DATA_<N>`` (one per chart) are added to the workbook.
+        One hidden worksheet ``__CHRT_DATA_<N>`` per chart is added to the workbook.
         """
 
         start_row = loc[0] if loc else self.curr_row
@@ -1281,21 +1288,23 @@ class ExcelMaster(ExcelWorkbook):
                                   line_marker = y1_line_marker,
                                   retChart = True)
         
-        chart2 = self.write_chart(df = df, 
-                                  x = x,
-                                  y_list = y2_list, 
-                                  worksheet=worksheet, 
-                                  title = title, 
-                                  chart_type = c2_type, 
-                                  chart_size = chart_size,
-                                  y_axis_range = y2_axis_range,
-                                  y2_axis = y2_axis,
-                                  xy_axes_name = xy2_name,
-                                  major_gridlines = False,
-                                  y_num_format = y2_num_format,
-                                  line_type = y2_line_type,
-                                  line_marker = y2_line_marker,
-                                  retChart=True)
+        chart2 = None
+        if y2_axis:
+            chart2 = self.write_chart(df = df, 
+                                      x = x,
+                                      y_list = y2_list, 
+                                      worksheet=worksheet, 
+                                      title = title, 
+                                      chart_type = c2_type, 
+                                      chart_size = chart_size,
+                                      y_axis_range = y2_axis_range,
+                                      y2_axis = y2_axis,
+                                      xy_axes_name = xy2_name,
+                                      major_gridlines = False,
+                                      y_num_format = y2_num_format,
+                                      line_type = y2_line_type,
+                                      line_marker = y2_line_marker,
+                                      retChart=True)
 
         # Need to Return Chart before Insert it to the worksheet.
         if retChart:
@@ -1541,7 +1550,7 @@ class ExcelMaster(ExcelWorkbook):
         y : str
             Numeric column whose distribution is drawn in each box.
         y_percentage : bool, default False
-            If True, format the y axis as percent (``PercentFormatter(100)``).
+            If True, multiply the values of ``y`` by 100 and format the y axis as percent (``PercentFormatter(100)``).
         colored_box : bool, default True
             If True, fill the boxes with the colors of ``color_grp`` (alpha 0.7); otherwise draw unfilled boxes.
         color_grp : tuple or str or list of str, default (10, 1)
@@ -1567,16 +1576,15 @@ class ExcelMaster(ExcelWorkbook):
 
         Notes
         -----
-        The values of ``y`` are always multiplied by 100: the call that prepares the data passes ``y_percentage=True`` whatever
-        this argument is, so ``y_percentage=False`` only skips the percent formatting of the axis (which then shows values 100
-        times larger than ``y``). It is meant for rates between 0 and 1.
+        ``y_percentage=True`` multiplies the values of ``y`` by 100 and labels the axis as percent, so it is meant for rates
+        between 0 and 1. With ``y_percentage=False`` the values are drawn as they are.
         """
         
         plt.style.use('default')
         
         fig, ax = plt.subplots(1, 1, figsize = figsize, dpi=200)
         
-        box_plot_data = convert_to_boxplot_data(df, x, y, True)
+        box_plot_data = convert_to_boxplot_data(df, x, y, y_percentage)
         
         bplot = ax.boxplot(box_plot_data.values(), patch_artist=colored_box, widths = 0.4)
         ax.set_xticklabels(box_plot_data.keys(), fontsize = fontsize)
@@ -1622,9 +1630,9 @@ class ExcelMaster(ExcelWorkbook):
         x : str
             Column that defines the groups, one box per distinct value.
         y : str
-            Numeric column whose distribution is drawn in each box (always multiplied by 100, see ``plot_boxplot``).
+            Numeric column whose distribution is drawn in each box.
         y_percentage : bool, default False
-            If True, format the y axis as percent.
+            If True, multiply the values by 100 and format the y axis as percent (see ``plot_boxplot``).
         colored_box : bool, default True
             If True, fill the boxes with the colors of ``color_grp``.
         color_grp : tuple or str or list of str, default (10, 1)

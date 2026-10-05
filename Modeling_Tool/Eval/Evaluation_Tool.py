@@ -1283,9 +1283,10 @@ class Model_Evaluation_Tool:
         Returns
         -------
         pandas.DataFrame
-            Combined results from all subsets, with the subset label in the column ``subset_var_name``. If no subset is
-            evaluated or none returns a non-empty result, a one-row DataFrame that only holds the label of the last
-            subset in ``subset_var_name`` is returned.
+            Combined results from all subsets, with the subset label in the column ``subset_var_name``. With no subset
+            condition at all (an empty dict) the result is an empty DataFrame that has only the column ``subset_var_name``.
+            If there are conditions but no subset is evaluated or none returns a non-empty result, a one-row DataFrame that
+            only holds the label of the last subset in ``subset_var_name`` is returned.
 
         Notes
         -----
@@ -1326,7 +1327,9 @@ class Model_Evaluation_Tool:
         
         if fnl_subset_results:
             return pd.concat(fnl_subset_results)
-        
+
+        if not condition_dict:
+            return pd.DataFrame({subset_var_name: []})
         return pd.DataFrame({subset_var_name: [group_value]})
     
     def multi_ylabel_wrapper(
