@@ -20,6 +20,7 @@ Modeling_Tool`` never pulls them in. Install the full explainability extra with:
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.metadata
 import inspect
 import sys
@@ -145,6 +146,7 @@ class ModelExplainer:
         self.coalition_structure_ = None
         self._owen_explainer = None
         self._owen_model_output = None
+        self._owen_cache = None
         self.owen_values_ = None
         self.owen_expected_value_ = None
         self.owen_explanation_ = None
@@ -858,7 +860,45 @@ class ModelExplainer:
         masker = shap.maskers.Partition(background, clustering=coalition_structure["shap_lnk"])
         self._owen_explainer = shap.PartitionExplainer(self._prediction_fn(model_output), masker)
         self._owen_model_output = model_output
+        self._owen_cache = {
+            "model_output": model_output,
+            "structure": self._structure_digest(coalition_structure),
+            "background": self._frame_digest(background),
+        }
         return self._owen_explainer
+
+    @staticmethod
+    def _structure_digest(coalition_structure):
+        """Hashable summary of what a coalition structure contributes to the partition tree: features and linkage."""
+        linkage = np.ascontiguousarray(np.asarray(coalition_structure["shap_lnk"], dtype=float))
+        features = coalition_structure.get("features")
+        return (
+            None if features is None else tuple(str(feature) for feature in features),
+            linkage.shape,
+            hashlib.md5(linkage.tobytes()).hexdigest(),
+        )
+
+    @staticmethod
+    def _frame_digest(frame):
+        """Hashable summary of a background frame: shape, column names and the values, row by row."""
+        row_hashes = pd.util.hash_pandas_object(frame, index=False).to_numpy()
+        return (frame.shape, tuple(str(column) for column in frame.columns), hashlib.md5(row_hashes.tobytes()).hexdigest())
+
+    def _owen_cache_is_stale(self, coalition_structure, background_data, model_output):
+        """Whether the cached ``PartitionExplainer`` was built from another structure, background or output."""
+        cache = self._owen_cache
+        if self._owen_explainer is None or cache is None:
+            return True
+        if cache["model_output"] != model_output or cache["structure"] != self._structure_digest(coalition_structure):
+            return True
+        background = background_data if background_data is not None else self.background_data
+        if background is None:
+            return False  # nothing to rebuild from, so keep the explainer that exists
+        background = self._as_frame(background)
+        features = coalition_structure.get("features")
+        if features is not None:
+            background = background.loc[:, list(features)]
+        return cache["background"] != self._frame_digest(background)
 
     def explain_owen(
         self,
@@ -904,16 +944,17 @@ class ModelExplainer:
         background_data : pandas.DataFrame, array-like, or None, default None
             Background sample for building the structure (when it is built here) and
             for the SHAP ``PartitionExplainer``. Defaults to the constructor's
-            ``background_data``. It has no effect on a ``PartitionExplainer`` that is
-            already built, unless ``rebuild=True``.
+            ``background_data``. A background whose values differ from those the cached
+            ``PartitionExplainer`` was built with makes it rebuild.
         model_output : str, default "probability"
             Quantity to explain: ``"probability"`` (positive-class probability) or
             ``"log_odds"`` (``"logit"`` is accepted as an alias). Any other value raises
             ``ValueError``.
         rebuild : bool, default False
             If ``True``, build a new ``PartitionExplainer`` instead of reusing the cached
-            one. It is also rebuilt automatically when ``model_output`` differs from the
-            value used by the previous call.
+            one. It is also rebuilt automatically when the coalition structure (its
+            features and linkage), the background values or ``model_output`` differ from
+            those the cached explainer was built with.
         **explain_kwargs
             Extra keyword arguments passed to the ``PartitionExplainer`` call, for example
             ``max_evals`` or ``silent``.
@@ -937,11 +978,11 @@ class ModelExplainer:
         Sets ``coalition_structure_``, ``owen_values_``, ``owen_expected_value_`` and
         ``owen_explanation_``, and remembers ``X`` for the Owen importance methods.
 
-        The ``PartitionExplainer`` is cached: it is rebuilt only when ``rebuild=True`` or
-        ``model_output`` changes. A different ``coalition_structure``, ``prior_groups`` or
-        ``background_data`` passed in a later call updates ``coalition_structure_`` but
-        does not change the partition tree the explainer already uses, so pass
-        ``rebuild=True`` whenever the grouping or the background changes.
+        The ``PartitionExplainer`` is cached and reused while the coalition structure
+        (its features and linkage), the background values and ``model_output`` stay the
+        same, for example when only ``X`` changes or when the same ``prior_groups`` are
+        passed again. A change of any of them, or ``rebuild=True``, builds a new one. A
+        later call without any background keeps the explainer that was built.
         """
         frame = self._as_frame(X)
         if coalition_structure is None:
@@ -961,7 +1002,7 @@ class ModelExplainer:
         if features is not None:
             frame = frame.loc[:, list(features)]
 
-        if rebuild or self._owen_explainer is None or self._owen_model_output != model_output:
+        if rebuild or self._owen_cache_is_stale(coalition_structure, background_data, model_output):
             self._build_owen_explainer(coalition_structure, background_data=background_data, model_output=model_output)
 
         explanation = self._owen_explainer(frame, **explain_kwargs)
