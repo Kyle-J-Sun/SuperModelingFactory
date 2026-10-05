@@ -75,8 +75,8 @@ class CreditModelPipelineConfig:
         ``eval_weight_col``, the evaluation. The WOE fit is unweighted. ``None`` runs unweighted.
     random_state : int, default 42
         Seed of the random INS/OOS split (unless ``split_config`` sets its own), the Optuna searches, the explanation
-        sampling and CatBoost training. The built-in LightGBM and XGBoost parameters fix ``random_state`` at 42, so this
-        value does not reach those two models unless ``model_params`` sets it.
+        sampling, and the LightGBM, XGBoost and CatBoost models: the final models, their Optuna candidates and the
+        backward-elimination proxy. A ``random_state`` in ``model_params`` for a model takes precedence for that model.
     write_outputs : bool, default True
         Whether to write the CSV files and the explanation files into ``output_dir``, for the results that exist:
         ``psi_result.csv``, ``iv_report.csv``, ``lr_pvalue_elimination.csv``, ``woe_table_ins.csv``,
@@ -600,7 +600,6 @@ class CreditModelPipeline:
             "colsample_bytree": 0.8,
             "reg_alpha": 0.1,
             "reg_lambda": 1.0,
-            "random_state": 42,
             "n_jobs": -1,
             "verbose": -1,
             "early_stopping_rounds": 50,
@@ -615,7 +614,6 @@ class CreditModelPipeline:
             "colsample_bytree": 0.8,
             "reg_alpha": 0.1,
             "reg_lambda": 1.0,
-            "random_state": 42,
             "n_jobs": -1,
             "eval_metric": "auc",
         },
@@ -824,6 +822,24 @@ class CreditModelPipeline:
             excluded.add(cfg.weight_col)
         numeric_cols = data.select_dtypes(include=[np.number]).columns
         return [col for col in numeric_cols if col not in excluded]
+
+    def _model_params(self, name: str) -> dict[str, Any]:
+        """Parameters of a built-in model: the defaults, then ``model_params[name]``.
+
+        The GBM models (``lgb``, ``xgb``, ``cat``) get ``random_state=config.random_state`` unless ``model_params`` sets
+        one; the built-in defaults carry no seed of their own.
+        """
+        params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), self.config.model_params.get(name, {}))
+        if name in {"lgb", "xgb", "cat"}:
+            params.setdefault("random_state", self.config.random_state)
+        return params
+
+    def _model_params_for_backward(self) -> dict[str, Any]:
+        """Default parameters of the backward-elimination proxy model, seeded with ``config.random_state``."""
+        return merge_dict(
+            self._DEFAULT_MODEL_PARAMS.get(self._backward_model_name(), {}),
+            {"random_state": self.config.random_state},
+        )
 
     def _backward_model_name(self) -> str:
         """Normalized ``backward_model``: stripped and lower-case (``"None"`` for a missing value)."""
@@ -1529,7 +1545,7 @@ class CreditModelPipeline:
             if not feature_cols:
                 raise ValueError(f"No training features available for model type: {raw_name!r}")
             train, val = splits["ins"], splits["oos"]
-            params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), cfg.model_params.get(name, {}))
+            params = self._model_params(name)
             if name == "lr" and cfg.use_lr_search_params and hasattr(self, "_lr_best_params"):
                 params = merge_dict(params, getattr(self, "_lr_best_params", {}))
             if name == "lr":
@@ -1554,7 +1570,6 @@ class CreditModelPipeline:
                 if self._warm_start_requested_for(name) and name == "cat":
                     if cfg.warm_start_on_unsupported == "raise":
                         raise NotImplementedError("CatBoost does not support warm-start init_score")
-                params.setdefault("random_state", cfg.random_state)
                 gbm = GradientBoostingModel(name, params)
                 init_score = self._get_warm_start_init_score(name, train)
                 gbm.fit(
@@ -1671,7 +1686,7 @@ class CreditModelPipeline:
             run_params = merge_dict(
                 {
                     "n_rounds": 3,
-                    "varreduct_params": self._DEFAULT_MODEL_PARAMS.get(self._backward_model_name(), {}),
+                    "varreduct_params": self._model_params_for_backward(),
                     "stopping_metric": "auc",
                     "num_boost_round": 200,
                     "early_stopping_rounds": 20,
@@ -1934,8 +1949,7 @@ class CreditModelPipeline:
                 if cfg.warm_start_on_unsupported == "raise":
                     raise NotImplementedError("CatBoost does not support warm-start init_score")
             try:
-                params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), cfg.model_params.get(name, {}))
-                searcher = GradientBoostingModel(name, params)
+                searcher = GradientBoostingModel(name, self._model_params(name))
                 fit_kwargs = dict(cfg.optuna_params.get("fit_kwargs", {}))
                 if cfg.warm_start_apply_to_optuna and self._warm_start_requested_for(name):
                     fit_kwargs["init_score"] = self._get_warm_start_init_score(name, splits["ins"])
