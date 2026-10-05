@@ -93,6 +93,21 @@ fontdicts = {
 }
 
 def timeit_decorator(func):
+    """Decorator that times every call of ``func``.
+
+    The elapsed time is measured but not reported (the line that prints it is commented out), so the wrapped function
+    behaves exactly like ``func``: same arguments, same return value, and the metadata is preserved by ``functools.wraps``.
+
+    Parameters
+    ----------
+    func: callable
+        Function to wrap.
+
+    Returns
+    -------
+    wrapper: callable
+        The wrapped function.
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.time()
@@ -115,11 +130,18 @@ def calc_pr(y_true, y_score, sample_weight=None):
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
         Sequence of predicted probabilities.
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. When given, the weighted implementation of ``weighted_eval_utils`` is used.
 
     Returns
     -------
     pr_df: pandas.DataFrame
         Dataset of PR statistics such as precision, recall, and thresholds.
+
+    Notes
+    -----
+    The columns are ``precision``, ``recall``, ``thresholds`` and, on the unweighted path only, ``thresholds_percentile``
+    (percentage of scores at or below the threshold). The last row has no threshold (NaN).
     """
     if sample_weight is not None:
         return _weighted_eval.calc_pr(y_true, y_score, sample_weight=sample_weight)
@@ -146,7 +168,9 @@ def summarize_pr(pr_df):
     Returns
     -------
     pr_info: dict
-        Dictionary of P-R curve summary statistics.
+        Dictionary of P-R curve summary statistics: ``bep_index`` (row of the break-even point, where precision and
+        recall are closest), ``bep_threshold``, ``bep_precision`` and ``bep_recall``. All four values are NaN when the gap
+        between precision and recall is undefined (all NaN, e.g. a sample with a single class).
     """
     gap = abs(pr_df['precision'] - pr_df['recall'])
     if not gap.notna().any():
@@ -176,6 +200,11 @@ def plot_pr_curve(pr_dfs,  square_figsize=8, to_show=True, save_path=None):
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One entry draws a single curve with its break-even point (BEP); several entries are overlaid, and at most three can be
+    drawn together (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('P-R Curve', fontsize=20, fontweight='bold') #, findfont=zhfont)
@@ -266,11 +295,20 @@ def calc_roc(y_true, y_score, sample_weight=None):
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
         Sequence of predicted probabilities.
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. When given, the weighted implementation of ``weighted_eval_utils`` is used.
 
     Returns
     -------
     roc_df: pandas.DataFrame
         Dataset of ROC statistics such as TPR, FPR, and thresholds.
+
+    Notes
+    -----
+    The columns are ``fpr``, ``tpr``, ``thresholds`` and ``thresholds_percentile`` (percentage of the samples, or of the total
+    weight when weighted, with a score at or below the threshold). The weighted result also has ``FPR``, ``TPR`` and ``KS``
+    (``abs(tpr - fpr)``). Rows whose label, score or weight is not finite are dropped; if no row is left, an empty
+    DataFrame with these columns is returned.
     """
     
     if sample_weight is not None:
@@ -332,7 +370,9 @@ def summarize_roc(roc_df):
     Returns
     -------
     roc_info: dict
-        Dictionary of ROC curve summary statistics.
+        Dictionary of ROC curve summary statistics: ``auc``, ``ks_index`` (row of the largest ``tpr - fpr``),
+        ``ks_threshold`` (score threshold at that row) and ``ks`` (largest ``abs(tpr - fpr)``). All four values are NaN when
+        ``roc_df`` is empty or TPR/FPR are all NaN (e.g. a sample with a single class).
     """
     
     if roc_df.empty:
@@ -421,10 +461,18 @@ def plot_roc_curve(roc_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_sh
         Key-value pairs in the format {name: roc_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One entry draws a single ROC curve with its KS gap; several entries are overlaid, and at most three can be drawn
+    together (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('ROC Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight'])
@@ -523,16 +571,23 @@ def plot_kde_curve(y_true, y_score_dict, bins=20, square_figsize=8, fontdicts=fo
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score_dict: dict
         Dictionary of one or more score sequences, as key-value pairs in the format {name: Score}.
-    bins: int
-        Number of bins.
+    bins: int, default 20
+        Number of histogram bins; it also sets the bandwidth factor of the KDE (``1 / bins / 2``).
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
-    fontdicts: dict
-        Dictionary of font settings for the plot.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One score draws a histogram plus the KDE curves of the negative and the positive samples; several scores draw one KDE
+    curve per score and at most three can be drawn together (the palette has three colors, a fourth raises ``IndexError``).
+    The plot is unweighted: there is no weight argument.
     """
     y_true = np.array(y_true)
     plt.figure(figsize=(square_figsize, square_figsize))
@@ -876,15 +931,32 @@ def calc_equid_dist(y_true, y_score, y_group=None, bins=10, sample_weight=None):
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
         Sequence of predicted probabilities.
-    y_group: array like
+    y_group: array like or None, default None
         Sequence of data groups. Defaults to None, i.e. no groups.
-    bins: int
+    bins: int, default 10
         Number of bins.
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. When given, ``y_group`` is ignored and a weighted Gains table is
+        returned instead (see Notes).
 
     Returns
     -------
     dist_df: pandas.DataFrame
-        Dataset of per-bin statistics after equal-width binning.
+        Dataset of per-bin statistics after equal-width binning: one row per bin (per group and bin when ``y_group`` is
+        given) with the columns ``thresholds`` (upper edge of the bin), ``min_score``, ``max_score``, ``n``,
+        ``proportion``, ``sum_true``, ``sum_score``, ``avg_true``, ``avg_score``, ``capture_rate`` and the cumulative
+        columns ``cumsum_n``, ``cumsum_proportion``, ``cumsum_true``, ``cumsum_score``, ``cumavg_true`` and
+        ``cumavg_score``. ``y_group`` is the first column when groups are given.
+
+    Notes
+    -----
+    The bin edges follow powers of ten: they run from 0 (or, for negative scores, from the negative power of ten at or
+    below the minimum score) to the power of ten at or above the maximum score, so probabilities are cut at 0, 0.1, ..., 1
+    when ``bins=10``.
+
+    With ``sample_weight`` the call is delegated to the weighted Gains-table implementation. The result is then a Gains
+    table (columns ``MIN``, ``MAX``, ``N``, ``N_RAW``, ``AVG_BAD``, ``LIFT``, ... indexed by ``_bin_num`` and
+    ``_bin_range``) built from ``bins`` equal-weight bins, not an equal-width table.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_equid_dist(y_true, y_score, bins=bins, sample_weight=sample_weight)
@@ -920,17 +992,33 @@ def calc_equid_pct(y_true, y_score, y_group=None, bins=10, ascending=True, sampl
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
         Sequence of predicted probabilities.
-    y_group: array like
+    y_group: array like or None, default None
         Sequence of data groups. Defaults to None, i.e. no groups.
-    bins: int
+    bins: int, default 10
         Number of bins.
-    ascending: bool
-        Whether to sort y_score in ascending order. Defaults to True.
+    ascending: bool, default True
+        Whether to sort y_score in ascending order. Defaults to True, i.e. the first bin holds the lowest scores; with
+        False it holds the highest scores.
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. When given, ``y_group`` is ignored and a weighted Gains table is
+        returned instead (see Notes).
 
     Returns
     -------
     pct_df: pandas.DataFrame
-        Dataset of per-bin statistics after equal-frequency binning.
+        Dataset of per-bin statistics after equal-frequency binning. It has the columns of ``calc_equid_dist`` plus ``lift``
+        (cumulative bad rate divided by the overall bad rate) and ``gain`` (cumulative capture rate); ``thresholds`` is the
+        cumulative percentile label of the bin (``100 * k / bins`` for the k-th bin, truncated to an integer).
+
+    Notes
+    -----
+    The rows are ranked by score and cut into ``bins`` bins of ``int(n / bins)`` rows each; the remainder goes to the last
+    bin.
+
+    With ``sample_weight`` the call is delegated to the weighted Gains-table implementation. The result is then a Gains
+    table (columns ``MIN``, ``MAX``, ``N``, ``N_RAW``, ``AVG_BAD``, ``LIFT``, ... indexed by ``_bin_num`` and
+    ``_bin_range``) built from ``bins`` equal-weight bins (bin 1 holds the lowest scores when ``ascending=True``), not the
+    table described above.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_equid_pct(
@@ -984,17 +1072,37 @@ def calc_fixed_pct(y_true, y_score, y_group=None, bin_edges=None, ascending=True
         Sequence of actual sample labels; only 0/1 values are accepted.
     y_score: array like
         Sequence of predicted probabilities.
-    y_group: array like
+    y_group: array like or None, default None
         Sequence of data groups. Defaults to None, i.e. no groups.
-    bin_edges: array like
-        Fixed bin edges, usually taken from a benchmark dataset.
-    ascending: bool
-        Whether to bin y_score in ascending order. Defaults to True.
+    bin_edges: array like or None, default None
+        Fixed bin edges, usually taken from a benchmark dataset. Required unless ``sample_weight`` is given. The edges are
+        sorted, and infinite edges may also be given as the strings 'inf' and '-inf'.
+    ascending: bool, default True
+        Whether to bin y_score in ascending order. Defaults to True: the percentile labels grow with the score; with False
+        they are reversed (the interval with the lowest scores gets the largest label).
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. When given, ``bin_edges`` and ``y_group`` are ignored (see Notes).
 
     Returns
     -------
     pct_df: pandas.DataFrame
-        Dataset of per-bin statistics after fixed binning.
+        Dataset of per-bin statistics after fixed binning. It has the same columns as the result of ``calc_equid_pct``,
+        including ``lift`` and ``gain``; ``thresholds`` is the percentile label ``100 * k / n_bins`` of the k-th interval.
+
+    Raises
+    ------
+    ValueError
+        If ``bin_edges`` is None and ``sample_weight`` is None.
+
+    Notes
+    -----
+    The intervals are closed on the right, ``(edge_k, edge_k+1]``. A score equal to the lowest edge, or outside all the
+    edges, falls in no bin and is left out of the table, although it still counts in the totals behind ``proportion`` and
+    ``capture_rate``.
+
+    With ``sample_weight`` the call is delegated to the weighted Gains-table implementation, which does not use
+    ``bin_edges``: the result is a Gains table (columns ``MIN``, ``MAX``, ``N``, ``N_RAW``, ``AVG_BAD``, ``LIFT``, ...)
+    with 10 equal-weight bins, whatever edges are passed.
     """
     if sample_weight is not None:
         return _weighted_eval.calc_fixed_pct(
@@ -1046,11 +1154,18 @@ def summarize_pct(pct_df, ascending=True):
     ----------
     pct_df: pandas.DataFrame
         Dataset of per-bin statistics after equal-frequency binning.
+    ascending: bool, default True
+        Score order of the rows of ``pct_df``: True if the first row holds the lowest scores (so the last row is the top
+        bin), False if the first row holds the highest scores.
 
     Returns
     -------
     pct_info: dict
-        Dictionary of equal-frequency binning summary statistics.
+        Dictionary of equal-frequency binning summary statistics: ``pct_bins`` (number of bins), ``pct_interval``
+        (``100 / pct_bins``) and, when ``pct_df`` has an ``avg_true`` column, ``pct_top_avgTrue`` and ``pct_btm_avgTrue``
+        (target rate of the top and of the bottom bin). With ``ascending=False`` and a ``capture_rate`` column,
+        ``pct_top_captureRate`` (last row) and ``pct_btm_captureRate`` (first row) are added. For an empty ``pct_df`` the
+        first four values are NaN.
     """
     
     if pct_df.empty:
@@ -1100,12 +1215,19 @@ def plot_dist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_
         Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
-    fontdicts: dict
-        Dictionary of font settings for the plot.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One entry draws the proportion of each bin as bars together with the target rate of the bin (the bars are stacked by
+    group when the table has a ``y_group`` column); several entries are overlaid, and at most three can be drawn together
+    (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Distribution Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1243,7 +1365,7 @@ def __plot_multi_dist_axes(dist_dfs, ax, fontdicts):
 
 @timeit_decorator
 def plot_cumdist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """Plot the score distribution curve.
+    """Plot the score cumulative distribution curve.
 
     Parameters
     ----------
@@ -1251,12 +1373,19 @@ def plot_cumdist_curve(dist_dfs, square_figsize=8, fontdicts=fontdicts['main'], 
         Per-bin statistics datasets (equal-width binning, same number of bins) for one or more scores, as key-value pairs in the format {name: dist_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
-    fontdicts: dict
-        Dictionary of font settings for the plot.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One entry draws the cumulative proportion of each bin as bars together with the cumulative target rate (the bars are
+    stacked by group when the table has a ``y_group`` column); several entries are overlaid, and at most three can be drawn
+    together (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Cumulative Distribution Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1392,7 +1521,7 @@ def __plot_multi_cumdist_axes(dist_dfs, ax, fontdicts):
 # PCT Curve
 @timeit_decorator
 def plot_pct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """Plot the score distribution curve.
+    """Plot the score percentile curve.
 
     Parameters
     ----------
@@ -1400,10 +1529,19 @@ def plot_pct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_sh
         Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    One entry draws the average score and the target rate of each bin against the percentile, with the overall target rate
+    as a reference line; several entries are overlaid (target rate only), and at most three can be drawn together (the
+    palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Percentile Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1493,7 +1631,7 @@ def __plot_multi_pct_axes(pct_dfs, ax, fontdicts):
 
 @timeit_decorator
 def plot_cumpct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None):
-    """Plot the score distribution curve.
+    """Plot the cumulative score percentile curve.
 
     Parameters
     ----------
@@ -1501,10 +1639,20 @@ def plot_cumpct_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to
         Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
+
+    Notes
+    -----
+    The curves show the cumulative target rate (and, for a single entry, the cumulative average score) against the
+    cumulative percentile. A single entry reads a ``thresholds_percentile`` column from its table, which the result of
+    ``calc_equid_pct`` does not have (``KeyError``); several entries use the ``thresholds`` column, and at most three can be
+    drawn together (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Score Percentile Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight']) #, findfont=zhfont)
@@ -1589,7 +1737,7 @@ def __plot_multi_cumpct_axes(pct_dfs, ax, fontdicts):
 # Gain Curve
 @timeit_decorator
 def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_show=True, save_path=None, ascending=False):
-    """Plot the score distribution curve.
+    """Plot the Gain curve (cumulative capture rate of the target against the cumulative percentile).
 
     Parameters
     ----------
@@ -1597,12 +1745,22 @@ def plot_gain_curve(pct_dfs, square_figsize=8, fontdicts=fontdicts['main'], to_s
         Per-bin statistics datasets (equal-frequency binning) for one or more scores, as key-value pairs in the format {name: pct_df}.
     square_figsize: float
         Side length of the square figure in inches. Defaults to 8.
+    fontdicts: dict, default fontdicts['main']
+        Dictionary of font settings for the plot, in the format of the module-level presets ``fontdicts['main']`` and
+        ``fontdicts['sub']`` (keys ``suptitle``, ``subtitle``, ``axislabel`` and ``legend``).
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
     ascending: bool, default False
         Whether the Gain chart accumulates by ascending score (True) or descending score (False).
+
+    Notes
+    -----
+    When a table has the columns ``avg_score``, ``proportion`` and ``capture_rate``, its rows are re-sorted by ``avg_score``
+    according to ``ascending`` and the cumulative percentile and gain are recomputed from them; otherwise the ``thresholds``
+    and ``gain`` columns are drawn as they are. A diagonal marks random selection. Several entries are overlaid, and at
+    most three can be drawn together (the palette has three colors, a fourth raises ``IndexError``).
     """
     plt.figure(figsize=(square_figsize, square_figsize))
     plt.suptitle('Gain Curve', fontsize=fontdicts['suptitle']['size'], fontweight=fontdicts['suptitle']['weight'])  #, findfont=zhfont)
@@ -1769,28 +1927,51 @@ def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, 
 
     Parameters
     ----------
-    datasets: pandas.DataFrame
+    datasets: dict
         Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score}}.
+        A dataset may also carry a ``'sample_weight'`` entry with its own sample weights.
     dist_bins: int
         Number of equal-width bins. Defaults to 20.
     pct_bins: int
         Number of equal-frequency bins. Defaults to 10.
     square_figsize: float
-        Side length of the square figure in inches. Defaults to 8.
+        Side length of the square figure in inches. Defaults to 5.
     fontdicts: dict
         Dictionary of font settings for the plot. Defaults to fontdicts['sub'].
     to_show: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
-    ascending: bool, optional
+    gains_table: bool, default True
+        Whether the percentile panel and the Top/Btm target rates of the result are computed from the Gains-table binning
+        (``get_gains_table``) instead of the plain equal-frequency table of ``calc_equid_pct``. It has no visible effect
+        on the weighted path.
+    equal_freq: bool, default True
+        Equal-frequency (True) or equal-width (False) binning of the Gains table; only used when ``gains_table`` is True.
+    pct_bin_edges: array like or None, default None
+        Fixed score bin edges for the percentile and Gain panels, usually taken from a benchmark dataset (see
+        ``calc_fixed_pct``); None uses ``pct_bins`` equal-frequency bins. On the weighted path only the number of edges
+        matters: ``len(pct_bin_edges) - 1`` equal-weight bins are built.
+    sample_weight: array like or None, default None
+        Sample weights applied to every dataset that has no ``'sample_weight'`` entry of its own; its length must match
+        each of those datasets.
+    ascending: bool or None, default None
         An explicit value controls the score direction of the Gains table, the percentile chart, and the
         Gain chart uniformly; None keeps the historical behavior (percentile ascending, Gain descending).
-    
+
     Returns
     -------
     result_df: pandas.DataFrame
-        Dataset summarizing the model evaluation metrics.
+        Dataset summarizing the model evaluation metrics, one row per dataset with the columns ``index`` (dataset name),
+        ``N`` (number of rows, or the sum of the weights), ``avgTrue``, ``avgScore``, ``KS``, ``AUC``, ``Btm{p}%_TargetRate``
+        and ``Top{p}%_TargetRate`` (target rate of the lowest- and of the highest-scored bin, with ``p = 100 / number of
+        bins``). If any dataset has fewer than two samples, nothing is drawn and an empty DataFrame is returned.
+
+    Notes
+    -----
+    Each dataset gets one row of four panels: ROC, KDE, percentile and Gain. Rows whose label, score or weight is not finite
+    are dropped. With weights, the metrics are weighted, the panel titles are marked ``Weighted`` and the percentile and
+    Gain panels are built from the equal-weight bins of the weighted Gains table.
     """
     if pct_bin_edges is not None:
         pct_bin_edges = list(pct_bin_edges)
@@ -1832,7 +2013,28 @@ def evaluate_performance(datasets, dist_bins=20, pct_bins=10, square_figsize=5, 
     return result_df
 
 def resturct_gains(gains_table):
-    
+    """Convert a Gains table into the percentile-table layout used by the plotting helpers.
+
+    The Gains columns are renamed (``_bin_num`` to ``thresholds``, ``MIN`` to ``min_score``, ``MAX`` to ``max_score``,
+    ``N`` to ``n``, ``PROP`` to ``proportion``, ``N_BAD`` to ``sum_true``, ``AVG_BAD`` to ``avg_true``, ``AVG_SCORE`` to
+    ``avg_score``, ``BAD_PCT_IN_EACH_BIN`` to ``capture_rate``, ``N_CUM_BAD`` to ``cumsum_true``, ``LIFT`` to ``lift`` and
+    ``CUM_BAD_PCT`` to ``gain``) and the column ``cumavg_true`` is added.
+
+    Parameters
+    ----------
+    gains_table: pandas.DataFrame
+        Gains table as returned by ``get_gains_table``: ``_bin_num`` as an index level or a column, and the columns ``MIN``,
+        ``MAX``, ``N``, ``PROP``, ``N_BAD``, ``AVG_BAD``, ``AVG_SCORE``, ``BAD_PCT_IN_EACH_BIN``, ``N_CUM_BAD``, ``LIFT`` and
+        ``CUM_BAD_PCT``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per bin with the columns ``thresholds`` (the bin number), ``min_score``, ``max_score``, ``n``,
+        ``proportion``, ``sum_true``, ``avg_true``, ``avg_score``, ``capture_rate``, ``cumsum_true``, ``lift``, ``gain`` and
+        ``cumavg_true`` (``cumsum_true`` divided by the cumulative ``n``).
+    """
+
     rename_dict = {"_bin_num": "thresholds",
                   "MIN": "min_score",
                   "MAX": "max_score",
@@ -2009,23 +2211,25 @@ def evaluate_distribution(datasets, dist_bins=10, square_figsize=5, fontdicts=fo
 
     Parameters
     ----------
-    datasets: pandas.DataFrame
+    datasets: dict
         Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}.
+        The ``'y_group'`` key is required in every dataset, but its value may be None (no groups).
     dist_bins: int
-        Number of equal-width bins. Defaults to 20.
+        Number of equal-width bins. Defaults to 10.
     square_figsize: float
-        Side length of the square figure in inches. Defaults to 8.
+        Side length of the square figure in inches. Defaults to 5.
     fontdicts: dict
         Dictionary of font settings for the plot. Defaults to fontdicts['sub'].
     toplot: bool
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
-    
+
     Returns
     -------
-    result_df: pandas.DataFrame
-        Dataset summarizing the model evaluation metrics.
+    None
+        Nothing is returned: the figure (one row of two panels per dataset, the score distribution and the cumulative
+        score distribution) is displayed and/or saved.
     """
     datas = list(datasets.keys())
     nrow = len(datas)
@@ -2093,8 +2297,9 @@ def comparison_performance(datasets, pct_bins=10, square_figsize=5, fontdicts=fo
 
     Parameters
     ----------
-    datasets: pandas.DataFrame
-        Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score': y_score, 'y_group': y_group}}.
+    datasets: dict
+        Dictionary of datasets, as key-value pairs in the format {dataname: {'y_true': y_true, 'y_score_dict': {modelname: y_score}}}.
+        ``y_score_dict`` maps each model name to its sequence of predicted probabilities.
     pct_bins: int
         Number of equal-frequency bins. Defaults to 10.
     square_figsize: float
@@ -2105,11 +2310,18 @@ def comparison_performance(datasets, pct_bins=10, square_figsize=5, fontdicts=fo
         Whether to display the figure. Defaults to True.
     save_path: str
         File path to save the resulting figure. Defaults to None, i.e. the figure is not saved.
-    
+
     Returns
     -------
     result_df: pandas.DataFrame
-        Dataset summarizing the model evaluation metrics.
+        Dataset summarizing the model evaluation metrics, one row per model and dataset with the columns ``model``, ``KS``,
+        ``AUC``, ``Btm{p}%_TargetRate``, ``Top{p}%_TargetRate`` (``p = 100 / pct_bins``), ``N``, ``avgTrue`` and ``dataset``.
+
+    Notes
+    -----
+    Each dataset gets one row of three panels: ROC, percentile target rate and cumulative target rate, with one curve per
+    model. At most three models can be compared (the palette has three colors, a fourth raises ``IndexError``). The
+    comparison is unweighted: there is no weight argument.
     """
     datas = list(datasets.keys())
     models = list(datasets[datas[0]]['y_score_dict'].keys())
@@ -2193,18 +2405,33 @@ def calc_lift_apt(y_true, y_score, start, stop, step, score_ascending=True, samp
     y_score: array like
         Sequence of predicted probabilities.
     start: numerical
-        Start value.
+        Start value of the target Lift range (see Notes).
     stop: numerical
-        Stop value.
+        Stop value of the target Lift range (see Notes).
     step: numerical
-        Step size.
-    score_ascending: bool
+        Step size between two target Lift values.
+    score_ascending: bool, default True
         Whether y_score is ascending, i.e. the larger the value, the more likely y_true=1. Defaults to True.
+    sample_weight: array like or None, default None
+        Per-sample weights aligned with ``y_true``. Integer-valued weights replicate the rows (a weight of 0 drops the
+        row) and the table described under Returns is still produced; any other (fractional) weights switch to the
+        weighted implementation, which returns a one-dimensional array instead.
 
     Returns
     -------
     lift_df: pandas.DataFrame
-        Lift table.
+        Lift table with one row per reachable target Lift and the columns ``lift`` (target), ``lift_actual`` (achieved),
+        ``lower_limit`` or ``upper_limit`` (score cut-off: the rows scoring at least ``lower_limit``, or below
+        ``upper_limit``, form the group), ``cumsum_n``, ``cumsum_proportion``, ``cumsum_true`` and ``cumavg_true`` (size,
+        share, bad count and bad rate of that group). With fractional ``sample_weight`` a one-dimensional numpy.ndarray is
+        returned instead: for each target Lift of ``np.arange(start, stop + step / 2, step)``, the closest Lift available
+        in the weighted 100-bin Gains table.
+
+    Notes
+    -----
+    The Lift range always has 1 at one end: with ``start < 1`` it runs from ``start`` up to 1 and ``stop`` is ignored;
+    with ``start >= 1`` it runs from 1 up to ``stop`` and ``start`` is ignored (so the table normally also contains the row
+    for Lift 1). The weighted implementation uses ``start`` and ``stop`` as given and ignores ``score_ascending``.
     """
     if sample_weight is not None:
         weight = np.asarray(sample_weight, dtype=float)

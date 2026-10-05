@@ -362,9 +362,10 @@ def _get_perf_summary_single(train,
         Whether to use decision-tree binning.
     random_state : int, default 42
         Random seed.
-    gains_table : bool, default True
-        Whether to compute the Gains table.
-    
+    gains_table : bool, default False
+        Whether the percentile panel and the Top/Btm target rates are built from the Gains-table binning (the
+        ``gains_table`` argument of ``evaluate_performance``). The Gains-table summary columns are added either way.
+
     Returns
     -------
     pandas.DataFrame or int
@@ -751,15 +752,15 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     
     Split the data into groups by the grouping column and compute the Gains table of each group separately.
     If no grouping column is specified, compute the overall Gains table.
-    
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input data table.
     dep : str
         Name of the target variable.
-    nbins : int, default 10
-        Number of bins.
+    nbins : int or list, default 10
+        Number of bins, or an explicit list of bin edges.
     precision : int, default 5
         Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
@@ -805,17 +806,34 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     wholeGroup : bool, default False
         Whether to use all the data for binning.
     add_func : callable, optional
-        Custom statistics function.
+        Custom statistics function. It receives the rows of one bin as a DataFrame (all the columns of ``data`` plus the bin
+        columns ``_bin_num`` and ``_bin_range``) and returns a Series whose values become extra columns of the table.
+        It is ignored on the weighted path.
     weight_col : str, optional
         Name of the sample weight column; when provided and ``grp_name`` is not given, the Gains table is
         aggregated by weight (``N`` in the output is the sum of the weights and ``N_RAW`` is the number of rows).
+        It is ignored when ``grp_name`` is given.
     weighted_binning : bool, optional
-        If True, use equal-frequency binning by cumulative weight; if False, bin by the number of rows (default).
+        Accepted for compatibility but without any effect: the weighted Gains table always uses equal-frequency bins by
+        cumulative weight, whatever its value.
 
     Returns
     -------
     pandas.DataFrame
-        Grouped Gains table.
+        Grouped Gains table. With ``retSummary=True`` a one-row summary (``N_BUMP``, ``MIN_RISK_DEP``, ``MAX_RISK_DEP``,
+        ``KS_IN_GAINS``, ``LIFT_IN_GAINS``, ``IV``, ``N_BINS``) instead, and with ``grp_name`` a table that is empty when
+        no group has at least ``min_data_size`` rows. When ``grp_name`` is None and neither ``score`` nor a ``model``
+        together with ``varlist`` is given, the integer -1 (nothing given), -2 (``varlist`` without ``model``) or -3
+        (``model`` without ``varlist``) is returned instead of an error.
+
+    Notes
+    -----
+    With ``weight_col`` and without ``grp_name`` the call is delegated to the weighted implementation, which only uses
+    ``nbins``, the score (``score``, or ``model`` with ``varlist``), ``ascending`` and ``retSummary``: ``precision``,
+    ``min_bin_prop``, ``include_missing``, ``equal_freq``, ``chi2_method``, ``chi2_p``, ``init_equi_bins``, ``fillna``,
+    ``spec_values``, ``tree_binning``, ``random_state``, ``withSummary`` and ``add_func`` are ignored. The weighted table has
+    the bins 1 to ``nbins``, each holding about ``1 / nbins`` of the total weight. With ``grp_name`` the weights are ignored
+    and ``withSummary`` is forced to False.
     """
     
     if weight_col is not None and grp_name is None:
@@ -1166,15 +1184,33 @@ def get_perf_summary(train, validation, oot, tgt_name,
         Whether to use decision-tree binning.
     random_state : int, default 42
         Random seed.
-    gains_table : bool, default True
-        Whether to compute the Gains table.
+    gains_table : bool, default False
+        Whether the percentile panel and the Top/Btm target rates are built from the Gains-table binning (the
+        ``gains_table`` argument of ``evaluate_performance``). The Gains-table summary columns are added either way.
     weight_col : str, optional
         Sample weight column in each dataset DataFrame; used for weighted metrics such as AUC/KS when there is no grouping.
+        It requires ``scr_name`` (see Notes) and is ignored when ``oot_grp_name`` is given.
 
     Returns
     -------
     pandas.DataFrame
-        Grouped performance evaluation summary table.
+        Grouped performance evaluation summary table: one row per given dataset (``ins``, ``oos``, ``oot``) with the
+        columns of ``evaluate_performance``, the Top/Btm lift, ``AUC_Shift``, ``KS_Shift`` and the Gains-table summary
+        columns. With ``oot_grp_name`` there is one such block per group of the OOT data, labeled in the ``grp_colname``
+        column (the ``ins`` and ``oos`` rows are repeated in every block), and an empty DataFrame is returned when no group
+        has at least ``min_data_size`` rows. Without ``oot_grp_name``, the integer -1, -2 or -3 is returned instead of an
+        error when ``scr_name`` and ``model`` with ``feature_cols`` are missing.
+
+    Notes
+    -----
+    With ``weight_col`` and without ``oot_grp_name`` the call is delegated to the weighted implementation: it needs
+    ``scr_name`` (with ``model`` and ``feature_cols`` instead it fails with ``KeyError``), only uses ``pct_bins`` as the
+    number of bins, ignores the figure, report, display and binning arguments, and returns a narrower table (``index``,
+    ``dataset``, ``DATASET``, ``AUC``, ``KS``, ``LIFT``, ``IV``, ``N``, ``N_RAW``, ``avgTrue``, ``avgScore``).
+
+    With ``oot_grp_name`` the figure, the report and the display are produced once per group, so ``fig_save_path`` and
+    ``rpt_save_path`` are overwritten by every group: the files only hold the last group (and the report has no group
+    column).
     """
     
     if weight_col is not None and oot_grp_name is None:
@@ -1378,7 +1414,20 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     -------
     pandas.DataFrame
         Cross-risk table.
-    
+
+    Raises
+    ------
+    ValueError
+        If the ratio syntax is used without a numerator and a denominator (for ``agg_func='ratio'``, ``agg_col`` must be a
+        two-element list or tuple), if a ratio column is not in ``data``, or if weights are combined with anything other
+        than the plain ``agg_func='mean'``.
+
+    Notes
+    -----
+    If the first score column is not binned (it is not numeric, or ``binning_numeric[0]`` is False), the helper columns
+    ``_bin_num1`` and ``_bin_range1`` (and ``_bin_num2`` and ``_bin_range2`` when the second score column is not binned
+    either) are added to the DataFrame passed as ``data``.
+
     Examples
     --------
     >>> cross_risk(data, score_list=['score1', 'score2'], dep='target', nbins=10)
@@ -1748,7 +1797,14 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
     Returns
     -------
     pandas.DataFrame
-        Grouped Gains table with custom metrics.
+        Grouped Gains table with custom metrics: the compact Gains columns (``MIN``, ``MAX``, ``N``, ``AVG_SCORE``,
+        ``AVG_BAD``, ``N_BAD``, ``N_GOOD``) plus one column per entry of ``eval_metrics``.
+
+    Notes
+    -----
+    ``eval_metrics`` names the columns of ``data`` that are aggregated in every bin with ``metric_agg_func``; its default
+    refers to the columns of a legacy dataset, so always pass your own list. The function has no weight argument, and its
+    default ``ascending=True`` differs from that of ``get_gains_table`` (False).
     """
     
     if grp_colname is None:
@@ -1879,24 +1935,25 @@ def tie_score_rate(data, score):
     """
     Compute the score tie rate.
     
-    Compute the proportion of non-unique score values, i.e. the share of samples whose score is duplicated.
-    
+    Compute the proportion of non-unique score values: one minus the number of distinct score values divided by the number
+    of rows (in a group of rows that share a score, all the rows but one are counted).
+
     Parameters
     ----------
     data : pandas.DataFrame
         Input data table.
     score : str
         Name of the score column.
-    
+
     Returns
     -------
     float
         Score tie rate (between 0 and 1).
-    
+
     Examples
     --------
     >>> tie_score_rate(data, 'score')
-    0.15  # means that 15% of the samples have a duplicated score
+    0.15  # means that the number of distinct scores is 85% of the number of rows
     """
     
     n_unique_scr = len(data[score].unique())
@@ -1976,7 +2033,14 @@ class GainsTableCalculator:
         Random seed.
     ascending : bool, default False
         Whether the bin order is ascending.
-    
+    weight_col : str, optional
+        Name of the sample weight column (must be in ``data``). When it is set, ``calculate`` returns the weighted Gains
+        table (``N`` is the sum of the weights and ``N_RAW`` the number of rows), except when it is called with
+        ``grp_name``.
+    weighted_binning : bool, optional
+        Accepted for compatibility but without any effect: the weighted Gains table always uses equal-frequency bins by
+        cumulative weight.
+
     Examples
     --------
     >>> calc = GainsTableCalculator(data, dep='target', score='score', nbins=10)
@@ -2031,9 +2095,12 @@ class GainsTableCalculator:
         ascending : bool, default False
             Whether the bin order is ascending.
         weight_col : str, optional
-            Name of the sample weight column (must be in ``data``).
+            Name of the sample weight column (must be in ``data``). When it is set, ``calculate`` returns the weighted
+            Gains table (``N`` is the sum of the weights and ``N_RAW`` the number of rows), except when it is called with
+            ``grp_name``.
         weighted_binning : bool, optional
-            If True, use equal-frequency binning by cumulative weight.
+            Accepted for compatibility but without any effect: the weighted Gains table always uses equal-frequency bins
+            by cumulative weight.
         """
         self.data = data
         self.dep = dep
@@ -2079,12 +2146,25 @@ class GainsTableCalculator:
         wholeGroup : bool, default False
             Whether to use all the data for binning.
         add_func : callable, optional
-            Custom statistics function.
-        
+            Custom statistics function. It receives the rows of one bin as a DataFrame (all the columns of ``data`` plus
+            the bin columns ``_bin_num`` and ``_bin_range``) and returns a Series whose values become extra columns. It is
+            ignored on the weighted path.
+        weight_col : str, optional
+            Sample weight column for this call; it overrides the ``weight_col`` of the calculator. Default is None, i.e.
+            the calculator's ``weight_col``.
+
         Returns
         -------
         pandas.DataFrame
             Gains table.
+
+        Notes
+        -----
+        The call is delegated to ``get_gains_table`` with the settings of the calculator. When a weight column applies and
+        ``grp_name`` is None, the weighted Gains table (bins 1 to ``nbins``, each with about ``1 / nbins`` of the total
+        weight) is returned and ``add_func`` and ``withSummary`` are ignored; with ``grp_name`` the weights are ignored.
+        Like ``get_gains_table``, it returns the integer -1, -2 or -3 (instead of raising) when neither ``score`` nor a
+        ``model`` with ``varlist`` was given to the calculator.
         """
         return get_gains_table(
             data = self.data,
@@ -2162,6 +2242,24 @@ class PerformanceEvaluator:
         Random seed.
     weight_col : str, optional
         Default weight column; each ``add_dataset`` call can also specify its own.
+    spec_values : list, optional
+        Sentinel score values (for example -1 for a score override) that carry no ordering information. Rows with such a
+        score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates) and of the figures, and are
+        binned separately in the Gains tables; on the weighted path ``N`` still counts them and the columns ``N_SPECIAL``
+        and ``N_SPECIAL_RAW`` report them. Default is None, which is stored as an empty list.
+    ascending : bool, optional
+        Score direction applied uniformly to the summary, the Gains tables and the figures, including the weighted paths.
+        Default is None, which keeps the legacy direction of every underlying function.
+
+    Attributes
+    ----------
+    datasets : dict
+        The datasets added with ``add_dataset``, by name.
+    dataset_weight_cols : dict
+        The weight column given to ``add_dataset`` for each dataset name (None when none was given).
+    evaluate_status : str or None
+        Outcome of the last ``evaluate`` call: ``'ok'``, ``'no_datasets'``, ``'compute_failed'`` (neither ``scr_name`` nor
+        ``model`` with ``feature_cols`` is set) or ``'empty_input'`` (the result is empty). None before the first call.
 
     Examples
     --------
@@ -2221,6 +2319,14 @@ class PerformanceEvaluator:
             Random seed.
         weight_col : str, optional
             Default weight column; each ``add_dataset`` call can also specify its own.
+        spec_values : list, optional
+            Sentinel score values (for example -1 for a score override) that carry no ordering information. Rows with such
+            a score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates) and of the figures, and
+            are binned separately in the Gains tables; on the weighted path ``N`` still counts them and the columns
+            ``N_SPECIAL`` and ``N_SPECIAL_RAW`` report them. Default is None, which is stored as an empty list.
+        ascending : bool, optional
+            Score direction applied uniformly to the summary, the Gains tables and the figures, including the weighted
+            paths. Default is None, which keeps the legacy direction of every underlying function.
         """
         self.tgt_name = tgt_name
         self.scr_name = scr_name
@@ -2272,11 +2378,22 @@ class PerformanceEvaluator:
             Name of the dataset (e.g. 'train', 'validation', 'oot').
         data : pandas.DataFrame
             Dataset.
-        
+        weight_col : str, optional
+            Sample weight column of this dataset (must be in ``data``); it takes precedence over the weight column given to
+            ``evaluate`` and to the constructor. Default is None.
+        overwrite : bool, default False
+            Whether a dataset that already has this ``name`` may be replaced (a ``RuntimeWarning`` is then issued; the
+            weight column is replaced too).
+
         Returns
         -------
         self
             The evaluator itself, to allow method chaining.
+
+        Raises
+        ------
+        KeyError
+            If a dataset named ``name`` already exists and ``overwrite`` is False.
         """
         if name in self.datasets and not overwrite:
             raise KeyError(
@@ -2303,26 +2420,37 @@ class PerformanceEvaluator:
         Parameters
         ----------
         oot_grp_name : str, optional
-            Name of the grouping column for the OOT data.
+            Name of the grouping column. Every added dataset that has this column (not only the OOT data) is evaluated
+            separately for each group value, and the datasets without it are skipped. Weights and ``fig_save_path`` are
+            ignored in this mode.
         min_data_size : int, default 100
             Minimum number of samples per group.
         grp_colname : str, optional
-            Name of the group column in the output.
+            Name of the group column in the output. Default is None, i.e. ``oot_grp_name``.
         fig_save_path : str, optional
-            Path to save the figure.
+            Path to save the figure. It is ignored when ``oot_grp_name`` is given, and on the weighted path the figure is
+            only drawn when it is set.
         rpt_save_path : str, optional
-            Path to save the report.
+            Path to save the report (a CSV file of the summary table).
         to_show : bool, default False
             Whether to display the figures.
         display : bool, default True
-            Whether to print the results.
-        gains_table : bool, default True
-            Whether to compute the Gains table.
+            Whether to show the result table with ``IPython.display.display`` (it requires IPython).
+        gains_table : bool, default False
+            Whether the percentile panel and the Top/Btm target rates are built from the Gains-table binning (the
+            ``gains_table`` argument of ``evaluate_performance``). The Gains-table summary columns are added either way on
+            the unweighted path.
         benchmark_dataset : str or pandas.DataFrame, optional
             Benchmark dataset used to fix the bin boundaries. If a str is passed, the dataset is looked up by name
             among the datasets added with ``add_dataset``; if a DataFrame is passed, it is used directly.
-            The default None means that each dataset is binned independently.
-        
+            The default None means that each dataset is binned independently. The weights are ignored when it is given.
+        weight_col : str, optional
+            Sample weight column for this call; it overrides the ``weight_col`` of the evaluator, while a column given to
+            ``add_dataset`` takes precedence over both. Weights are applied only when ``oot_grp_name`` and
+            ``benchmark_dataset`` are None and ``tgt_name`` is a single name; otherwise they are silently ignored (when
+            ``tgt_name`` is a list or tuple, this argument is ignored, but the weight columns of the evaluator and of the
+            datasets are still honored).
+
         Returns
         -------
         pandas.DataFrame
@@ -2330,6 +2458,22 @@ class PerformanceEvaluator:
             each label is evaluated separately and the results are stacked vertically after a new ``tgt_name`` column
             is added; when ``to_show=True``, one figure is drawn for each label, and
             ``fig_save_path`` automatically gets a label suffix (e.g. ``perf.png`` -> ``perf_<label>.png``).
+            On the weighted path the table is narrower: ``index``, ``dataset``, ``DATASET``, ``AUC``, ``KS``, ``LIFT``,
+            ``IV``, ``N`` (sum of the weights), ``N_RAW``, ``avgTrue`` and ``avgScore`` (plus ``N_SPECIAL`` and
+            ``N_SPECIAL_RAW`` when ``spec_values`` match rows). An empty DataFrame is returned when no dataset was added,
+            or when neither ``scr_name`` nor ``model`` with ``feature_cols`` is set (a ``DeprecationWarning`` is issued
+            then).
+
+        Raises
+        ------
+        ValueError
+            If ``benchmark_dataset`` is a name that was not added with ``add_dataset``, or if no bin edges can be derived
+            from it.
+
+        Notes
+        -----
+        The attribute ``evaluate_status`` records the outcome of the call (``'ok'``, ``'no_datasets'``,
+        ``'compute_failed'`` or ``'empty_input'``).
         """
         if len(self.datasets) == 0:
             self.evaluate_status = "no_datasets"

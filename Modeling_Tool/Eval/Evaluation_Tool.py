@@ -55,6 +55,23 @@ class EvaluationPipeline:
     Conditions are added by chaining ``.group_by()`` and ``.subset_by()``, and the
     pipeline is executed with ``.apply(func)``.
     ``func`` may return a ``pandas.DataFrame`` or a ``dict`` whose values are DataFrames.
+
+    Parameters
+    ----------
+    m_eval : Model_Evaluation_Tool
+        Evaluation object whose methods ``func`` can call. While ``apply`` runs, ``m_eval.data`` is temporarily replaced
+        by the current slice.
+    data : pandas.DataFrame, optional
+        Data to slice. Default is None, i.e. ``m_eval.data`` at the time the pipeline is created.
+
+    Attributes
+    ----------
+    m_eval : Model_Evaluation_Tool
+        The evaluation object.
+    original_data : pandas.DataFrame
+        The data that is sliced.
+    steps : list of dict
+        The slicing steps added so far by ``group_by`` and ``subset_by``, in the order of the calls.
     """
     def __init__(self, m_eval, data=None):
         self.m_eval = m_eval
@@ -64,6 +81,23 @@ class EvaluationPipeline:
         self._expected_dict_keys = None # key cache for dict results
 
     def group_by(self, group_name, min_size=100, group_var_name=None):
+        """
+        Add a step that splits the data by the values of a column.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the column to group by.
+        min_size : int, default 100
+            Groups with fewer than ``min_size`` rows are skipped.
+        group_var_name : str or None, default None
+            Name of the result column that holds the group value. Default is None, i.e. ``group_name``.
+
+        Returns
+        -------
+        EvaluationPipeline
+            The pipeline itself, to allow method chaining.
+        """
         if group_var_name is None:
             group_var_name = group_name
         self.steps.append({
@@ -75,6 +109,23 @@ class EvaluationPipeline:
         return self
 
     def subset_by(self, condition_dict, name='eval_subset', min_size=100):
+        """
+        Add a step that filters the data with a set of named conditions.
+
+        Parameters
+        ----------
+        condition_dict : dict
+            Mapping from a subset label to a ``DataFrame.query`` string; an empty string ``""`` keeps every row.
+        name : str, default 'eval_subset'
+            Name of the result column that holds the subset label.
+        min_size : int, default 100
+            Subsets with fewer than ``min_size`` rows are skipped.
+
+        Returns
+        -------
+        EvaluationPipeline
+            The pipeline itself, to allow method chaining.
+        """
         self.steps.append({
             'type': 'subset',
             'condition_dict': condition_dict,
@@ -84,7 +135,35 @@ class EvaluationPipeline:
         return self
 
     def apply(self, func, **kwargs):
-        
+        """
+        Run ``func`` on every slice and combine the results.
+
+        The steps are applied in the order in which they were added, and each step splits the output of the previous one
+        (``group_by`` followed by ``subset_by`` evaluates every group once per subset). With no step, ``func`` runs once
+        on the whole data.
+
+        Parameters
+        ----------
+        func : callable
+            Function to run on each slice. If it has a parameter named ``current_data``, it receives the slice there;
+            otherwise it is called without data and is expected to be a method of ``m_eval``, whose ``data`` is replaced by
+            the slice while ``func`` runs and restored afterwards. It returns a DataFrame or a dict of DataFrames.
+        **kwargs
+            Extra keyword arguments passed to ``func`` on every call.
+
+        Returns
+        -------
+        pandas.DataFrame or dict
+            The results of all the slices concatenated, with one extra column per step that holds the group value or the
+            subset label (see ``group_var_name`` and ``name``). If ``func`` returns a dict, a dict with the same keys of
+            concatenated DataFrames is returned. The result is empty when no slice reaches its ``min_size``.
+
+        Notes
+        -----
+        An exception raised by ``func`` is logged at INFO level and the slice yields an empty result instead of
+        stopping the run, so an unexpectedly empty result may hide an error: call ``func`` on one slice to see it.
+        """
+
         import inspect
         sig = inspect.signature(func)
         
@@ -252,7 +331,8 @@ class Model_Evaluation_Tool:
     base_score : str, optional
         Name of the base score column. Default is None.
     min_data_size : int, optional
-        Minimum data size threshold. Default is 500.
+        Minimum data size threshold: the minimum number of rows of a group in ``get_gains_summary`` (used with
+        ``grp_name``). Default is 500.
     equal_freq : bool, optional
         Whether to use equal frequency binning. Default is True.
     precision : int, optional
@@ -274,10 +354,44 @@ class Model_Evaluation_Tool:
     include_missing : bool, optional
         Whether to include missing values. Default is True.
     missing_rate_ref : int or float, optional
-        Reference value for missing rate. Default is -99999999.
+        Reference value for missing rate: the fill value for missing values, passed as ``fillna`` to the score binning of
+        ``get_cross_risk_summary`` and used to fill the analyzed variables in ``run_variable_analysis_summary``.
+        Default is -99999999.
     excel_path : str, optional
-        Path for Excel output. Default is None.
-        
+        Path for Excel output. Default is None. It is only stored as an attribute: no method of this class writes an
+        Excel file.
+    fillna : any, optional
+        Fill value for missing scores in the Gains-table binning of ``get_gains_summary``. Default is -999999.
+    spec_values : list, optional
+        Special score values that get their own bins in ``get_gains_summary`` and ``get_cross_risk_summary``.
+        Default is None, which is stored as an empty list.
+    cross_agg_dict : dict, optional
+        Columns aggregated in the cells of ``get_cross_risk_summary``, as ``{column: aggregation or list of aggregations}``.
+        Default is None, which uses a legacy dictionary for the columns ``is_dpd7``, ``credit_limit``, ``monthlyincome``
+        and ``education``; pass your own dictionary whenever you use that method.
+    subset_condition_dict : dict, optional
+        Subsets read by ``multi_subset_wrapper`` and ``multi_dim_eval``, as ``{label: DataFrame.query string}`` (an empty
+        string keeps every row). Default is None, which uses a legacy dictionary of queries on the column ``aprvvrsn_2``
+        (``Overall``, ``AE``, ``NON_AE``, ``FT``, ``NON_FT`` and ``NON_FT_AE``).
+    eval_ylabels : list of str, optional
+        Target columns evaluated by ``multi_ylabel_wrapper`` and ``multi_dim_eval``. Default is None, which uses the legacy
+        ``['is_dpd7']``.
+    grp_namelist : list of str, optional
+        Grouping columns evaluated by ``multi_dim_eval``. Default is None, which uses the legacy
+        ``['sample_ind_fnl', 'aprvvrsn_2', 'week_start_date']``.
+    gains_display_metric_list : list of str, optional
+        Gains-table columns kept by ``get_gains_summary`` when it gets no ``add_func``. Default is None, which keeps
+        ``MIN``, ``MAX``, ``N``, ``PROP``, ``AVG_SCORE``, ``AVG_BAD``, ``CUM_BAD_PCT``, ``KS_PER_BIN``, ``LIFT`` and
+        ``RANK_ORDER_BUMP``.
+    weight_col : str, optional
+        Name of the sample weight column in ``data``. It makes ``model_perf_compare`` and ``get_gains_summary`` weighted,
+        except when ``grp_name`` is given (the grouped paths are unweighted); ``get_cross_risk_summary`` and
+        ``cross_perf_eval`` never use it, and neither does ``multi_dim_eval`` with its default ``eval_func``, which always
+        groups. Default is None, i.e. unweighted.
+    positive_score_only : bool, optional
+        Whether ``model_perf_compare`` keeps only the rows whose score is greater than 0 (0 and negative values
+        conventionally mean "no score"). Default is True.
+
     Attributes
     ----------
     data : pandas.DataFrame
@@ -292,6 +406,13 @@ class Model_Evaluation_Tool:
         Labels for y-axis evaluation.
     gains_display_metric_list : list
         Metrics to display in gains summary.
+
+    Notes
+    -----
+    Every constructor parameter is also stored as an attribute of the same name, except ``random_seed``, which is stored as
+    ``seed``; ``udf`` holds a ``Utility_Functions`` instance. ``cross_agg_dict``, ``subset_condition_dict``,
+    ``eval_ylabels`` and ``grp_namelist`` default to legacy values tied to one production dataset, so override them
+    whenever you use the methods that read them. ``get_cross_risk_summary`` also needs a ``flow_id`` column in ``data``.
     """
     
     def __init__(
@@ -340,7 +461,8 @@ class Model_Evaluation_Tool:
         base_score : str, optional
             Base score column name.
         min_data_size : int, optional
-            Minimum data size threshold.
+            Minimum data size threshold: the minimum number of rows of a group in ``get_gains_summary`` (used with
+            ``grp_name``). Default is 500.
         equal_freq : bool, optional
             Use equal frequency binning if True.
         precision : int, optional
@@ -362,9 +484,39 @@ class Model_Evaluation_Tool:
         include_missing : bool, optional
             Include missing values if True.
         missing_rate_ref : int or float, optional
-            Missing rate reference value.
+            Missing rate reference value: the fill value for missing values, passed as ``fillna`` to the score binning of
+            ``get_cross_risk_summary`` and used to fill the analyzed variables in ``run_variable_analysis_summary``.
         excel_path : str, optional
-            Path for Excel output file.
+            Path for Excel output file. It is only stored as an attribute: no method of this class writes an Excel file.
+        fillna : any, optional
+            Fill value for missing scores in the Gains-table binning of ``get_gains_summary``. Default is -999999.
+        spec_values : list, optional
+            Special score values that get their own bins in ``get_gains_summary`` and ``get_cross_risk_summary``.
+            Default is None, which is stored as an empty list.
+        cross_agg_dict : dict, optional
+            Columns aggregated in the cells of ``get_cross_risk_summary``, as ``{column: aggregation or list of
+            aggregations}``. Default is None, which uses a legacy dictionary for the columns ``is_dpd7``,
+            ``credit_limit``, ``monthlyincome`` and ``education``.
+        subset_condition_dict : dict, optional
+            Subsets read by ``multi_subset_wrapper`` and ``multi_dim_eval``, as ``{label: DataFrame.query string}`` (an
+            empty string keeps every row). Default is None, which uses a legacy dictionary of queries on the column
+            ``aprvvrsn_2``.
+        eval_ylabels : list of str, optional
+            Target columns evaluated by ``multi_ylabel_wrapper`` and ``multi_dim_eval``. Default is None, which uses the
+            legacy ``['is_dpd7']``.
+        grp_namelist : list of str, optional
+            Grouping columns evaluated by ``multi_dim_eval``. Default is None, which uses the legacy
+            ``['sample_ind_fnl', 'aprvvrsn_2', 'week_start_date']``.
+        gains_display_metric_list : list of str, optional
+            Gains-table columns kept by ``get_gains_summary`` when it gets no ``add_func``. Default is None, which keeps
+            ``MIN``, ``MAX``, ``N``, ``PROP``, ``AVG_SCORE``, ``AVG_BAD``, ``CUM_BAD_PCT``, ``KS_PER_BIN``, ``LIFT`` and
+            ``RANK_ORDER_BUMP``.
+        weight_col : str, optional
+            Name of the sample weight column in ``data``. It makes ``model_perf_compare`` and ``get_gains_summary``
+            weighted, except when ``grp_name`` is given; ``get_cross_risk_summary`` and ``cross_perf_eval`` never use it,
+            and neither does ``multi_dim_eval`` with its default ``eval_func``. Default is None, i.e. unweighted.
+        positive_score_only : bool, optional
+            Whether ``model_perf_compare`` keeps only the rows whose score is greater than 0. Default is True.
         """
         self.data = data
         self.dep = dep
@@ -523,6 +675,12 @@ class Model_Evaluation_Tool:
         ------
         AttributeError
             If model is None or lacks required attributes.
+
+        Notes
+        -----
+        The model must expose ``feature_names_in_``: those columns are passed to ``predict_proba``. As a side effect,
+        ``self.data`` is replaced by a copy that has the new score column and ``self.base_score`` is set to ``scorename``.
+        ``disp=True`` needs IPython.
         """
         if self.model is None:
             raise AttributeError("Model must be provided to calculate base score.")
@@ -568,6 +726,16 @@ class Model_Evaluation_Tool:
         -------
         pandas.DataFrame
             Correlation summary in long format with columns: 'base', 'compare', 'corr'.
+
+        Raises
+        ------
+        ValueError
+            If ``base_score`` is not set.
+
+        Notes
+        -----
+        Only the rows in which every score of ``score_list`` is greater than 0 are used (rows with a missing score are
+        dropped as well), whatever ``positive_score_only`` is.
         """
         if score_list is None:
             score_list = [self.base_score] + self.comp_scrlist
@@ -613,15 +781,19 @@ class Model_Evaluation_Tool:
         data : pandas.DataFrame, optional
             Data to use. If None, uses self.data.
         grp_name : str, optional
-            Group name column for stratification.
+            Group name column for stratification. Every score is then evaluated separately for each group value (the
+            result gains a column named ``grp_name``), and ``weight_col`` is ignored.
         dist_bins : int, optional
             Number of distribution bins. Default is 100.
         pct_bins : int, optional
             Number of percentile bins. Default is 10.
         min_data_size : int, optional
-            Minimum data size per bin. Default is 50.
+            Minimum number of rows of a group for it to be evaluated; it only matters when ``grp_name`` is given. Default
+            is 50 (the ``min_data_size`` of the instance is not used here).
         sync_data_size : bool, optional
-            Whether to filter out zero/negative scores. Default is True.
+            Whether all comparison scores are evaluated on the same rows: rows in which any comparison score is not
+            positive are dropped for every comparison score (only effective when ``positive_score_only`` is True; the base
+            score keeps its own rows). Default is True.
         min_bin_prop : float, optional
             Minimum bin proportion. Defaults to the instance setting.
         include_missing : bool, optional
@@ -638,7 +810,15 @@ class Model_Evaluation_Tool:
         Returns
         -------
         pandas.DataFrame
-            Performance comparison results sorted by score order.
+            Performance comparison results sorted by score order: the ``PerformanceEvaluator`` summary of every score
+            (``AUC_Shift`` and ``KS_Shift`` are dropped) with an extra ``score_name`` column. An empty DataFrame is
+            returned when ``base_score`` is not set or no valid row is left.
+
+        Notes
+        -----
+        Rows whose target or base score is missing or infinite are dropped first; with ``positive_score_only=True`` the
+        rows whose score is not positive are dropped per score. With ``weight_col`` set on the instance (and no
+        ``grp_name``) the weighted, narrower summary is returned.
         """
         data = self.data.copy() if data is None else data.copy()
         score_list = self.comp_scrlist
@@ -742,30 +922,44 @@ class Model_Evaluation_Tool:
         data : pandas.DataFrame, optional
             Data to use. If None, uses self.data.
         grp_name : str, optional
-            Group name for stratified analysis.
+            Group name for stratified analysis: one Gains table per group value, stacked, with the group value in a column
+            named ``grp_name``. The number of bins is then ``grp_nbins`` instead of the instance's ``nbins``, groups with
+            fewer rows than the instance's ``min_data_size`` are skipped, a score with 10 or fewer positive values is
+            skipped, and the weights are ignored.
         disp : bool, optional
-            Whether to display results. Default is True.
+            Whether to display, with ``IPython.display.display``, one pivot table (one column per group) for each metric
+            of ``grp_disp_metric``. It only applies when ``grp_name`` is given. Default is True.
         grp_disp_metric : list, optional
-            Metrics to display for grouped analysis.
+            Metrics shown by ``disp`` for grouped analysis; it does not change the returned table. Default is None, i.e.
+            ``['N', 'PROP', 'AVG_BAD', 'LIFT']``.
         grp_nbins : int, optional
             Number of bins for grouped analysis. Default is 5.
         withSummary : bool, optional
-            Include summary row. Default is True.
+            Include summary row. Default is True. It is not applied with ``grp_name`` or on the weighted path.
         add_func : callable, optional
-            Custom metric function merged into each gains table.
+            Custom metric function merged into each gains table. When it is given, all the columns of the Gains table are
+            returned instead of only ``gains_display_metric_list``. It is ignored on the weighted path.
         sync_range : bool, optional
-            Synchronize bin ranges. Default is True.
+            Synchronize bin ranges across the groups (used with ``grp_name`` only). Default is True.
         spec_values : list, optional
-            Special values to treat separately during binning.
+            Special values to treat separately during binning. Default is None, i.e. the instance setting.
         include_missing : bool, optional
             Whether to include missing values. Defaults to the instance setting.
         fillna : any, optional
             Missing-value fill for score binning. Defaults to the instance setting.
-            
+
         Returns
         -------
         pandas.DataFrame
-            Gains summary results with score names.
+            Gains summary results with score names: the Gains tables of the base score and of every comparison score,
+            stacked, with the bin columns ``_bin_num`` and ``_bin_range`` and a ``score_name`` column (plus the group
+            column when ``grp_name`` is given). Only the ``gains_display_metric_list`` columns are kept unless ``add_func``
+            is given. An empty DataFrame is returned when none of the scores is a column of the data.
+
+        Notes
+        -----
+        When the instance has a ``weight_col`` and ``grp_name`` is None, the weighted Gains table is returned (``N`` is the
+        sum of the weights and ``N_RAW`` the number of rows) and ``add_func`` and ``withSummary`` are ignored.
         """
         if grp_disp_metric is None:
             grp_disp_metric = ['N', 'PROP', 'AVG_BAD', 'LIFT']
@@ -902,25 +1096,44 @@ class Model_Evaluation_Tool:
         Parameters
         ----------
         cross_agg_dict : dict, optional
-            Dictionary of column names and aggregation functions.
+            Dictionary of column names and aggregation functions, as ``{column: aggregation or list of aggregations}``
+            (the ``agg_func`` of ``cross_risk``). Default is None, i.e. the ``cross_agg_dict`` of the instance, which is a
+            legacy dictionary (``is_dpd7``, ``credit_limit``, ``monthlyincome``, ``education``) unless you set it. An entry
+            for the column ``flow_id`` (count and share of rows) is always added, so the data needs a ``flow_id`` column.
         nbins : int, optional
             Number of bins. Default is 5.
         equal_freq : bool, optional
             Use equal frequency binning. If None, uses self.equal_freq.
         disp : bool, optional
-            Whether to display results. Default is True.
+            Whether to display, with ``IPython.display.display``, the cross table of every metric for every comparison
+            score. Default is True.
         spec_values : list, optional
-            Special values to keep separate during binning.
+            Special values to keep separate during binning. Default is None, i.e. the instance setting.
         binning_numeric : bool or list/tuple of bool, optional
             Whether numeric score columns should be binned before cross-risk
             aggregation. If None, defaults to [True, True] for backward
             compatibility. Passing a bool applies the same setting to both
             base and comparison score.
-            
+
         Returns
         -------
         pandas.DataFrame
-            Cross-risk summary with base score range, comparison score range, and metrics.
+            Cross-risk summary with base score range, comparison score range, and metrics, in long format with the columns
+            ``base_scr_range``, ``eval_metric``, ``score_name``, ``comp_scr_range`` and ``value``. An empty DataFrame is
+            returned when, for some comparison score, no row has a positive base score and a positive comparison score.
+
+        Raises
+        ------
+        ValueError
+            If ``binning_numeric`` is a list or tuple that does not have exactly two elements.
+        TypeError
+            If ``binning_numeric`` is not None, a bool or a list/tuple of bools.
+
+        Notes
+        -----
+        For every comparison score only the rows in which both the base score and that score are greater than 0 are used,
+        whatever ``positive_score_only`` is (rows with a missing score are therefore dropped too). The summary is
+        unweighted: ``weight_col`` is not used.
         """
         data = self.data.copy()
         dep = self.dep
@@ -1056,19 +1269,28 @@ class Model_Evaluation_Tool:
         Parameters
         ----------
         condition_dict : dict, optional
-            Dictionary mapping subset names to query conditions.
-            If None, uses self.subset_condition_dict.
+            Dictionary mapping subset names to query conditions (``DataFrame.query`` strings; an empty string keeps every
+            row). If None, uses self.subset_condition_dict.
         subset_var_name : str, optional
             Column name for subset identifier in results. Default is 'eval_subset'.
         func : callable, optional
             Function to apply to each subset. If None, uses model_perf_compare.
+        min_subset_size : int, optional
+            Only subsets with more than this many rows are evaluated. Default is 10.
         **kwargs
             Additional keyword arguments passed to the evaluation function.
-            
+
         Returns
         -------
         pandas.DataFrame
-            Combined results from all subsets.
+            Combined results from all subsets, with the subset label in the column ``subset_var_name``. If no subset is
+            evaluated or none returns a non-empty result, a one-row DataFrame that only holds the label of the last
+            subset in ``subset_var_name`` is returned.
+
+        Notes
+        -----
+        ``self.data`` is replaced by the subset while ``func`` runs and restored afterwards (it is not restored if ``func``
+        raises an exception).
         """
         if condition_dict is None:
             condition_dict = self.subset_condition_dict
@@ -1134,7 +1356,13 @@ class Model_Evaluation_Tool:
         Returns
         -------
         pandas.DataFrame
-            Combined results from all labels.
+            Combined results from all labels, with the label in the column ``ylabel_var_name``. Empty if no label has a
+            row with a non-missing value.
+
+        Notes
+        -----
+        For each label the rows in which the label is missing are dropped, and ``self.dep`` and ``self.data`` are replaced
+        while ``eval_func`` runs and restored afterwards (they are not restored if ``eval_func`` raises an exception).
         """
         original_dep = self.dep
         original_data = self.data.copy()
@@ -1185,20 +1413,28 @@ class Model_Evaluation_Tool:
         Parameters
         ----------
         group_name : str, optional
-            Column name to group by. If None, processes all data together.
+            Column name to group by. If None, ``group_eval_func`` is called once on all the data (an empty DataFrame is
+            returned when ``group_eval_func`` is None as well).
         group_var_name : str, optional
             Column name for group identifier in results. Default is 'group_name'.
         group_eval_func : callable, optional
             Function to apply to each group. If None, uses model_perf_compare.
         min_subset_size : int, optional
-            Minimum data size required to process a group. Default is 10.
+            Only groups with more than this many rows are evaluated. Default is 10.
         **kwargs
             Additional keyword arguments passed to the evaluation function.
-            
+
         Returns
         -------
         pandas.DataFrame
-            Combined results from all groups.
+            Combined results from all groups, with the group value in the column ``group_var_name``. Empty if no group is
+            evaluated.
+
+        Notes
+        -----
+        The group values are matched as strings (``group_name == 'value'`` in ``DataFrame.query``), so a numeric group
+        column matches no row and gives an empty result. ``self.data`` is replaced by the group while
+        ``group_eval_func`` runs and restored afterwards (it is not restored if the function raises an exception).
         """
         original_data = self.data.copy()
         
@@ -1258,22 +1494,32 @@ class Model_Evaluation_Tool:
         grp_namelist : list, optional
             Group columns. If None, uses self.grp_namelist.
         eval_func : callable, optional
-            Evaluation function. If None, uses model_perf_compare.
+            Evaluation function. If None, uses model_perf_compare. It is called for every subset, label and group column;
+            the group column is passed to it as ``grp_name`` only when ``eval_func`` has a ``grp_name`` parameter.
         subset_var_name : str, optional
-            Column name for subset identifier.
+            Column name for subset identifier. Default is 'eval_subset'.
         ylabel_var_name : str, optional
-            Column name for label identifier.
+            Column name for label identifier. Default is 'eval_ylabel'.
         var_name : str, optional
-            Column name for group name in results.
+            Column name for group name in results. Default is 'group_name'.
         value_name : str, optional
-            Column name for group value in results.
+            Column name for group value in results. Default is 'group_value'.
         **kwargs
-            Additional keyword arguments.
-            
+            Additional keyword arguments, passed on to ``eval_func``.
+
         Returns
         -------
         pandas.DataFrame
-            Multi-dimensional evaluation results.
+            Multi-dimensional evaluation results: the results of ``eval_func`` for every subset, label and group column,
+            stacked, with the columns ``subset_var_name``, ``ylabel_var_name`` and ``var_name`` (the group column that was
+            evaluated). When ``eval_func`` has a ``grp_name`` parameter, the group columns are merged into the single
+            column ``value_name``.
+
+        Notes
+        -----
+        If ``eval_func`` has no ``grp_name`` parameter, the same evaluation is simply repeated for each entry of
+        ``grp_namelist`` (no grouping is done). With the default ``eval_func`` every call is grouped, so the evaluation is
+        unweighted.
         """
         if condition_dict is None:
             condition_dict = self.subset_condition_dict
@@ -1356,11 +1602,21 @@ class Model_Evaluation_Tool:
             Metrics to extract. If None, uses ['AUC', 'KS', 'N'].
         melt : bool, optional
             Whether to melt the pivot table. Default is True.
-            
+
         Returns
         -------
         pandas.DataFrame
-            Cross performance evaluation results.
+            Cross performance evaluation results. With ``melt=True`` a long table with the columns ``score_name``,
+            ``variable`` (``<metric>_<label>``, e.g. ``AUC_bad_flag``) and ``value``; with ``melt=False`` the pivot table
+            itself, indexed by ``score_name`` with one ``<metric>_<label>`` column per metric and label. If the data has
+            no more rows than ``nbins`` of the instance, an empty DataFrame with the columns ``eval_ylabel`` and
+            ``score_name`` is returned.
+
+        Notes
+        -----
+        The rows in which a label is missing or a score is not positive are dropped. The bins come from the instance
+        (``nbins`` for both the distribution and the percentile bins, ``precision`` and ``min_bin_prop``) and the
+        evaluation is unweighted.
         """
         if eval_metric is None:
             eval_metric = ['AUC', 'KS', 'N']
@@ -1431,8 +1687,8 @@ class Model_Evaluation_Tool:
         Run comprehensive variable analysis and generate summary report.
         
         This method performs binning analysis on specified variables,
-        calculating metrics like IV (Information Value) and chi-square statistics.
-        
+        calculating metrics like IV (Information Value), KS and Lift of each variable.
+
         Parameters
         ----------
         varlist : list
@@ -1463,11 +1719,22 @@ class Model_Evaluation_Tool:
             Missing reference. If None, uses self.missing_rate_ref.
         seed : int, optional
             Random seed. If None, uses self.seed.
-            
+        spec_values : list, default []
+            Special values that get their own bins in the analysis. Unlike the other arguments, the default is not taken
+            from the instance.
+
         Returns
         -------
         pandas.DataFrame
-            Variable analysis summary with IV and other metrics.
+            Variable analysis summary with IV and other metrics: one row per variable, sorted by decreasing IV, with the
+            columns ``var``, ``n_all`` (rows), ``n`` (non-missing rows), ``ks_in_gains``, ``lift_in_gains``, ``iv``,
+            ``n_bump``, ``missing_rate``, ``min``, ``mean``, ``max`` and ``n_bins``. Constant variables and variables whose
+            computation fails are left out (a warning lists the failed ones).
+
+        Notes
+        -----
+        Before the analysis the missing values of the variables in ``varlist`` are filled with ``missing_rate_ref`` (in a
+        copy of the data). The summary is unweighted.
         """
         if data is None:
             data = self.data.copy()
