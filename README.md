@@ -294,8 +294,9 @@ pytest /path/to/SuperModelingFactory_pytest -q
 ```
 
 GitHub Actions (`.github/workflows/tests.yml`) runs that suite on every push to `main` and every pull request, on Python
-3.11 and 3.12 across three dependency sets (`legacy`: numpy<2, `modern`: numpy 2.x, `bleeding`: latest pandas). A job that
-GitHub cancels because no runner picked it up for about 15 minutes is re-run automatically, at most twice
+3.11 and 3.12 across three dependency sets (`legacy`: numpy<2, `modern`: numpy 2.x, `bleeding`: latest pandas). Every
+pushed commit is tested to the end; only the older run of a pull request is cancelled when that pull request gets a new
+push. A job that GitHub cancels because no runner picked it up for about 15 minutes is re-run automatically, at most twice
 (`.github/workflows/retry-cancelled.yml`). Pushing a
 `v*` tag builds wheels and publishes to PyPI (see [RELEASING.md](RELEASING.md)). Contribution workflow:
 [CONTRIBUTING.md](CONTRIBUTING.md).
