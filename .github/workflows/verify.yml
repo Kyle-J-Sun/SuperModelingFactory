@@ -7,9 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A pull request cancels its own older run when it gets a new push; every other
+# run gets a group of its own, so each commit is verified and none is cancelled
+# by a later one.
 concurrency:
-  group: verify-${{ github.ref }}
-  cancel-in-progress: true
+  group: verify-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   source_package:

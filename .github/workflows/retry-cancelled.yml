@@ -10,7 +10,9 @@ name: Retry cancelled runs
 #   * a job of the latest attempt never got a runner and waited at least
 #     MIN_QUEUE_MINUTES (a job cancelled by hand or by a newer run in the same
 #     concurrency group is cancelled within seconds),
-#   * no newer run of the same workflow exists on the branch, and
+#   * the run was not replaced: for the events in EVENTS_REPLACED_BY_NEWER_RUN
+#     (those whose concurrency group cancels or replaces an older run), a newer
+#     run of the same workflow on the branch makes the cancelled run obsolete, and
 #   * the run has fewer than MAX_ATTEMPTS attempts.
 #
 # Only the cancelled jobs are re-run; jobs that already passed keep their result.
@@ -34,6 +36,8 @@ jobs:
           script: |
             const MAX_ATTEMPTS = 3;        // the original run plus two automatic re-runs
             const MIN_QUEUE_MINUTES = 10;  // shorter waits are deliberate cancellations
+            // Events whose concurrency group replaces an older run when a newer one arrives.
+            const EVENTS_REPLACED_BY_NEWER_RUN = ['pull_request'];
             const run = context.payload.workflow_run;
             const { owner, repo } = context.repo;
 
@@ -42,12 +46,14 @@ jobs:
               return;
             }
 
-            const { data: recent } = await github.rest.actions.listWorkflowRuns({
-              owner, repo, workflow_id: run.workflow_id, branch: run.head_branch, per_page: 20,
-            });
-            if (recent.workflow_runs.some(r => r.run_number > run.run_number)) {
-              core.notice(`A newer run of '${run.name}' exists on ${run.head_branch}; not retrying.`);
-              return;
+            if (EVENTS_REPLACED_BY_NEWER_RUN.includes(run.event)) {
+              const { data: recent } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: run.workflow_id, branch: run.head_branch, per_page: 20,
+              });
+              if (recent.workflow_runs.some(r => r.run_number > run.run_number)) {
+                core.notice(`A newer run of '${run.name}' exists on ${run.head_branch}; not retrying.`);
+                return;
+              }
             }
 
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {

@@ -7,10 +7,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Cancel superseded runs on the same branch to save CI minutes.
+# A pull request cancels its own older run when it gets a new push, to save CI
+# minutes. Every other run (a push to main or to any branch, a manual dispatch)
+# gets a group of its own, so each commit is tested to the end and is never
+# cancelled by a later one.
 concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pytest:
