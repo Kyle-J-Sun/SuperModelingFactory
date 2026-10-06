@@ -1,0 +1,69 @@
+name: Retry cancelled runs
+
+# GitHub cancels a job that waits about 15 minutes for a runner and leaves no
+# steps or logs behind (observed 2026-10-05 on the `tests` matrix jobs). That is a
+# platform capacity problem and not a failure of the workflow, so this workflow
+# re-runs such a job instead of leaving the run red.
+#
+# It re-runs a run only when ALL of these hold:
+#   * the run ended as "cancelled" (a run with a real failure ends as "failure"),
+#   * a job of the latest attempt never got a runner and waited at least
+#     MIN_QUEUE_MINUTES (a job cancelled by hand or by a newer run in the same
+#     concurrency group is cancelled within seconds),
+#   * no newer run of the same workflow exists on the branch, and
+#   * the run has fewer than MAX_ATTEMPTS attempts.
+#
+# Only the cancelled jobs are re-run; jobs that already passed keep their result.
+
+on:
+  workflow_run:
+    workflows: ["tests", "Verify source package", "Build distributions", "Version consistency"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    name: Re-run jobs that never got a runner
+    if: github.event.workflow_run.conclusion == 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const MAX_ATTEMPTS = 3;        // the original run plus two automatic re-runs
+            const MIN_QUEUE_MINUTES = 10;  // shorter waits are deliberate cancellations
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+
+            if (run.run_attempt >= MAX_ATTEMPTS) {
+              core.notice(`Run ${run.id} already has ${run.run_attempt} attempts; not retrying.`);
+              return;
+            }
+
+            const { data: recent } = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: run.workflow_id, branch: run.head_branch, per_page: 20,
+            });
+            if (recent.workflow_runs.some(r => r.run_number > run.run_number)) {
+              core.notice(`A newer run of '${run.name}' exists on ${run.head_branch}; not retrying.`);
+              return;
+            }
+
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+              owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100,
+            });
+            const queuedMinutes = job => (Date.parse(job.completed_at) - Date.parse(job.created_at)) / 60000;
+            const starved = jobs.filter(job =>
+              job.conclusion === 'cancelled' &&
+              !job.runner_id &&
+              !(job.steps || []).length &&
+              queuedMinutes(job) >= MIN_QUEUE_MINUTES);
+            if (!starved.length) {
+              core.info('No job was cancelled while waiting for a runner; leaving the run as it is.');
+              return;
+            }
+
+            core.warning(`No runner picked up ${starved.map(job => `'${job.name}'`).join(', ')}; ` +
+              `re-running as attempt ${run.run_attempt + 1} of ${MAX_ATTEMPTS}.`);
+            await github.rest.actions.reRunWorkflowFailedJobs({ owner, repo, run_id: run.id });

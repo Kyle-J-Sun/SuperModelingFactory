@@ -206,6 +206,15 @@ Check whether you're hitting a known dependency-matrix issue. Compare against
 `modern` and `legacy` matrices in
 [.github/workflows/tests.yml](.github/workflows/tests.yml).
 
+**A workflow run shows "cancelled"**
+Two different things cancel a run. A newer push to the same branch cancels the
+older run on purpose (the `concurrency` block of the workflow); nothing to fix.
+A job that waited about 15 minutes without getting a runner is cancelled by
+GitHub, and has no steps or logs; the
+[retry-cancelled](.github/workflows/retry-cancelled.yml) workflow re-runs such a
+job automatically, up to two times. If the run is still cancelled after the
+third attempt, use **Re-run failed jobs** on the run page.
+
 ---
 
 ## 7. License & contact
