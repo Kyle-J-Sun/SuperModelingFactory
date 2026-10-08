@@ -2431,7 +2431,13 @@ class FeatureValidationPipeline:
                     rows.append(pd.DataFrame({"target": [target_key], "group_col": [group_col or "global"], "error": [repr(exc)]}))
         if not rows:
             return pd.DataFrame(), details
-        return pd.concat(rows, ignore_index=True), details
+        summary = pd.concat(rows, ignore_index=True)
+        if "sample" not in summary.columns and "sample" not in combined.columns:
+            # the internal split column is called "sample" in the output, like the psi_group_dims entry that asks for it
+            summary = summary.rename(columns={"_smf_split": "sample"})
+            summary["group_col"] = summary["group_col"].replace({"_smf_split": "sample"})
+            details = {key.replace(":_smf_split", ":sample"): value for key, value in details.items()}
+        return summary, details
 
     def _psi_engines(self, target_cols: list[str], woe_artifacts: dict[str, Any]) -> dict[str, Any]:
         by_target = woe_artifacts.get("by_target", {}) if woe_artifacts else {}

@@ -567,6 +567,35 @@ def proc_freq(data, var: str, return_kDF = True) -> pd.DataFrame:
     return df
 
 
+def quantile_rename_map(columns):
+    """Map the percentile labels that ``DataFrame.describe`` creates (``'29%'``, ``'2.5%'``, ``'50%'``) to ``Q<percent>``.
+
+    The label is read back from its text, so ``0.29`` gives ``'Q29'``: computing ``int(0.29 * 100)`` gave 28 (the product is
+    28.999999999999996), which never matched the pandas label ``'29%'``, and a fractional percent kept the pandas label.
+
+    Parameters
+    ----------
+    columns : iterable
+        Column labels of a ``describe`` result.
+
+    Returns
+    -------
+    dict
+        ``{label: "Q<percent>"}`` for every label that is a number followed by ``%``; for example ``{'5%': 'Q5',
+        '2.5%': 'Q2.5', '50%': 'Q50'}``.
+    """
+    mapping = {}
+    for column in columns:
+        text = str(column)
+        if text.endswith("%"):
+            try:
+                percent = float(text[:-1])
+            except ValueError:
+                continue
+            mapping[column] = "Q" + format(percent, "g")
+    return mapping
+
+
 def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0.95, 0.99]):
     """
     Compute descriptive statistics, mimicking SAS PROC MEANS.
@@ -590,8 +619,8 @@ def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0
     Notes
     -----
     Only numeric columns are summarized (the default of ``DataFrame.describe``): non-numeric columns of ``varlist`` are
-    silently left out of the result. A quantile that is not a whole number of percent (such as 0.075) keeps the pandas
-    column name (``'7.5%'``) instead of ``Q<percent>``.
+    silently left out of the result. Every quantile column is named ``Q<percent>`` (``0.29`` gives ``Q29``, ``0.075``
+    gives ``Q7.5``), and the median column, which ``describe`` always adds, is ``Q50``.
 
     Examples
     --------
@@ -606,8 +635,7 @@ def proc_means(data, varlist = None, quantiles = [0.05, 0.15, 0.25, 0.5, 0.75, 0
     
     # Rename colnames.
     means.columns = [x.upper() for x in means.columns]
-    quantile_rename = {str(int(x * 100)) + "%": "Q" + str(int(x * 100)) for x in quantiles}
-    means = means.rename(columns = quantile_rename)
+    means = means.rename(columns = quantile_rename_map(means.columns))
     
     # Compute Missing Rate
     means["MISSING_RATE"] = 1 - means["N"]/data.shape[0]

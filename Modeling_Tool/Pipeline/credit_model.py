@@ -732,12 +732,9 @@ class CreditModelPipeline:
 
         output_dir = Path(cfg.output_dir)
         if cfg.write_outputs or cfg.write_excel:
-            dirs = [
-                output_dir,
-                output_dir / "figs" / "woe",
-                output_dir / "figs" / "mono_woe",
-                output_dir / "figs" / "perf",
-            ]
+            # the chart folders (figs/woe, figs/mono_woe, figs/perf) are created when a chart is written; creating them
+            # here left empty folders behind whenever plots were off or the other WOE engine was used
+            dirs = [output_dir]
             if cfg.write_outputs and self._will_run_explainability():
                 dirs.append(output_dir / "explain")
             make_dirs(*dirs)
@@ -827,7 +824,10 @@ class CreditModelPipeline:
         explain_outputs = self._run_explainability(model_inputs, models)
         explain_paths: dict[str, dict[str, str]] = {}
         if cfg.write_outputs and explain_outputs:
-            explain_paths = persist_explain_outputs(explain_outputs, output_dir / "explain")
+            explain_paths = {
+                model: {key: str(Path(path).resolve()) for key, path in files.items()}
+                for model, files in persist_explain_outputs(explain_outputs, output_dir / "explain").items()
+            }
         model_paths: dict[str, str] = {}
         artifact_paths: dict[str, str] = {}
         model_paths_frame = None
@@ -858,7 +858,7 @@ class CreditModelPipeline:
 
         report_path = None
         if cfg.write_excel:
-            report_path = str(output_dir / "SMF_Model_Report.xlsx")
+            report_path = str((output_dir / "SMF_Model_Report.xlsx").resolve())
             sheets = {
                 "Feature_Selection": self._summary_to_frame(fs_summary),
                 **self._summary_tables(fs_summary),
@@ -1565,6 +1565,7 @@ class CreditModelPipeline:
             with quiet_default_sentinel(cfg.monotone_woe_params):
                 binner.fit(fit_ins, **fit_kwargs)
             if cfg.write_outputs and cfg.plot_outputs:
+                make_dirs(Path(cfg.output_dir) / "figs" / "mono_woe")
                 binner.plot_woe_graph(graph_path=str(Path(cfg.output_dir) / "figs" / "mono_woe"))
             adapter = as_woe_engine(binner, woe_suffix=woe_suffix)
             woe_splits = {
@@ -1591,12 +1592,10 @@ class CreditModelPipeline:
             master.fit(**fit_params)
             woe_splits = {name: master.transform(df) for name, df in splits.items()}
             if cfg.write_outputs and cfg.plot_outputs:
-                make_dirs(Path(graph_dir) / "overall")
-                plot_data = woe_splits["ins"].copy()
-                plot_data["_smf_plot_group"] = "overall"
+                # no group: a group of one value drew each chart a second time (<var>__smf_plot_group.png)
                 master.plot_bivar_graph(
-                    plot_data,
-                    group="_smf_plot_group",
+                    woe_splits["ins"].copy(),
+                    group=None,
                     dirname="overall",
                     varlist=feature_cols,
                 )
@@ -2264,6 +2263,7 @@ class CreditModelPipeline:
                 )
             fig_save_path = None
             if cfg.write_outputs and cfg.plot_outputs:
+                make_dirs(Path(cfg.output_dir) / "figs" / "perf")
                 fig_save_path = str(Path(cfg.output_dir) / "figs" / "perf" / f"perf_{name}.png")
             results[name] = evaluator.evaluate(to_show=False, display=False, fig_save_path=fig_save_path)
         return results
@@ -2380,7 +2380,9 @@ class CreditModelPipeline:
                         )
                         owen_groups = {prior_col: [prior_col]}
                     item["owen"] = self._run_owen(owen_exp, owen_x, owen_cols, extra_groups=owen_groups)
-                outputs[name] = item
+                if item:
+                    # a model that is neither explained nor Owen-eligible (xgb) used to leave an empty entry
+                    outputs[name] = item
             except Exception as exc:
                 outputs[name] = {"error": repr(exc)}
         return outputs
@@ -2489,7 +2491,7 @@ class CreditModelPipeline:
             if isinstance(woe_table, pd.DataFrame):
                 woe_table_path = artifact_dir / "woe_table.csv"
                 safe_to_csv(woe_table, woe_table_path, index=False)
-                artifact_paths["woe_table"] = str(woe_table_path)
+                artifact_paths["woe_table"] = str(woe_table_path.resolve())
             engine = woe_artifacts.get("engine")
             if engine is not None:
                 engine_path = artifact_dir / "woe_engine.pkl"
@@ -2509,7 +2511,7 @@ class CreditModelPipeline:
                     feature_cols=woe_artifacts.get("features"),
                     include_metadata=cfg.model_include_metadata,
                 )
-                artifact_paths["woe_engine"] = str(engine_path)
+                artifact_paths["woe_engine"] = str(engine_path.resolve())
 
         warm_start_requested = {str(x).lower() for x in as_list(cfg.warm_start_models)}
         for name, (wrapper, _, feature_cols) in models.items():
@@ -2559,12 +2561,12 @@ class CreditModelPipeline:
                 path,
                 metadata=metadata,
                 feature_cols=feature_cols,
-                woe_mapping_path=str(woe_table_path) if woe_table_path else None,
+                woe_mapping_path=str(woe_table_path.resolve()) if woe_table_path else None,
                 metrics=metrics,
                 model_name=name,
                 include_metadata=cfg.model_include_metadata,
             )
-            model_paths[name] = str(path)
+            model_paths[name] = str(path.resolve())
         return model_paths, artifact_paths
 
     @staticmethod

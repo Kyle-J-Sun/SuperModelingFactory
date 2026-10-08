@@ -201,8 +201,9 @@ class proc_means:
         means = self.group_means(q=q)
         res_fnl = sum_total.merge(means, left_index=True, right_index=True)
         res_fnl["missing_rate"] = 1 - res_fnl["count"] / res_fnl["sum_all"]
-        quantile_rename = {str(int(x * 100)) + "%": "Q" + str(int(x * 100)) for x in q}
-        res_fnl = res_fnl.rename(columns=quantile_rename)
+        from ..Core.utils import quantile_rename_map
+
+        res_fnl = res_fnl.rename(columns=quantile_rename_map(res_fnl.columns))
         res_fnl = res_fnl.rename(columns={"count": "N", "sum_all": "N_ALL"})
         res_fnl.columns = [x.upper() for x in res_fnl.columns]
         return res_fnl
@@ -405,7 +406,7 @@ class DistributionShiftAnalyzer:
             spec_missing_value=None, q=[outlier_value]
         )
 
-        outlier_name = f'Q{str(int(outlier_value * 100))}'
+        outlier_name = "Q" + format(round(float(outlier_value) * 100, 10), "g")
         outlier_threshold = means_rpt[
             means_rpt[self.grp_name] == self.benchmark_value
         ][outlier_name].iloc[0]
