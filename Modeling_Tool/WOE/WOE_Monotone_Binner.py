@@ -341,6 +341,15 @@ class MonotoneWOEBinner:
         all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
         Under both policies fit and apply_woe record such values (fit warns under normal_bin);
         see _unseen_special_at_fit / _unseen_special_stats.
+    sv_total_basis : {'ordinary', 'all'}, default 'ordinary'
+        The bad and good totals that the WOE of a bin is measured against.
+        'ordinary' (default, legacy behavior): an ordinary bin (or category) is measured against the totals of the
+        ordinary rows, a special-value or [Missing] bin against the totals of all rows, so bins of equal risk get
+        different WOE when special values or missing values exist, and the shares of the bins do not add up to 1.
+        'all': every bin is measured against the totals of all rows (the textbook scorecard definition), so the WOE of
+        all bins is comparable, the shares add up to 1 and IV is the sum over one base. The bin edges are the same in
+        both modes; the WOE of the ordinary bins moves by one constant. The setting is applied at fit and again after
+        refine_chi2 / refine_dtree / refine_cate. Bins loaded with load_woe_bins keep the WOE they were saved with.
 
     Attributes
     ----------
@@ -350,7 +359,7 @@ class MonotoneWOEBinner:
         The categorical feature columns (an empty list when ``None`` was passed).
     special_values : list
         The declared special values (an empty list when ``None`` was passed).
-    target_col, n_init_bins, min_bin_size, min_n_bins, eps, missing_woe, bin_label_decimals, min_bad_count, min_good_count, small_bin_policy, monotone_direction, reference_target, direction_conflict_policy, missing_bin_strategy, refine_min_n_bins_policy, sv_min_bin_size, sv_small_policy, sv_woe_smoothing, sv_smoothing_alpha, unseen_special_policy
+    target_col, n_init_bins, min_bin_size, min_n_bins, eps, missing_woe, bin_label_decimals, min_bad_count, min_good_count, small_bin_policy, monotone_direction, reference_target, direction_conflict_policy, missing_bin_strategy, refine_min_n_bins_policy, sv_min_bin_size, sv_small_policy, sv_woe_smoothing, sv_smoothing_alpha, unseen_special_policy, sv_total_basis
         The constructor values.
 
     Notes
@@ -395,6 +404,7 @@ class MonotoneWOEBinner:
         sv_woe_smoothing: str = "none",
         sv_smoothing_alpha: float = 0.0,
         unseen_special_policy: str = "normal_bin",
+        sv_total_basis: str = "ordinary",
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col
@@ -485,6 +495,11 @@ class MonotoneWOEBinner:
                 f"got {unseen_special_policy!r}"
             )
         self.unseen_special_policy = unseen_special_policy
+        if sv_total_basis not in {"ordinary", "all"}:
+            raise ValueError(
+                f"sv_total_basis must be one of ['ordinary', 'all']; got {sv_total_basis!r}"
+            )
+        self.sv_total_basis = sv_total_basis
         # {feat: [declared numeric special values with no rows in the fit sample]}
         self._unseen_special_at_fit: Dict[str, list] = {}
         # apply_woe: per-feature rows carrying such values in the latest call
@@ -1432,6 +1447,55 @@ class MonotoneWOEBinner:
         chi2_p: float = 0.99,
         chi2_init_size: int = 1000,
     ) -> Dict[str, Any]:
+        """Fit one feature and, with ``sv_total_basis='all'``, put its bins on the totals of all rows.
+
+        The binning itself (edges, merges, monotone checks) always runs on the ordinary-row totals, so both settings
+        give the same edges; the rebase afterwards moves the ordinary WOE by a constant.
+        """
+        res = self._greedy_fit_one_core(df, feat, chi2_binning, chi2_p, chi2_init_size)
+        if self.sv_total_basis == "all":
+            res["totals_all"] = (
+                float(df[self.target_col].sum()),
+                float((df[self.target_col] == 0).sum()),
+            )
+            self._rebase_to_all_rows(res)
+        return res
+
+    def _rebase_to_all_rows(self, res: Dict[str, Any]) -> None:
+        """Recompute the share, WOE and IV of the ordinary (or category) bins of ``res`` against the bad and good
+        totals of all rows. It works from the counts, so calling it twice gives the same table."""
+        totals = res.get("totals_all")
+        wt = res.get("woe_table")
+        if totals is None or wt is None or len(wt) == 0:
+            return
+        total_bad, total_good = totals
+        eps = self.eps
+        wt = wt.copy()
+        pct_bad = wt["bad"].astype(float) / (total_bad + eps)
+        pct_good = wt["good"].astype(float) / (total_good + eps)
+        woe = np.log((pct_bad + eps) / (pct_good + eps))
+        wt["pct_bad"] = pct_bad
+        wt["pct_good"] = pct_good
+        wt["woe"] = woe
+        wt["iv"] = (pct_bad - pct_good) * woe
+        res["woe_table"] = wt
+        sv_table = res.get("sv_table")
+        sv_iv = float(sv_table["iv"].sum()) if sv_table is not None and len(sv_table) > 0 else 0.0
+        res["iv"] = round(float(wt["iv"].sum()) + sv_iv, 6)
+
+    def _rebase_after_refine(self, feat: str) -> None:
+        """Re-apply ``sv_total_basis='all'`` to a feature whose bins a refine step has just replaced."""
+        if self.sv_total_basis == "all":
+            self._rebase_to_all_rows(self._results[feat])
+
+    def _greedy_fit_one_core(
+        self,
+        df: pd.DataFrame,
+        feat: str,
+        chi2_binning: bool = False,
+        chi2_p: float = 0.99,
+        chi2_init_size: int = 1000,
+    ) -> Dict[str, Any]:
         """
         Run greedy monotone WOE binning (+ optional chi-square merging) on a single feature, with special values removed.
         Categorical features (cate_feats) go through _categorical_fit_one and are not cut into intervals.
@@ -2044,9 +2108,10 @@ class MonotoneWOEBinner:
             else:
                 old_nb, update = ok
                 self._results[feat].update(update)
+                self._rebase_after_refine(feat)
                 logger.info(
                     f"  ✓ {feat:40s} | bins: {old_nb} → {update['n_bins']} "
-                    f"| IV={update['iv']:.4f} | mono={update['is_monotonic']}"
+                    f"| IV={self._results[feat]['iv']:.4f} | mono={update['is_monotonic']}"
                 )
 
         if n_jobs == 1:
@@ -2103,9 +2168,10 @@ class MonotoneWOEBinner:
                 elif feat in feat_ok:
                     upd = feat_ok[feat]
                     self._results[feat].update(upd)
+                    self._rebase_after_refine(feat)
                     logger.info(
                         f"  ✓ {feat:40s} | bins: {old_nb_map[feat]} → {upd['n_bins']} "
-                        f"| IV={upd['iv']:.4f} | mono={upd['is_monotonic']}"
+                        f"| IV={self._results[feat]['iv']:.4f} | mono={upd['is_monotonic']}"
                     )
 
         self._chi2_binning   = True
@@ -2331,9 +2397,10 @@ class MonotoneWOEBinner:
                     )
                     return
                 self._results[feat].update(update)
+                self._rebase_after_refine(feat)
                 logger.info(
                     f"  ✓ {feat:40s} | bins: {old_nb} → {update['n_bins']} "
-                    f"| IV={update['iv']:.4f} | mono={update['is_monotonic']}"
+                    f"| IV={self._results[feat]['iv']:.4f} | mono={update['is_monotonic']}"
                 )
 
         if n_jobs == 1:
@@ -2392,9 +2459,10 @@ class MonotoneWOEBinner:
                         )
                         continue
                     self._results[feat].update(upd)
+                    self._rebase_after_refine(feat)
                     logger.info(
                         f"  ✓ {feat:40s} | bins: {old_nb_map[feat]} → {upd['n_bins']} "
-                        f"| IV={upd['iv']:.4f} | mono={upd['is_monotonic']}"
+                        f"| IV={self._results[feat]['iv']:.4f} | mono={upd['is_monotonic']}"
                     )
 
         logger.info(f"[refine_dtree] Done, {len(target_feats)} features processed")
@@ -2649,9 +2717,10 @@ class MonotoneWOEBinner:
                 logger.info(f"  - {feat:40s} | {old_nb} bin(s), no clustering needed")
                 continue
             vr.update(update)
+            self._rebase_after_refine(feat)
             logger.info(
                 f"  ✓ {feat:40s} | bins: {old_nb} → {update['n_bins']} "
-                f"| IV={update['iv']:.4f} | mono={update['is_monotonic']}"
+                f"| IV={self._results[feat]['iv']:.4f} | mono={update['is_monotonic']}"
             )
 
         logger.info(f"[refine_cate] Done, {len(target_feats)} categorical features processed")

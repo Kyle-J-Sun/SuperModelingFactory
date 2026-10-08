@@ -58,6 +58,7 @@ _MONOTONE_INIT_KEYS = frozenset({
     "sv_small_policy",
     "sv_woe_smoothing",
     "sv_smoothing_alpha",
+    "sv_total_basis",
     "unseen_special_policy",
 })
 _MONOTONE_FIT_KEYS = frozenset({"chi2_binning", "chi2_p", "chi2_init_size", "n_jobs"})
