@@ -503,17 +503,18 @@ class ExcelMaster(ExcelWorkbook):
 
         Notes
         -----
-        Writes the size of every row, which takes a few seconds and adds a few MB to the file.
+        The row height is set as the default row height of the sheet. Setting the 1,048,576 rows one by one made
+        xlsxwriter keep a record for each of them: about 0.5 GB of memory and 8 seconds per worksheet, and 15 MB per
+        sheet in the file, so a report of twenty sheets could exhaust the memory of the machine.
         """
-        
+
         if isinstance(size_scale, tuple) and len(size_scale) == 2:
             self._reset_cell_size()
             self.default_row_height = self.default_row_height * size_scale[0]
             self.default_col_width =  self.default_col_width * size_scale[1]
 
-        for i in range(0, self.max_nrows):
-            worksheet.set_row_pixels(i, height=self.default_row_height)
-            
+        # xlsxwriter works in points for rows: 1 px = 0.75 pt (what ``set_row_pixels`` converts with).
+        worksheet.set_default_row(self.default_row_height * 0.75)
         worksheet.set_column_pixels(0, self.max_ncols - 1, width=self.default_col_width)
         return 0
 

@@ -13,6 +13,7 @@ from ._common import (
     all_missing_mask,
     apply_woe_fit_query,
     as_list,
+    check_woe_fit_query_rows,
     copy_column_length_checked,
     make_dirs,
     merge_dict,
@@ -22,8 +23,10 @@ from ._common import (
     resolve_missing_oot,
     safe_to_csv,
     split_oot_by_flag,
+    validate_binary_target,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
+    warn_rows_without_split,
     write_basic_excel,
 )
 
@@ -60,10 +63,11 @@ class CreditModelPipelineConfig:
         features explicitly when the data has such numeric columns. A listed column that is missing raises ``KeyError``.
     split_col : str or None, default None
         Column with the sample labels ``ins`` / ``oos`` / ``oot`` (case and surrounding spaces ignored; a row with a
-        missing label belongs to no split). When set it replaces ``sample_col``; it must exist (``KeyError``), may hold
+        missing label belongs to no split, which a ``UserWarning`` reports with the count). When set it replaces ``sample_col``; it must exist (``KeyError``), may hold
         only those labels and must contain non-empty INS and OOS samples (``ValueError``).
     sample_col : str, default "sample_ind"
-        Legacy sample label column with the same labels, used when ``split_col`` is ``None``. If it is absent or has no
+        Legacy sample label column with the same labels, used when ``split_col`` is ``None``. Rows with a missing or
+        unknown label belong to no split and a ``UserWarning`` reports them. If it is absent or has no
         INS or no OOS rows, the pipeline silently falls back to ``oot_col`` and a random INS/OOS split.
     oot_col : str or None, default "oot_flag"
         OOT flag column, used only when the sample labels do not define INS and OOS: rows with a non-zero flag (missing
@@ -76,7 +80,7 @@ class CreditModelPipelineConfig:
     random_state : int, default 42
         Seed of the random INS/OOS split (unless ``split_config`` sets its own), the Optuna searches, the explanation
         sampling, and the LightGBM, XGBoost and CatBoost models: the final models, their Optuna candidates and the
-        backward-elimination proxy. A ``random_state`` in ``model_params`` for a model takes precedence for that model.
+        backward-elimination proxy. A ``random_state`` in ``model_params`` for a model takes precedence for that model (for ``cat``, a ``random_seed`` too).
     write_outputs : bool, default True
         Whether to write the CSV files and the explanation files into ``output_dir``, for the results that exist:
         ``psi_result.csv``, ``iv_report.csv``, ``lr_pvalue_elimination.csv``, ``woe_table_ins.csv``,
@@ -116,7 +120,11 @@ class CreditModelPipelineConfig:
         ``iv_bins``). The WOE settings of the screening come from ``woe_engine``, ``woe_fit_query``, ``woe_params`` and
         ``monotone_woe_params`` of this config, not from the dict. Any exception raised by the screening (for example an
         invalid setting, or a G03 or G04 gate setting, which needs evidence that this pipeline does not provide) is
-        caught: it is recorded in ``feature_selection_summary['error']`` and every feature is kept.
+        caught: it is recorded in ``feature_selection_summary['error']``, announced by a ``RuntimeWarning``, and every
+        feature is kept. The one exception is ``on_empty_stage="raise"``, which still raises ``EmptyStageError`` (a
+        ``ValueError``) when a stage would drop every feature. ``psi_compare_splits`` ignores case and spaces and accepts
+        a bare string, ``corr_method`` and ``corr_base_metric`` set the correlation coefficient and the metric that
+        decides between two correlated features.
     woe_engine : str, default "equal_freq"
         WOE binning engine: ``"monotone"`` (case-insensitive) uses ``MonotoneWOEBinner`` with ``monotone_woe_params``,
         any other value uses ``WOE_Master`` with ``woe_params``. It is also the engine that the screening fits when
@@ -124,7 +132,8 @@ class CreditModelPipelineConfig:
     woe_fit_query : str or None, default None
         pandas ``query`` expression that selects the INS rows used to fit the WOE binning (and the screening engine);
         the transform, training and evaluation still use all rows. It is checked when ``run`` starts: a referenced column
-        that is missing from the input data raises ``KeyError`` and an invalid expression raises ``ValueError``.
+        that is missing from the input data raises ``KeyError``, and an invalid expression, one that fails on the INS rows
+        or one that selects none of them raises ``ValueError``.
     extra_eval_datasets : dict of str to pandas.DataFrame or None, default None
         Evaluation-only frames ``{name: DataFrame}``. They are WOE-transformed with the fitted engine and evaluated like
         the splits (their rows appear under ``name`` in each model's table of ``perf_results``), but take no part in
@@ -623,7 +632,6 @@ class CreditModelPipeline:
             "learning_rate": 0.05,
             "depth": 4,
             "l2_leaf_reg": 3,
-            "random_seed": 42,
             "verbose": 0,
             "eval_metric": "AUC",
         },
@@ -697,6 +705,7 @@ class CreditModelPipeline:
             make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
         splits = self._apply_split_governance(self._split_data(data))
+        check_woe_fit_query_rows(splits["ins"], cfg.woe_fit_query, context="INS")
         fs_summary, final_features, screening_artifact = self._resolve_feature_selection(
             splits,
             feature_cols,
@@ -828,19 +837,40 @@ class CreditModelPipeline:
         """Parameters of a built-in model: the defaults, then ``model_params[name]``.
 
         The GBM models (``lgb``, ``xgb``, ``cat``) get ``random_state=config.random_state`` unless ``model_params`` sets
-        one; the built-in defaults carry no seed of their own.
+        one (for ``cat``, ``random_seed`` counts as well); the built-in defaults carry no seed of their own.
         """
         params = merge_dict(self._DEFAULT_MODEL_PARAMS.get(name, {}), self.config.model_params.get(name, {}))
-        if name in {"lgb", "xgb", "cat"}:
+        if name in {"lgb", "xgb", "cat"} and not (name == "cat" and "random_seed" in params):
+            # CatBoost's own name for the seed is ``random_seed``: the wrapper turns ``random_state`` into it and lets it
+            # win, so adding the config seed next to a ``random_seed`` of the user used to override the user's value.
             params.setdefault("random_state", self.config.random_state)
         return params
 
+    # Settings of the final models that must not reach the backward proxy: ``n_estimators`` and
+    # ``early_stopping_rounds`` are aliases of LightGBM's ``num_iterations`` / ``early_stopping_round`` and override the
+    # ``num_boost_round`` / ``early_stopping_rounds`` of the backward run, ``eval_metric`` duplicates its
+    # ``stopping_metric`` and ``n_jobs`` its thread setting.
+    _BACKWARD_PROXY_DROPPED_KEYS = {
+        "lgb": ("n_estimators", "early_stopping_rounds", "eval_metric", "n_jobs"),
+        "xgb": ("n_estimators", "early_stopping_rounds", "eval_metric"),
+    }
+
     def _model_params_for_backward(self) -> dict[str, Any]:
-        """Default parameters of the backward-elimination proxy model, seeded with ``config.random_state``."""
-        return merge_dict(
-            self._DEFAULT_MODEL_PARAMS.get(self._backward_model_name(), {}),
-            {"random_state": self.config.random_state},
-        )
+        """Default parameters of the backward-elimination proxy model, seeded with ``config.random_state``.
+
+        The tree settings of the final model are kept (learning rate, depth, leaves, regularisation), the keys that
+        would override the arguments of the backward run are dropped, and the seed is set as ``seed``: the eliminator
+        presets ``seed=42`` and that preset beat the ``random_state`` that was passed before.
+        """
+        name = self._backward_model_name()
+        params = dict(self._DEFAULT_MODEL_PARAMS.get(name, {}))
+        for key in self._BACKWARD_PROXY_DROPPED_KEYS.get(name, ()):
+            params.pop(key, None)
+        params["seed"] = self.config.random_state
+        if name == "xgb":
+            # ``backward_xgbm`` presets no objective, so XGBoost would fit a squared-error regression to the 0/1 target
+            params["objective"] = "binary:logistic"
+        return params
 
     def _backward_model_name(self) -> str:
         """Normalized ``backward_model``: stripped and lower-case (``"None"`` for a missing value)."""
@@ -896,9 +926,19 @@ class CreditModelPipeline:
                 f"Missing evaluation target column(s) {missing_targets} "
                 f"(target_col + eval_target_cols must all exist in the input data)"
             )
+        validate_binary_target(data, eval_targets, owner="CreditModelPipeline")
         eval_weight = self._resolve_eval_weight_col()
         if eval_weight and eval_weight != cfg.weight_col and eval_weight not in data.columns:
             raise KeyError(f"Missing eval_weight_col {eval_weight!r}")
+        if self._will_run_explainability():
+            for key in ("sample_n", "background_n"):
+                if key in cfg.explain_params:
+                    try:
+                        valid = int(cfg.explain_params[key]) >= 1
+                    except (TypeError, ValueError):
+                        valid = False
+                    if not valid:
+                        raise ValueError(f"explain_params[{key!r}] must be a positive integer; got {cfg.explain_params[key]!r}")
         if cfg.all_missing_score_value is not None:
             float(cfg.all_missing_score_value)
         if cfg.special_score_values is not None:
@@ -916,6 +956,9 @@ class CreditModelPipeline:
                     raise KeyError(
                         f"extra_eval_datasets[{name!r}] missing evaluation target column(s) {extra_missing}"
                     )
+                if eval_weight and eval_weight not in extra_df.columns:
+                    # without it the evaluation failed after screening, WOE, searches, training and Optuna
+                    raise KeyError(f"extra_eval_datasets[{name!r}] missing the evaluation weight column {eval_weight!r}")
                 if cfg.warm_start_enabled and cfg.warm_start_score_col and cfg.warm_start_score_col not in extra_df.columns:
                     raise KeyError(
                         f"extra_eval_datasets[{name!r}] missing warm_start_score_col {cfg.warm_start_score_col!r}"
@@ -1087,6 +1130,7 @@ class CreditModelPipeline:
             oos = work[lower == "oos"].copy()
             oot = work[lower == "oot"].copy()
             if len(ins) and len(oos):
+                warn_rows_without_split(raw_split, sample_col, "CreditModelPipeline")
                 if not len(oot):
                     synthesized = resolve_missing_oot(
                         oos,
@@ -1174,6 +1218,7 @@ class CreditModelPipeline:
         feature_cols: list[str],
     ) -> tuple[dict[str, Any], list[str]]:
         from Modeling_Tool.Feature.Feature_Screen import feature_screen, screen_config_from_mapping
+        from Modeling_Tool.Feature.Weighted_Screen import EmptyStageError
 
         cfg = self.config
         fs_cfg = cfg.feature_selection
@@ -1213,9 +1258,18 @@ class CreditModelPipeline:
             )
             summary = self._screen_result_to_summary(result, feature_cols)
             return summary, list(result.selected_features)
+        except EmptyStageError:
+            # ``on_empty_stage='raise'`` is a request to stop; it must not be turned into "keep everything"
+            raise
         except Exception as exc:
             summary["error"] = repr(exc)
             summary["final_features"] = list(feature_cols)
+            warnings.warn(
+                f"CreditModelPipeline: the feature screening failed ({exc!r}), so every one of the "
+                f"{len(feature_cols)} features is kept. The error is in feature_selection_summary['error'].",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return summary, list(feature_cols)
 
     def _screen_result_to_summary(
@@ -1226,10 +1280,12 @@ class CreditModelPipeline:
         summary: dict[str, Any] = {"initial_features": list(initial_features)}
         if not result.psi_table.empty:
             psi = result.psi_table.copy()
-            if "psi_ins_oos" in psi.columns:
-                psi["psi"] = psi["psi_ins_oos"]
-            elif "psi_max" in psi.columns:
+            # ``psi_max`` is the value the screening compared with the threshold (the largest PSI over the compared
+            # splits); the INS-vs-OOS column alone hid the decisive OOT value when OOT was compared.
+            if "psi_max" in psi.columns:
                 psi["psi"] = psi["psi_max"]
+            elif "psi_ins_oos" in psi.columns:
+                psi["psi"] = psi["psi_ins_oos"]
             summary["psi"] = psi
         if not result.iv_table.empty:
             iv = result.iv_table.copy()
@@ -1676,16 +1732,25 @@ class CreditModelPipeline:
                     gov["forbidden_splits"],
                     "backward test_data_dict (backward_params['init'])",
                 )
+            validation_data = splits[validation_split]
+            validation_weight_col = self._resolve_eval_weight_col()
+            if validation_weight_col is None and cfg.weight_col:
+                # ``eval_weight_col=None`` means an unweighted validation, but the eliminator falls back to the
+                # training weights when it gets no validation weight column, so give it a column of ones.
+                unit = "_smf_unit_weight"
+                validation_data = validation_data.assign(**{unit: 1.0})
+                test_data_dict = {name: frame.assign(**{unit: 1.0}) for name, frame in test_data_dict.items()}
+                validation_weight_col = unit
             params = merge_dict(
                 {
                     "train_data": splits["ins"],
                     "varlist": feature_cols,
                     "dep": cfg.target_col,
                     "model_type": f"{self._backward_model_name()}m",
-                    "validation_data": splits[validation_split],
+                    "validation_data": validation_data,
                     "test_data_dict": test_data_dict,
                     "weight_col": cfg.weight_col,
-                    "validation_weight_col": self._resolve_eval_weight_col(),
+                    "validation_weight_col": validation_weight_col,
                 },
                 user_init,
             )
@@ -1703,6 +1768,10 @@ class CreditModelPipeline:
                 },
                 cfg.backward_params.get("run", {}),
             )
+            user_run = cfg.backward_params.get("run", {})
+            if "seed" in user_run and "seed" not in (user_run.get("varreduct_params") or {}):
+                # the eliminator only uses its ``seed`` argument when the parameters carry none, and ours carry one
+                run_params["varreduct_params"] = {**run_params["varreduct_params"], "seed": user_run["seed"]}
             if hasattr(bwd, "run"):
                 bwd.run(**run_params)
                 selected = list(bwd.get_final_vars()) if hasattr(bwd, "get_final_vars") else list(feature_cols)
@@ -1855,6 +1924,11 @@ class CreditModelPipeline:
             raise ValueError(f"warm_start_score_col {cfg.warm_start_score_col!r} contains missing values")
         arr = score.to_numpy(dtype=float)
         if cfg.warm_start_score_type == "probability":
+            if ((arr < 0) | (arr > 1)).any():
+                raise ValueError(
+                    f"warm_start_score_col {cfg.warm_start_score_col!r} holds values outside [0, 1], but "
+                    "warm_start_score_type is 'probability'; use warm_start_score_type='log_odds' for log-odds scores"
+                )
             arr = np.clip(arr, 1e-6, 1 - 1e-6)
             return np.log(arr / (1 - arr))
         return arr

@@ -307,18 +307,21 @@ class SampleSplitter:
         else:
             strat = None
 
-        # Split on the index so that we can reindex the full frame afterwards.
-        # This preserves every column (features, target, and exclude_cols)
-        # on both output frames.
-        train_idx, test_idx = self.split_indices(
-            df.index,
+        # Split row POSITIONS and select with ``iloc``: selecting by label with ``df.loc`` returns every row that
+        # carries a duplicated index label (a frame built with ``pd.concat`` has them), which duplicated rows and
+        # leaked training rows into the test frame. For a unique index the partition is the same as before.
+        train_pos, test_pos = self.split_indices(
+            np.arange(len(df)),
             strat if strat is not None else y,
             test_size=test_size,
             stratify=self.stratify,
         )
+        labels = df.index.to_numpy()
+        self.train_index_ = labels[train_pos]
+        self.test_index_ = labels[test_pos]
 
-        train_df = df.loc[train_idx].copy()
-        test_df = df.loc[test_idx].copy()
+        train_df = df.iloc[train_pos].copy()
+        test_df = df.iloc[test_pos].copy()
 
         return train_df, test_df
 

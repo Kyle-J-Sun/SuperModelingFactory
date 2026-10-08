@@ -21,6 +21,7 @@ from .Weighted_Screen import (
     _apply_missing_rate_stage,
     _apply_stage_keep,
     _corr_dedup_weighted,
+    _fallback_weighted_iv,
     _corr_filter_dropped_audit,
     _gate_ranking_iv_map,
     _iv_band_keep,
@@ -118,6 +119,11 @@ class FeatureScreenConfig:
         Let the screening WOE engine take part in the correlation stage: non-numeric features are WOE-encoded so that
         they enter the correlation matrix (otherwise they are skipped with a warning and kept), and on unweighted runs
         the engine's bins also give the IV that decides between two correlated features.
+    corr_method : {"pearson", "spearman", "kendall"}, default "pearson"
+        Correlation coefficient of the correlation stage. Weighted runs with non-constant weights support Pearson only
+        (``ValueError`` otherwise).
+    corr_base_metric : {"iv", "ks"}, default "iv"
+        Metric that decides which of two correlated features is kept: the higher value wins.
     corr_nan_policy : {"pairwise", "median_fill", "raise"}, default "pairwise"
         Missing values in the weighted correlation matrix: ``"pairwise"`` correlates each pair on the rows where both
         values exist, ``"median_fill"`` fills them with the weighted median and ``"raise"`` raises ``ValueError``.
@@ -254,6 +260,8 @@ class FeatureScreenConfig:
     corr_threshold: float = 0.75
     corr_max_iterations: int = 10
     corr_use_woe_bins: bool = False
+    corr_method: str = "pearson"
+    corr_base_metric: str = "iv"
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise"
     corr_block_size: int = 256
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn"
@@ -304,6 +312,33 @@ class FeatureScreenConfig:
     def __post_init__(self) -> None:
         _check_iv_equal_freq(self.iv_equal_freq)
         _check_tie_breaker(self.tie_breaker)
+        self.psi_compare_splits = _normalize_psi_compare_splits(self.psi_compare_splits)
+        self.corr_method = str(self.corr_method).strip().lower()
+        if self.corr_method not in ("pearson", "spearman", "kendall"):
+            raise ValueError(f"corr_method must be 'pearson', 'spearman' or 'kendall'; got {self.corr_method!r}")
+        self.corr_base_metric = str(self.corr_base_metric).strip().lower()
+        if self.corr_base_metric not in ("iv", "ks"):
+            raise ValueError(f"corr_base_metric must be 'iv' or 'ks'; got {self.corr_base_metric!r}")
+        if self.on_empty_stage not in ("keep_all_warn", "raise"):
+            raise ValueError(f"on_empty_stage must be 'keep_all_warn' or 'raise'; got {self.on_empty_stage!r}")
+
+
+def _normalize_psi_compare_splits(value: Any) -> list[str]:
+    """Splits that the PSI stage compares INS with, as a clean list of ``"oos"`` / ``"oot"``.
+
+    A bare string is one split (it used to be exploded into characters), case and surrounding spaces are ignored (the
+    other split lists of the pipelines already are), duplicates are dropped and any other name raises ``ValueError``:
+    an unrecognised name used to switch the PSI stage off without a word.
+    """
+    names = [value] if isinstance(value, str) else list(value or [])
+    normalized: list[str] = []
+    for name in names:
+        label = str(name).strip().lower()
+        if label not in {"oos", "oot"}:
+            raise ValueError(f"psi_compare_splits only supports 'oos' and 'oot'; got {name!r}")
+        if label not in normalized:
+            normalized.append(label)
+    return normalized
 
 
 def screen_config_from_mapping(
@@ -352,7 +387,7 @@ def screen_config_from_mapping(
     return FeatureScreenConfig(
         psi_enabled=bool(cfg.get("psi_enabled", True)),
         psi_threshold=float(cfg.get("psi_threshold", 0.2)),
-        psi_compare_splits=list(cfg.get("psi_compare_splits", ["oos"])),
+        psi_compare_splits=cfg.get("psi_compare_splits", ["oos"]),
         psi_buckets=int(cfg.get("psi_buckets", iv_nbins)),
         psi_use_woe_bins=bool(cfg.get("psi_use_woe_bins", False)),
         iv_enabled=bool(cfg.get("iv_enabled", True)),
@@ -368,6 +403,8 @@ def screen_config_from_mapping(
         corr_threshold=float(cfg.get("corr_threshold", 0.75)),
         corr_max_iterations=int(cfg.get("corr_max_iterations", 10)),
         corr_use_woe_bins=bool(cfg.get("corr_use_woe_bins", False)),
+        corr_method=str(cfg.get("corr_method", "pearson")),
+        corr_base_metric=str(cfg.get("corr_base_metric", "iv")),
         corr_nan_policy=str(cfg.get("corr_nan_policy", "pairwise")),  # type: ignore[arg-type]
         corr_block_size=int(cfg.get("corr_block_size", 256)),
         on_empty_stage=str(cfg.get("on_empty_stage", "keep_all_warn")),  # type: ignore[arg-type]
@@ -657,6 +694,8 @@ def _woe_bins_unweighted_screen(
             data=ins[current + [target_col]],
             dep=target_col,
             corr_cutpoint=config.corr_threshold,
+            method=config.corr_method,
+            base_metric=config.corr_base_metric,
             woe_binner=binner if use_binner else None,
             woe_engine="monotone" if use_binner else "master",
         )
@@ -960,6 +999,8 @@ def _weighted_woe_bins_screen(
                 data=ins[current + [target_col]],
                 dep=target_col,
                 corr_cutpoint=config.corr_threshold,
+                method=config.corr_method,
+                base_metric=config.corr_base_metric,
                 woe_binner=binner if use_binner else None,
                 woe_engine="monotone" if use_binner else "master",
             )
@@ -971,6 +1012,7 @@ def _weighted_woe_bins_screen(
             corr = _weighted_corr_for_screen(
                 ins, current, w_ins,
                 corr_use_woe_bins=config.corr_use_woe_bins,
+                corr_method=config.corr_method,
                 corr_nan_policy=config.corr_nan_policy,
                 corr_block_size=config.corr_block_size,
                 adapter=adapter,
@@ -983,6 +1025,9 @@ def _weighted_woe_bins_screen(
                 iv_map,
                 config.corr_threshold,
                 config.corr_max_iterations,
+                fallback_iv=_fallback_weighted_iv(
+                    ins, target_col, w_ins, config.iv_bins, config.iv_min_bin_prop, config.precision,
+                ),
             )
         summary_rows.append(_summary_row("corr", n_before, len(current), config.corr_threshold, weight_col))
 
@@ -1092,6 +1137,16 @@ def feature_screen(
     cfg = config or FeatureScreenConfig()
     use_woe_bins = _needs_woe_bins(cfg)
 
+    if cfg.psi_enabled:
+        empty = [name for name in cfg.psi_compare_splits if name in splits and len(splits[name]) == 0]
+        if empty:
+            warnings.warn(
+                f"feature_screen: psi_compare_splits {empty} has no rows in this run, so the PSI stage does not "
+                "compare INS with it" + (" and checks nothing" if len(empty) == len(cfg.psi_compare_splits) else ""),
+                UserWarning,
+                stacklevel=2,
+            )
+
     if weight_col is not None:
         if use_woe_bins or prefit_woe_engine is not None:
             return _weighted_woe_bins_screen(
@@ -1122,6 +1177,8 @@ def feature_screen(
             content=cfg.content,
             precision=cfg.precision,
             corr_use_woe_bins=cfg.corr_use_woe_bins,
+            corr_method=cfg.corr_method,
+            corr_base_metric=cfg.corr_base_metric,
             corr_nan_policy=cfg.corr_nan_policy,
             corr_block_size=cfg.corr_block_size,
             on_empty_stage=cfg.on_empty_stage,
@@ -1167,6 +1224,8 @@ def feature_screen(
         gates_config=cfg,
         selection_evidence=selection_evidence,
         content=cfg.content,
+        corr_method=cfg.corr_method,
+        corr_base_metric=cfg.corr_base_metric,
     )
 
 

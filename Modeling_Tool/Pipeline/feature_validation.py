@@ -18,12 +18,15 @@ from Modeling_Tool._utils.frames import concat_non_empty
 from ._common import (
     apply_woe_fit_query,
     as_list,
+    check_woe_fit_query_rows,
     make_dirs,
     normalize_group_specs,
     normalize_split_values,
+    warn_rows_without_split,
     resolve_missing_oot,
     safe_to_csv,
     split_oot_by_flag,
+    validate_binary_target,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
 )
@@ -208,8 +211,10 @@ class FeatureValidationPipelineConfig:
         ``insufficient_group_policy``, ``target_rules``, ``min_pass_count``, ``per_target_iv_range``,
         ``direction_reference_target``. VIF: ``vif_enabled``, ``vif_threshold``, ``vif_min_features``,
         ``vif_tie_break_metric``, ``vif_use_woe_bins``. Others: ``ranking_metric``, ``tie_breaker``,
-        ``missing_rate_ref`` and the stage switches and binning options derived from the other config fields (for example
-        ``psi_enabled``, ``iv_nbins``, ``corr_max_iterations``).
+        ``missing_rate_ref``, ``on_empty_stage`` (``'keep_all_warn'`` or ``'raise'``), ``corr_method`` and
+        ``corr_base_metric`` (default to ``corr_params['method']`` and ``['base_metric']``) and the stage switches and
+        binning options derived from the other config fields (for example ``psi_enabled``, ``iv_nbins``,
+        ``corr_max_iterations``). ``psi_compare_splits`` ignores case and spaces and accepts a bare string.
     selection_group_dims : list of str or None, default None
         Columns of the group-stability gates (``monthly_iv_min``, ``monthly_iv_cv_max``,
         ``direction_consistency_min``). They are required when one of those gates is set (``ValueError``) and must exist
@@ -539,6 +544,7 @@ class FeatureValidationPipeline:
         new_features = self._resolve_new_features(work)
         incumbent_features = self._resolve_incumbent_features(work, new_features)
         target_cols = [col for col in as_list(cfg.target_cols) if col in work.columns]
+        self._warn_unknown_targets(work.columns)
         self._validate_input(work, new_features, incumbent_features, target_cols)
         config_snapshot = self._build_config_snapshot(
             new_features,
@@ -583,6 +589,8 @@ class FeatureValidationPipeline:
                 missing_rate_threshold=cfg.missing_rate_threshold,
                 missing_rate_ref=cfg.woe_params.get("missing_ref_value", -999999),
             )
+        if cfg.woe_enabled and target_cols:
+            check_woe_fit_query_rows(splits["ins"], cfg.woe_fit_query, context="INS")
         woe_artifacts = (
             self._fit_woe(
                 splits,
@@ -689,6 +697,21 @@ class FeatureValidationPipeline:
             config_snapshot=config_snapshot,
         )
 
+    def _warn_unknown_targets(self, columns: Any) -> None:
+        """Warn about ``target_cols`` that are not columns of the data: they are ignored, and with no valid target left the
+        WOE, IV/KS, correlation detail and selection stages are skipped without any other sign."""
+        available = set(columns)
+        unknown = [col for col in as_list(self.config.target_cols) if col not in available]
+        if not unknown:
+            return
+        none_left = len(unknown) == len(as_list(self.config.target_cols))
+        warnings.warn(
+            f"FeatureValidationPipeline: target_cols {unknown} are not columns of the data and are ignored"
+            + ("; with no target left the WOE, IV/KS, correlation detail and selection stages are skipped." if none_left else "."),
+            UserWarning,
+            stacklevel=3,
+        )
+
     def _resolve_input_type(self, data: pd.DataFrame | str | Path) -> str:
         cfg = self.config
         if cfg.input_type not in {"auto", "dataframe", "csv"}:
@@ -717,6 +740,8 @@ class FeatureValidationPipeline:
             raise ValueError("csv_read_kwargs cannot include usecols; FeatureValidationPipeline controls usecols.")
         if "chunksize" in kwargs:
             raise ValueError("csv_read_kwargs cannot include chunksize; CSV batch mode splits by feature columns.")
+        if "nrows" in kwargs:
+            raise ValueError("csv_read_kwargs cannot include nrows; FeatureValidationPipeline controls the rows read.")
         return pd.read_csv(csv_path, usecols=usecols, nrows=nrows, **kwargs)
 
     def _run_csv_batches(self, csv_path: Path) -> FeatureValidationPipelineResult:
@@ -1366,6 +1391,7 @@ class FeatureValidationPipeline:
             raise KeyError(f"Missing required columns: {sorted(set(missing))}")
         if not new_features:
             raise ValueError("new_feature_cols cannot be empty")
+        validate_binary_target(data, target_cols, owner="FeatureValidationPipeline", allow_missing=True)
         if cfg.woe_engine.lower() not in {"monotone", "equal_freq"}:
             raise ValueError("woe_engine must be 'monotone' or 'equal_freq'")
         if cfg.psi_reference_dataset not in {"ins", "oos", "oot", "external"}:
@@ -1425,6 +1451,9 @@ class FeatureValidationPipeline:
             oos = work[normalized.eq("oos").fillna(False)].copy()
             oot = work[normalized.eq("oot").fillna(False)].copy()
             if len(ins) and len(oos):
+                warn_rows_without_split(
+                    raw_split, sample_col, "FeatureValidationPipeline", allowed=None if cfg.split_col else ("ins", "oos", "oot")
+                )
                 if not len(oot):
                     synthesized = resolve_missing_oot(
                         oos,
@@ -1803,6 +1832,8 @@ class FeatureValidationPipeline:
                 corr_params.get("max_iterations", 10),
             ),
             "corr_use_woe_bins": params.get("corr_use_woe_bins", cfg.corr_use_woe_bins),
+            "corr_method": params.get("corr_method", corr_params.get("method", "pearson")),
+            "corr_base_metric": params.get("corr_base_metric", corr_params.get("base_metric", "iv")),
             "missing_rate_threshold": missing_rate_threshold,
             "missing_rate_ref": params.get(
                 "missing_rate_ref",
@@ -1831,6 +1862,7 @@ class FeatureValidationPipeline:
             "vif_min_features": params.get("vif_min_features", 2),
             "vif_tie_break_metric": params.get("vif_tie_break_metric", "iv"),
             "vif_use_woe_bins": params.get("vif_use_woe_bins", False),
+            "on_empty_stage": params.get("on_empty_stage", "keep_all_warn"),
         }
         return screen_config_from_mapping(
             mapping,

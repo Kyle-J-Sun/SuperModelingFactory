@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -348,7 +348,7 @@ def _weighted_iv_detail(
     x: np.ndarray,
     *,
     var_name: str | None = None,
-    include_missing_bin: bool = False,
+    include_missing_bin: bool = True,
     content: float | None = None,
 ) -> tuple[float, int, float, float]:
     """Weighted IV plus an optional zero-cell-floored variant.
@@ -428,7 +428,7 @@ def _weighted_iv_from_assigned_bins(
     x: np.ndarray,
     *,
     var_name: str | None = None,
-    include_missing_bin: bool = False,
+    include_missing_bin: bool = True,
 ) -> tuple[float, int, float]:
     iv, n_bins, missing_rate, _ = _weighted_iv_detail(
         y, w, bins, x, var_name=var_name, include_missing_bin=include_missing_bin,
@@ -445,7 +445,7 @@ def _weighted_iv_for_var(
     precision: int,
     *,
     var_name: str | None = None,
-    include_missing_bin: bool = False,
+    include_missing_bin: bool = True,
     on_null_edges: Literal["raise", "warn_and_zero", "silent"] = "raise",
     content: float | None = None,
 ) -> tuple[float, int, float, float]:
@@ -636,8 +636,14 @@ def _weighted_corr_for_screen(
     corr_block_size: int = 256,
     adapter: Any | None = None,
     binner: Any | None = None,
+    corr_method: str = "pearson",
 ) -> np.ndarray:
     """Build weighted correlation matrix for screening (WOE or raw-value path)."""
+    if corr_method != "pearson":
+        raise ValueError(
+            f"corr_method={corr_method!r} is not supported with non-constant sample weights: the weighted correlation "
+            "is Pearson only. Use corr_method='pearson' or unweighted/constant weights."
+        )
     from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 
     non_numeric = [v for v in current if not pd.api.types.is_numeric_dtype(ins[v])]
@@ -800,6 +806,14 @@ def _apply_missing_rate_stage(
     return current, missing_rate_table, missing_rate_dropped
 
 
+class EmptyStageError(ValueError):
+    """A screening stage would drop every feature while ``on_empty_stage`` is ``"raise"``.
+
+    It is a ``ValueError`` (what the stage raised before), but a distinct type so that a caller which catches screening
+    failures, such as ``CreditModelPipeline``, can tell this deliberate request from an unexpected failure.
+    """
+
+
 def _apply_stage_keep(
     current: list[str],
     keep: list[str],
@@ -819,7 +833,7 @@ def _apply_stage_keep(
     if new_current:
         return new_current
     if on_empty_stage == "raise":
-        raise ValueError(
+        raise EmptyStageError(
             f"feature screen stage {stage!r} eliminated all {len(current)} variables; "
             f"on_empty_stage='raise'"
         )
@@ -855,47 +869,80 @@ def _corr_dedup_weighted(
     iv_map: dict[str, float],
     threshold: float,
     max_iterations: int,
+    fallback_iv: Callable[[str], float] | None = None,
 ) -> tuple[list[str], pd.DataFrame]:
+    """Drop the weaker feature of every correlated pair, independently of the column order.
+
+    Features are processed by descending IV (ties by ascending name). Each feature that is still in is kept and every
+    not yet processed feature whose absolute correlation with it exceeds ``threshold`` is dropped. The pairwise pass
+    this replaces dropped a feature because of a partner that a later pair removed again, so the result depended on
+    the column order, and it ranked by an IV of 0 for every feature when the IV stage was off. ``fallback_iv`` supplies
+    the IV of a feature that ``iv_map`` lacks. The pass already reaches the fixed point, so ``max_iterations`` only
+    bounds a repetition that finds nothing more to drop.
+    """
     dropped_rows: list[dict] = []
     current = list(varlist)
     idx = {v: i for i, v in enumerate(varlist)}
 
+    def _iv(name: str) -> float:
+        value = iv_map.get(name)
+        if value is None or not np.isfinite(value):
+            value = fallback_iv(name) if fallback_iv is not None else 0.0
+        return float(value) if value is not None and np.isfinite(value) else 0.0
+
+    ivs = {v: _iv(v) for v in varlist}
     for _ in range(max_iterations):
         if len(current) <= 1:
             break
-        sub_idx = [idx[v] for v in current]
-        sub_corr = corr[np.ix_(sub_idx, sub_idx)]
-        pairs = _high_corr_pairs(current, sub_corr, threshold)
-        if pairs.empty:
-            break
-
-        remove: set[str] = set()
-        for _, row in pairs.iterrows():
-            v1, v2 = row["var_a"], row["var_b"]
-            if v1 in remove or v2 in remove:
+        ranked = sorted(current, key=lambda name: (-ivs[name], name))
+        removed: set[str] = set()
+        for position, kept in enumerate(ranked):
+            if kept in removed:
                 continue
-            iv1 = iv_map.get(v1, 0.0)
-            iv2 = iv_map.get(v2, 0.0)
-            if iv1 >= iv2:
-                kept, dropped = v1, v2
-            else:
-                kept, dropped = v2, v1
-            remove.add(dropped)
-            dropped_rows.append({
-                "var_a": v1,
-                "var_b": v2,
-                "corr": row["corr"],
-                "iv_a": iv1,
-                "iv_b": iv2,
-                "kept": kept,
-                "dropped": dropped,
-            })
-
-        if not remove:
+            for other in ranked[position + 1:]:
+                if other in removed:
+                    continue
+                value = corr[idx[kept], idx[other]]
+                if not (np.isfinite(value) and abs(value) > threshold):
+                    continue
+                removed.add(other)
+                var_a, var_b = sorted((kept, other), key=idx.__getitem__)
+                dropped_rows.append({
+                    "var_a": var_a,
+                    "var_b": var_b,
+                    "corr": float(value),
+                    "iv_a": ivs[var_a],
+                    "iv_b": ivs[var_b],
+                    "kept": kept,
+                    "dropped": other,
+                })
+        if not removed:
             break
-        current = [v for v in current if v not in remove]
+        current = [v for v in current if v not in removed]
 
     return current, pd.DataFrame(dropped_rows)
+
+
+def _fallback_weighted_iv(
+    ins: pd.DataFrame,
+    target_col: str,
+    w_ins: np.ndarray,
+    iv_bins: int,
+    min_bin_prop: float,
+    precision: int,
+) -> Callable[[str], float]:
+    """IV of one feature with the weighted equal-frequency bins, for the correlation ranking when the IV stage is off."""
+    y_ins = ins[target_col].to_numpy(dtype=float)
+
+    def _iv(name: str) -> float:
+        if name not in ins.columns or ins[name].nunique(dropna=False) <= 1:
+            return 0.0
+        value, _, _, _ = _weighted_iv_for_var(
+            ins[name].to_numpy(dtype=float), y_ins, w_ins, iv_bins, min_bin_prop, precision, var_name=name,
+        )
+        return value
+
+    return _iv
 
 
 def _corr_filter_dropped_audit(
@@ -1017,6 +1064,8 @@ def _legacy_unweighted_screen(
     gates_config: Any | None = None,
     selection_evidence: Any | None = None,
     content: float = 1e-6,
+    corr_method: str = "pearson",
+    corr_base_metric: str = "iv",
 ) -> WeightedScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
@@ -1117,6 +1166,8 @@ def _legacy_unweighted_screen(
             data=ins[current + [target_col]],
             dep=target_col,
             corr_cutpoint=corr_threshold,
+            method=corr_method,
+            base_metric=corr_base_metric,
         )
         n_before = len(current)
         current = cf.remove_highly_correlated(current, max_iterations=corr_max_iterations)
@@ -1172,6 +1223,8 @@ def _weighted_screen_impl(
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
     corr_block_size: int = 256,
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+    corr_method: str = "pearson",
+    corr_base_metric: str = "iv",
     prefit_woe_engine: Any | None = None,
     missing_rate_threshold: float | None = None,
     missing_rate_ref: Any = None,
@@ -1310,6 +1363,8 @@ def _weighted_screen_impl(
                 data=ins[current + [target_col]],
                 dep=target_col,
                 corr_cutpoint=corr_threshold,
+                method=corr_method,
+                base_metric=corr_base_metric,
                 woe_binner=prefit_woe_engine if use_binner else None,
                 woe_engine="monotone" if use_binner else "master",
             )
@@ -1324,10 +1379,12 @@ def _weighted_screen_impl(
                 corr_nan_policy=corr_nan_policy,
                 corr_block_size=corr_block_size,
                 binner=prefit_woe_engine,
+                corr_method=corr_method,
             )
             iv_map = dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
             current, corr_dropped = _corr_dedup_weighted(
                 current, corr, iv_map, corr_threshold, corr_max_iterations,
+                fallback_iv=_fallback_weighted_iv(ins, target_col, w_ins, iv_bins, min_bin_prop, precision),
             )
         summary_rows.append(_summary_row("corr", n_before, len(current), corr_threshold, weight_col))
 
@@ -1384,6 +1441,8 @@ def weighted_feature_screen(
     psi_use_woe_bins: bool = False,
     iv_use_woe_bins: bool = False,
     corr_use_woe_bins: bool = False,
+    corr_method: str = "pearson",
+    corr_base_metric: str = "iv",
     woe_engine: str = "equal_freq",
     woe_fit_query: str | None = None,
     woe_params: dict[str, Any] | None = None,
@@ -1465,6 +1524,10 @@ def weighted_feature_screen(
     corr_use_woe_bins : bool, default False
         Let the screening WOE engine take part in the correlation stage (WOE encoding of non-numeric features, and the
         IV that decides between correlated features on unweighted runs).
+    corr_method : {"pearson", "spearman", "kendall"}, default "pearson"
+        Correlation coefficient of the correlation stage (Pearson only with non-constant weights).
+    corr_base_metric : {"iv", "ks"}, default "iv"
+        Metric that decides which of two correlated features is kept.
     woe_engine : str, default "equal_freq"
         Engine fitted when a ``*_use_woe_bins`` flag is set and no ``prefit_woe_engine`` is given: ``"monotone"`` fits a
         ``MonotoneWOEBinner``, any other value a ``WOE_Master``.
@@ -1521,7 +1584,7 @@ def weighted_feature_screen(
     config = FeatureScreenConfig(
         psi_enabled=psi_enabled,
         psi_threshold=psi_threshold,
-        psi_compare_splits=list(psi_compare_splits),
+        psi_compare_splits=psi_compare_splits,
         psi_buckets=psi_buckets,
         psi_use_woe_bins=psi_use_woe_bins,
         iv_enabled=iv_enabled,
@@ -1534,6 +1597,8 @@ def weighted_feature_screen(
         corr_threshold=corr_threshold,
         corr_max_iterations=corr_max_iterations,
         corr_use_woe_bins=corr_use_woe_bins,
+        corr_method=corr_method,
+        corr_base_metric=corr_base_metric,
         woe_engine=woe_engine,
         woe_fit_query=woe_fit_query,
         woe_params=dict(woe_params or {}),

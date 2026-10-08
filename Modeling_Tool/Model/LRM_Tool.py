@@ -1570,7 +1570,9 @@ class LRMaster:
         def _native(v):
             return v.item() if hasattr(v, 'item') else v
 
-        self.best_params_ = {k: _native(best_row[k]) for k in param_names}
+        # Read each parameter from its own column: ``best_row`` is one row Series of a frame with float AUC columns, so
+        # an integer parameter (``max_iter=100``) came out as ``100.0`` and the final fit raised InvalidParameterError.
+        self.best_params_ = {k: _native(search_df[k].iloc[0]) for k in param_names}
         self.search_results_ = search_df
         self.params = {**self.params, **self.best_params_}
 

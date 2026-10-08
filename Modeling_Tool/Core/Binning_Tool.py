@@ -98,10 +98,11 @@ def get_decision_tree_binning_edges(feature, target, max_leaf_nodes=5, min_sampl
     feature_clean = df['feature']
     target_clean = df['target']
     
-    # If the feature variance is 0 or almost 0, binning is not possible
+    # With at most one distinct value there is nothing to split: return what the tree returns when it makes no
+    # split (no thresholds, plus the missing reference), so that the caller sees a list of edges in every case.
     if feature_clean.nunique() <= 1:
         logger.info("Warning: feature variance is 0, cannot bin")
-        return [feature_clean.min(), feature_clean.max()], pd.cut(feature, bins=[feature_clean.min(), feature_clean.max()])
+        return [missing_ref_value] if missing_ref_value else []
     
     # Reshape the feature to a 2D array to fit sklearn
     X = feature_clean.values.reshape(-1, 1)
@@ -1605,7 +1606,8 @@ def super_binning(data, score, dep, nbins = 10, precision = 5, min_bin_prop = 0.
                                     tree_binning = tree_binning,
                                     target = dep,
                                     random_state = random_state,
-                                    spec_values = spec_values)
+                                    spec_values = spec_values,
+                                    fillna = fillna)
     
 #     print("First Layer Edges: ", output_edges)
     

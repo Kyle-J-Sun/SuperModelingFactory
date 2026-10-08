@@ -61,6 +61,34 @@ def normalize_split_values(values: pd.Series) -> pd.Series:
     return normalized.mask(normalized.eq(""), pd.NA)
 
 
+def warn_rows_without_split(
+    labels: pd.Series,
+    column: str,
+    pipeline: str,
+    *,
+    allowed: Iterable[str] | None = ("ins", "oos", "oot"),
+) -> int:
+    """Warn about rows whose sample label puts them in no split and return how many there are.
+
+    A row with a missing or blank label, or (when ``allowed`` is given) a label outside ``allowed`` such as a typo
+    (``"inss"``) or ``"train"``, is left out of every split. That is what the pipelines document, but it used to happen
+    without a trace, so a mislabelled slice of the data vanished from the analysis unnoticed.
+    """
+    normalized = normalize_split_values(labels)
+    unassigned = normalized.isna() if allowed is None else ~normalized.isin(list(allowed)).fillna(False)
+    count = int(unassigned.sum())
+    if count:
+        seen = sorted({str(value) for value in labels[unassigned.to_numpy()].dropna().unique()})[:5]
+        detail = f" (labels seen: {', '.join(repr(value) for value in seen)})" if seen else " (missing or blank labels)"
+        warnings.warn(
+            f"{pipeline}: {count} of {len(labels)} rows have a missing or unknown label in {column!r}{detail} and "
+            "belong to no split; they are left out of every stage.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return count
+
+
 def normalize_group_specs(
     value: Any,
     *,
@@ -124,15 +152,30 @@ def merge_dict(base: Mapping[str, Any] | None, override: Mapping[str, Any] | Non
     return merged
 
 
+_QUERY_BACKTICK_RE = re.compile(r"`([^`]+)`")
+_QUERY_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+_QUERY_NAME_RE = re.compile(r"(?<![\w.@])([A-Za-z_]\w*)\b(?!\s*\()")
+
+
 def query_referenced_columns(expr: str) -> set[str]:
-    """Return identifier-like column names referenced in a pandas query expression."""
+    """Return the column names referenced in a pandas query expression.
+
+    Backtick-quoted names count as columns. Words inside string literals, attribute and method names after a dot
+    (``x.notna()``, ``s.str.startswith('A')``), ``@local`` references, called functions (``abs(x)``) and the keywords
+    and ``index`` are not columns.
+    """
     if not expr or not str(expr).strip():
         return set()
-    return {
+    text = str(expr)
+    columns = {match.group(1).strip() for match in _QUERY_BACKTICK_RE.finditer(text)}
+    text = _QUERY_BACKTICK_RE.sub(" ", text)
+    text = _QUERY_STRING_RE.sub(" ", text)
+    columns |= {
         match.group(1)
-        for match in _QUERY_COLUMN_RE.finditer(str(expr))
-        if match.group(1) not in _QUERY_RESERVED
+        for match in _QUERY_NAME_RE.finditer(text)
+        if match.group(1) not in _QUERY_RESERVED and match.group(1) != "index"
     }
+    return columns
 
 
 def validate_woe_fit_query_syntax(data: pd.DataFrame, query: str) -> None:
@@ -148,6 +191,56 @@ def validate_woe_fit_query_syntax(data: pd.DataFrame, query: str) -> None:
         raise ValueError(f"Invalid woe_fit_query syntax: {query!r}") from exc
     except Exception as exc:
         raise ValueError(f"woe_fit_query failed on sample data: {query!r} ({exc})") from exc
+
+
+def validate_binary_target(
+    frame: pd.DataFrame,
+    columns: Iterable[str],
+    *,
+    owner: str,
+    allow_missing: bool = False,
+) -> None:
+    """Raise ValueError unless every target column holds 0/1 labels (1 = bad) of both classes.
+
+    The pipelines never checked the target: a 1/2 coding gave a KS of 600 and an IV of 0, a single-class target gave
+    an IV of 13 for every feature (noise included), and a missing label either crashed a model late or was counted as
+    a good by a grouped sum, all without a message at the cause.
+    """
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        values = frame[column]
+        n_missing = int(values.isna().sum())
+        if n_missing and not allow_missing:
+            raise ValueError(
+                f"{owner}: target column {column!r} has {n_missing} missing values; remove or label those rows"
+            )
+        observed = values.dropna()
+        invalid = ~observed.isin([0, 1])
+        if invalid.any():
+            shown = sorted({str(value) for value in observed[invalid].unique()})[:5]
+            raise ValueError(f"{owner}: target column {column!r} must hold 0/1 labels (1 = bad); found {shown}")
+        if observed.nunique() < 2:
+            raise ValueError(
+                f"{owner}: target column {column!r} holds a single class ({observed.iloc[0] if len(observed) else 'no values'}); "
+                "IV, KS and the models need both goods and bads"
+            )
+
+
+def check_woe_fit_query_rows(frame: pd.DataFrame, query: str | None, *, context: str = "INS") -> None:
+    """Raise ValueError unless ``query`` runs on the whole ``frame`` and selects at least one row.
+
+    ``validate_woe_fit_query_syntax`` only parses the expression on the first 100 rows of the input, so an expression
+    that fails on the full data, or that selects nothing (a typo in a value), used to pass.
+    """
+    if not query:
+        return
+    try:
+        selected = len(frame.query(query, engine="python"))
+    except Exception as exc:
+        raise ValueError(f"woe_fit_query {query!r} failed on the {context} rows ({exc})") from exc
+    if selected == 0:
+        raise ValueError(f"woe_fit_query {query!r} selects none of the {len(frame)} {context} rows")
 
 
 def validate_woe_fit_query_columns(
@@ -181,15 +274,11 @@ def apply_woe_fit_query(
     try:
         filtered = train.query(query, engine="python").copy()
     except Exception as exc:
-        audit = {
-            "target": target,
-            "step": "fit_filter",
-            "status": "error",
-            "query": query,
-            "n_before": n_before,
-            "error": repr(exc),
-        }
-        return train, audit
+        # Falling back to the unfiltered rows used to hide the failure: the WOE was fitted on rows the user had
+        # asked to exclude, and the only trace was an audit row.
+        raise ValueError(f"woe_fit_query {query!r} failed on the rows to fit ({exc})") from exc
+    if filtered.empty:
+        raise ValueError(f"woe_fit_query {query!r} selects none of the {n_before} rows to fit")
     audit = {
         "target": target,
         "step": "fit_filter",

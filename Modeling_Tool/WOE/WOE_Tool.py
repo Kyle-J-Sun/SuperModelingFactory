@@ -1301,6 +1301,29 @@ def _map_woe_arrays(data, var, woe_mapping_table, suffix="_woe", missing_ref_val
         var_woe_mapping["BIN_RANGE"],
         var_woe_mapping["WOE"],
     )
+    # A feature with few distinct values is binned at its own values, so its last fitted bin ends at the largest
+    # training value and the bin above it is empty (and has no WOE): a larger value in new data fell in no bin and
+    # came out as NaN (an LR model then failed, a tree model silently read it as missing). Values outside the
+    # fitted range take the WOE of the nearest fitted bin, as a continuous feature does through its open outer bins.
+    unmapped = woe_values.isna().to_numpy() & data[var].notna().to_numpy()
+    if unmapped.any():
+        left_bound, right_bound = _parse_bin_range_bounds(var_woe_mapping, col="BIN_RANGE")
+        values = pd.to_numeric(data[var], errors="coerce").to_numpy(dtype=float)
+        top, bottom = int(np.argmax(right_bound)), int(np.argmin(left_bound))
+        woe_array = woe_values.to_numpy(dtype=float, copy=True)
+        mapping_woe_values = var_woe_mapping["WOE"].to_numpy(dtype=float)
+        with np.errstate(invalid="ignore"):
+            above = unmapped & (values > right_bound[top])
+            below = unmapped & (values < left_bound[bottom])
+        woe_array[above] = mapping_woe_values[top]
+        woe_array[below] = mapping_woe_values[bottom]
+        n_extended = int(above.sum() + below.sum())
+        if n_extended:
+            logging.warning(
+                f"WARNING: {n_extended} Records of {var} lie outside the fitted bins and take the WOE of the nearest bin."
+            )
+        woe_values = pd.Series(woe_array, index=woe_values.index)
+
     missing_count = int(woe_values.isna().sum())
     if missing_count:
         logging.warning(f"WARNING: Failed to Map WOE values for {missing_count} Records!")

@@ -443,13 +443,15 @@ class WOE_Master(object):
             Minimum bin proportion. It lowers the cap on the number of bins (see ``nbins``) and sets the minimum bin
             size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
         include_missing : bool, default True
-            Include missing values in the binning. They are replaced with -999999 and share the lowest bin, unless
-            ``equal_freq`` is False or ``spec_values`` contains -999999, which gives them a bin of their own (``NaN``
-            in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
+            Include missing values in the binning. They are replaced with ``fillna`` (default ``missing_ref_value``) and
+            share the lowest bin, unless ``equal_freq`` is False or ``spec_values`` contains that value, which gives
+            them a bin of their own (``NaN`` in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
             sends missing values to the lowest bin.
         fillna : int, float or None, default None
-            Value to fill missing data. ``None`` uses ``missing_ref_value``. Only the chi-square step uses it: on the
-            default binning path missing values are filled with -999999 whatever its value.
+            Value that stands in for missing data while the bins are fitted. ``None`` uses ``missing_ref_value``, which
+            is also what ``transform`` fills with, so that a missing value is scored by the bin it was fitted in. Before
+            this was applied to every binning path, a value other than -999999 only reached the chi-square step and
+            ``transform`` then sent the missing rows to a different bin than the one they were fitted in.
         spec_values : list, default []
             Special values to handle. Each value becomes a bin edge, so it ends a bin of its own (together with any
             values between the previous edge and the special value).
@@ -638,13 +640,15 @@ class WOE_Master(object):
             Minimum bin proportion. It lowers the cap on the number of bins (see ``nbins``) and sets the minimum bin
             size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
         include_missing : bool, default True
-            Include missing values in the binning. They are replaced with -999999 and share the lowest bin, unless
-            ``equal_freq`` is False or ``spec_values`` contains -999999, which gives them a bin of their own (``NaN``
-            in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
+            Include missing values in the binning. They are replaced with ``fillna`` (default ``missing_ref_value``) and
+            share the lowest bin, unless ``equal_freq`` is False or ``spec_values`` contains that value, which gives
+            them a bin of their own (``NaN`` in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
             sends missing values to the lowest bin.
         fillna : int, float or None, default None
-            Value to fill missing data. ``None`` uses ``missing_ref_value``. Only the chi-square step uses it: on the
-            default binning path missing values are filled with -999999 whatever its value.
+            Value that stands in for missing data while the bins are fitted. ``None`` uses ``missing_ref_value``, which
+            is also what ``transform`` fills with, so that a missing value is scored by the bin it was fitted in. Before
+            this was applied to every binning path, a value other than -999999 only reached the chi-square step and
+            ``transform`` then sent the missing rows to a different bin than the one they were fitted in.
         spec_values : list, default []
             Special values to handle. Each value becomes a bin edge, so it ends a bin of its own (together with any
             values between the previous edge and the special value).
