@@ -767,8 +767,8 @@ class CreditModelPipeline:
             warnings.warn(
                 "CreditModelPipeline: reuse_screening_woe=True, but the screening artifact holds no usable WOE engine for "
                 f"target {cfg.target_col!r}, so the WOE is fitted again with woe_engine={cfg.woe_engine!r} and its bins "
-                "differ from the ones the screening used. Fit the engine in the validation run (woe_enabled=True, not a "
-                "batch run over a csv) to hand its bins over.",
+                "differ from the ones the screening used. Fit the engine in the validation run (woe_enabled=True) to hand "
+                "its bins over.",
                 RuntimeWarning,
                 stacklevel=2,
             )

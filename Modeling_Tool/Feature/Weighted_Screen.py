@@ -350,8 +350,14 @@ def _weighted_iv_detail(
     var_name: str | None = None,
     include_missing_bin: bool = True,
     content: float | None = None,
+    engine_eps: float | None = None,
 ) -> tuple[float, int, float, float]:
     """Weighted IV plus an optional zero-cell-floored variant.
+
+    With ``engine_eps`` the reported IV follows the WOE-engine convention instead: every bin counts, with
+    ``woe = ln((bad_share + eps) / (good_share + eps))``. That is the formula of the unweighted screening on WOE bins
+    and of the selection evidence, so a feature with a class-pure bin gets the same IV with unit weights as without
+    weights (the guarded IV dropped the pure bins: 0.09 against 3.08 in a test).
 
     The reported IV (first element) excludes class-degenerate bins via
     iv_guard. That is right for the *lower* informativeness bound, but it
@@ -387,6 +393,14 @@ def _weighted_iv_detail(
         good_w = float(np.sum(w[m] * (1.0 - y[m])))
         bad_share = bad_w / total_bad
         good_share = good_w / total_good
+        if engine_eps is not None:
+            iv += float((bad_share - good_share) * np.log((bad_share + engine_eps) / (good_share + engine_eps)))
+            n_contributing_bins += 1
+            if content is not None:
+                floor_bad = max(bad_share, content)
+                floor_good = max(good_share, content)
+                iv_floored += float((floor_bad - floor_good) * np.log(floor_bad / floor_good))
+            continue
         contrib, is_degenerate = iv_guard(bad_share, good_share)
         if content is not None:
             floor_bad = max(bad_share, content)

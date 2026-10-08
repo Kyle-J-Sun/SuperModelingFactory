@@ -71,11 +71,14 @@ class FeatureValidationPipelineConfig:
     enable_batch : bool, default False
         Process a CSV in batches of feature columns to limit memory. It requires CSV input, and ``feature_batch_size`` or
         ``feature_batches`` (``ValueError`` otherwise). If batch settings are given while this is False, the CSV is read
-        in full and a ``RuntimeWarning`` is issued. With ``selection_enabled`` the selection runs inside each batch and the
-        result is the union of the batches' choices (a ``UserWarning`` says so): features of different batches are not
-        compared for correlation and ``max_selected_features`` / ``min_selected_features`` apply per batch. A batch that
-        fails is recorded in ``batch_metadata`` with its error and warned about; its features are left out of every
-        output and counted in ``n_failed_features``.
+        in full and a ``RuntimeWarning`` is issued. With ``selection_enabled`` the selection runs in two passes: each
+        batch applies only the stages that judge a feature on its own (missing rate, PSI, IV and the group and target
+        gates), then the candidates of all batches are read together and the full selection (WOE fit, correlation across
+        batches, VIF, ``max_selected_features`` / ``min_selected_features``) runs once on them, as in a run without
+        batches. Only the candidates are held in memory at once in that pass; ``selection_summary['batch_candidates']``
+        lists them. ``batch_corr_mode='off'`` also switches off the correlation stage of the selection unless
+        ``selection_params['corr_enabled']`` is set. A batch that fails is recorded in ``batch_metadata`` with its error
+        and warned about; its features are left out of every output and counted in ``n_failed_features``.
     feature_batch_size : int or None, default None
         Number of new features per batch; must be positive.
     feature_batches : list of list of str or None, default None
@@ -90,9 +93,11 @@ class FeatureValidationPipelineConfig:
         Whether each batch writes its own CSV tables and plots (subject to ``write_outputs``). The merged report is not
         affected, and batches never write an Excel report.
     batch_corr_mode : {'within_batch', 'block_pairwise', 'off'}, default 'within_batch'
-        Correlation in batch mode. ``'within_batch'`` correlates features only inside each batch, ``'block_pairwise'``
-        also reads pairs of batches to find cross-batch pairs above ``corr_params['corr_cutpoint']`` (Pearson or
-        Spearman only), ``'off'`` skips correlation. Other values raise ``ValueError``.
+        Correlation report in batch mode. ``'within_batch'`` correlates features only inside each batch,
+        ``'block_pairwise'`` also reads pairs of batches to find cross-batch pairs above
+        ``corr_params['corr_cutpoint']`` (Pearson or Spearman only), ``'off'`` skips correlation. The correlation stage
+        of the selection compares the candidates of all batches in either of the first two modes and is skipped with
+        ``'off'`` (an explicit ``selection_params['corr_enabled']`` wins). Other values raise ``ValueError``.
     batch_corr_pair_chunk_size : int or None, default None
         With ``'block_pairwise'``, maximum number of feature columns per chunk when pairs of batches are read, to cap
         memory; must be positive. ``None`` reads a whole batch at once.
@@ -422,9 +427,13 @@ class FeatureValidationPipelineResult:
     selection_summary : dict, default {}
         Selection audit: ``initial_features``, ``final_features``, ``target_col``, ``config_snapshot`` and the stage
         tables of the screening (for example ``missing_rate``, ``psi``, ``iv``, ``corr_dropped``, ``screen_summary``).
+        In CSV batch mode the per-feature tables (``missing_rate``, ``psi``, ``iv``) cover every feature,
+        ``batch_candidates`` lists the features that passed the per-batch stages, ``batch_screen_summary`` holds the
+        stage counts of each batch (``batch_id``) and ``screen_summary`` those of the global pass over the candidates.
     screening_artifact : FeatureScreeningArtifact or None, default None
         Artifact for ``CreditModelPipeline`` (selected features, summary and WOE artifacts). None unless the selection
-        stage ran; in CSV batch mode it is also None when no feature was selected.
+        stage ran; in CSV batch mode it is also None when no feature passed the per-batch stages. In batch mode its WOE
+        artifacts are those of the global pass (fitted on the candidates).
     config_snapshot : dict, default {}
         Effective settings of the run (targets, features, selection, WOE and batch-mode flags).
     """
@@ -818,10 +827,15 @@ class FeatureValidationPipeline:
                     corr_enabled=cfg.corr_enabled and cfg.batch_corr_mode != "off",
                     write_outputs=cfg.write_outputs and cfg.batch_keep_intermediate,
                     write_excel=False,
+                    selection_params=self._batch_candidate_selection_params(),
                 )
                 with warnings.catch_warnings():
                     # the split of the whole file already warned about rows without a label
                     warnings.filterwarnings("ignore", message=r".*missing or unknown label in '_smf_batch_split'.*")
+                    # a batch whose features all fail a stage keeps them as candidates; the global pass decides
+                    warnings.filterwarnings(
+                        "ignore", message=r".*keeping all of them \(on_empty_stage='keep_all_warn'\).*"
+                    )
                     batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
                 batch_results.append(self._slim_batch_result(batch_result))
                 row["n_rows"] = len(batch_df)
@@ -841,6 +855,13 @@ class FeatureValidationPipeline:
                 f"All {len(batch_metadata)} feature validation batches failed. First error(s): {'; '.join(errors[:3])}"
             )
 
+        global_selection = None
+        if cfg.selection_enabled and target_cols:
+            candidates = self._dedupe([feat for res in batch_results for feat in as_list(res.selected_features)])
+            if candidates:
+                global_selection = self._run_batch_global_selection(
+                    csv_path, header, target_cols, split_labels, candidates
+                )
         result = self._merge_batch_results(
             batch_results=batch_results,
             batch_metadata=batch_metadata,
@@ -851,8 +872,66 @@ class FeatureValidationPipeline:
             n_rows=len(base_df),
             csv_path=csv_path,
             feature_batches=feature_batches,
+            global_selection=global_selection,
         )
         return result
+
+    def _batch_candidate_selection_params(self) -> dict[str, Any]:
+        """Selection settings of the first pass inside a batch: only the stages that judge each feature on its own
+        (missing rate, PSI, IV and the group and target gates) run there. The stages that compare features (correlation,
+        VIF) and the caps wait for the global pass over the candidates of every batch."""
+        params = dict(self.config.selection_params or {})
+        params.update({
+            "corr_enabled": False,
+            "vif_enabled": False,
+            "max_selected_features": None,
+            "min_selected_features": None,
+            # a batch whose features all fail a stage keeps them as candidates: the global pass decides, and raises
+            # there when on_empty_stage='raise' and a stage drops every candidate
+            "on_empty_stage": "keep_all_warn",
+        })
+        return params
+
+    def _run_batch_global_selection(
+        self,
+        csv_path: Path,
+        header: list[str],
+        target_cols: list[str],
+        split_labels: pd.Series,
+        candidates: list[str],
+    ) -> FeatureValidationPipelineResult:
+        """Second pass of the batch selection: read the candidates of every batch together and run the selection once
+        on them as a run without batches does (WOE fit, correlation across batches, VIF, caps). The report stages are
+        switched off; the selection stages keep the values they take in a non-batch run."""
+        cfg = self.config
+        params = dict(cfg.selection_params or {})
+        params.setdefault("psi_enabled", cfg.psi_enabled)
+        params.setdefault("iv_enabled", cfg.ivks_enabled)
+        params.setdefault("corr_enabled", cfg.corr_enabled and cfg.batch_corr_mode != "off")
+        base_cols = self._resolve_batch_base_cols(header, [], target_cols)
+        data = self._read_csv(csv_path, usecols=self._dedupe(base_cols + list(candidates))).copy()
+        data["_smf_batch_split"] = split_labels.to_numpy()
+        selection_cfg = replace(
+            cfg,
+            output_dir=str(Path(cfg.output_dir) / cfg.batch_output_subdir / "selection"),
+            input_type="dataframe",
+            enable_batch=False,
+            feature_batch_size=None,
+            feature_batches=None,
+            new_feature_cols=list(candidates),
+            incumbent_feature_cols=[],
+            split_col="_smf_batch_split",
+            selection_params=params,
+            distribution_enabled=False,
+            psi_enabled=False,
+            ivks_enabled=False,
+            corr_enabled=False,
+            write_outputs=False,
+            write_excel=False,
+        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r".*missing or unknown label in '_smf_batch_split'.*")
+            return FeatureValidationPipeline(selection_cfg).run(data)
 
     @staticmethod
     def _slim_batch_result(result: FeatureValidationPipelineResult) -> FeatureValidationPipelineResult:
@@ -903,16 +982,6 @@ class FeatureValidationPipeline:
             unknown = sorted(set(sum((list(batch) for batch in cfg.feature_batches), [])) - set(new_features))
             if unknown:
                 raise ValueError(f"feature_batches contains unknown features: {unknown}")
-        if cfg.selection_enabled:
-            warnings.warn(
-                "FeatureValidationPipeline: with enable_batch=True the selection runs inside each batch and the result is "
-                "the union of the batches' choices. A pair of correlated features in different batches is not compared, "
-                "and max_selected_features / min_selected_features apply to every batch separately, so the union can hold "
-                "more features than the cap and correlated ones. Run the selection on the merged result (or in one batch) "
-                "when the cap or the cross-batch correlation matters.",
-                UserWarning,
-                stacklevel=3,
-            )
 
     def _resolve_csv_new_features(self, header: list[str], sample: pd.DataFrame | None = None) -> list[str]:
         cfg = self.config
@@ -1011,6 +1080,7 @@ class FeatureValidationPipeline:
         n_rows: int,
         csv_path: Path,
         feature_batches: list[list[str]],
+        global_selection: FeatureValidationPipelineResult | None = None,
     ) -> FeatureValidationPipelineResult:
         # a failed batch has no result: carry the id of the batch with each result so that the keys of the merged outputs
         # still match batch_metadata and the folders on disk
@@ -1070,9 +1140,6 @@ class FeatureValidationPipeline:
             batch_metadata=batch_metadata,
             n_failed_features=len(failed_features),
         )
-        selected_features = self._dedupe(
-            [feat for res in batch_results for feat in as_list(res.selected_features)]
-        )
         config_snapshot = self._build_config_snapshot(
             new_features,
             incumbent_features,
@@ -1080,29 +1147,20 @@ class FeatureValidationPipeline:
             batch_mode=True,
             columns=base_splits["ins"].columns,
         )
+        selected_features: list[str] = []
         selection_summary: dict[str, Any] = {}
         screening_artifact = None
         if self.config.selection_enabled and target_cols:
-            selection_summary = {
-                "initial_features": list(new_features),
-                "final_features": selected_features,
-                "target_col": target_cols[0],
-                "config_snapshot": config_snapshot,
-            }
-            if failed_features:
-                selection_summary["failed_features"] = sorted(failed_features)
-            if selected_features:
-                from .screening_artifact import FeatureScreeningArtifact
-
-                screening_artifact = FeatureScreeningArtifact(
-                    selected_features=selected_features,
-                    selection_summary=selection_summary,
-                    woe_artifacts=woe_artifacts,
-                    source="fvp",
-                    target_col=target_cols[0],
-                    weight_col=self.config.weight_col,
-                    config_snapshot=selection_summary["config_snapshot"],
-                )
+            selected_features, selection_summary, screening_artifact = self._merge_batch_selection(
+                batch_results=batch_results,
+                batch_ids=batch_ids,
+                global_selection=global_selection,
+                new_features=new_features,
+                incumbent_features=incumbent_features,
+                target_cols=target_cols,
+                config_snapshot=config_snapshot,
+                failed_features=failed_features,
+            )
         tables = self._collect_tables(
             feature_sources,
             distribution_summary,
@@ -1145,6 +1203,68 @@ class FeatureValidationPipeline:
             screening_artifact=screening_artifact,
             config_snapshot=config_snapshot,
         )
+
+    def _merge_batch_selection(
+        self,
+        batch_results: list[FeatureValidationPipelineResult],
+        batch_ids: list[int],
+        global_selection: FeatureValidationPipelineResult | None,
+        new_features: list[str],
+        incumbent_features: list[str],
+        target_cols: list[str],
+        config_snapshot: dict[str, Any],
+        failed_features: set[str],
+    ) -> tuple[list[str], dict[str, Any], Any | None]:
+        """Selection outputs of a batch run: the features, stage tables and artifact of the global pass, with the
+        per-feature tables of every batch (they cover the features that never became candidates)."""
+        candidates = self._dedupe([feat for res in batch_results for feat in as_list(res.selected_features)])
+        global_summary = dict(global_selection.selection_summary or {}) if global_selection is not None else {}
+        selected = list(global_selection.selected_features) if global_selection is not None else []
+        snapshot = self._selection_config_snapshot(config_snapshot, self._build_selection_config(), incumbent_features)
+        summary: dict[str, Any] = dict(global_summary)
+        summary.update({
+            "initial_features": list(new_features),
+            "batch_candidates": candidates,
+            "final_features": selected,
+            "target_col": target_cols[0],
+            "config_snapshot": snapshot,
+        })
+        batch_summaries = [dict(res.selection_summary or {}) for res in batch_results]
+        for key in ("missing_rate", "missing_rate_dropped", "psi", "iv"):
+            merged = self._concat_frames([item.get(key) for item in batch_summaries])
+            if not merged.empty:
+                summary[key] = merged
+        dropped = self._concat_frames(
+            [item.get("dropped_detail") for item in batch_summaries] + [global_summary.get("dropped_detail")]
+        )
+        if not dropped.empty:
+            summary["dropped_detail"] = (
+                dropped.drop_duplicates(subset=["var", "stage"], keep="last").reset_index(drop=True)
+                if {"var", "stage"} <= set(dropped.columns)
+                else dropped
+            )
+        batch_screens = self._concat_frames([
+            item["screen_summary"].assign(batch_id=batch_id)
+            for batch_id, item in zip(batch_ids, batch_summaries)
+            if isinstance(item.get("screen_summary"), pd.DataFrame)
+        ])
+        if not batch_screens.empty:
+            summary["batch_screen_summary"] = batch_screens
+        gate_dropped = self._dedupe(
+            [var for item in batch_summaries for var in as_list(item.get("missing_gate_dropped"))]
+        )
+        if gate_dropped:
+            summary["missing_gate_dropped"] = gate_dropped
+        if failed_features:
+            summary["failed_features"] = sorted(failed_features)
+        artifact = None
+        if global_selection is not None and global_selection.screening_artifact is not None:
+            artifact = replace(
+                global_selection.screening_artifact,
+                selection_summary=summary,
+                config_snapshot=snapshot,
+            )
+        return selected, summary, artifact
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
@@ -2269,6 +2389,36 @@ class FeatureValidationPipeline:
             prefit_woe_engine=engine,
             selection_evidence=selection_evidence,
         )
+        selection_config_snapshot = self._selection_config_snapshot(config_snapshot, screen_cfg, incumbent_features)
+        selection_summary = {
+            "initial_features": list(new_features),
+            "final_features": list(result.selected_features),
+            "target_col": target,
+            "config_snapshot": selection_config_snapshot,
+        }
+        selection_summary.update(screen_result_to_summary(result, new_features))
+        selection_summary["config_snapshot"] = selection_config_snapshot
+        gate_dropped = (woe_artifacts or {}).get("missing_gate_dropped")
+        if isinstance(gate_dropped, pd.DataFrame) and len(gate_dropped):
+            # features removed by the missing-rate gate before the WOE fit never reach the screening: record them here
+            selection_summary["missing_gate_dropped"] = gate_dropped["var"].tolist()
+        artifact = FeatureScreeningArtifact.from_screen_result(
+            result,
+            initial_features=list(new_features),
+            target_col=target,
+            weight_col=cfg.weight_col,
+            woe_artifacts=woe_artifacts,
+            source="fvp",
+            config_snapshot=selection_config_snapshot,
+        )
+        if "missing_gate_dropped" in selection_summary:
+            artifact.selection_summary["missing_gate_dropped"] = list(selection_summary["missing_gate_dropped"])
+        return list(result.selected_features), selection_summary, artifact
+
+    def _selection_config_snapshot(
+        self, config_snapshot: dict[str, Any], screen_cfg: Any, incumbent_features: list[str]
+    ) -> dict[str, Any]:
+        cfg = self.config
         selection_config_snapshot = dict(config_snapshot)
         selection_config_snapshot.update({
             "missing_rate_threshold": screen_cfg.missing_rate_threshold,
@@ -2303,30 +2453,7 @@ class FeatureValidationPipeline:
             "on_empty_stage": screen_cfg.on_empty_stage,
             "missing_rate_ref": screen_cfg.missing_rate_ref,
         })
-        selection_summary = {
-            "initial_features": list(new_features),
-            "final_features": list(result.selected_features),
-            "target_col": target,
-            "config_snapshot": selection_config_snapshot,
-        }
-        selection_summary.update(screen_result_to_summary(result, new_features))
-        selection_summary["config_snapshot"] = selection_config_snapshot
-        gate_dropped = (woe_artifacts or {}).get("missing_gate_dropped")
-        if isinstance(gate_dropped, pd.DataFrame) and len(gate_dropped):
-            # features removed by the missing-rate gate before the WOE fit never reach the screening: record them here
-            selection_summary["missing_gate_dropped"] = gate_dropped["var"].tolist()
-        artifact = FeatureScreeningArtifact.from_screen_result(
-            result,
-            initial_features=list(new_features),
-            target_col=target,
-            weight_col=cfg.weight_col,
-            woe_artifacts=woe_artifacts,
-            source="fvp",
-            config_snapshot=selection_config_snapshot,
-        )
-        if "missing_gate_dropped" in selection_summary:
-            artifact.selection_summary["missing_gate_dropped"] = list(selection_summary["missing_gate_dropped"])
-        return list(result.selected_features), selection_summary, artifact
+        return selection_config_snapshot
 
     def _run_psi(
         self,
@@ -3036,7 +3163,7 @@ class FeatureValidationPipeline:
         if selected_features:
             tables["selected_features"] = pd.DataFrame({"feature": selected_features})
         if selection_summary:
-            for key in ("missing_rate", "missing_rate_dropped", "screen_summary"):
+            for key in ("missing_rate", "missing_rate_dropped", "screen_summary", "batch_screen_summary"):
                 value = selection_summary.get(key)
                 if isinstance(value, pd.DataFrame) and not value.empty:
                     tables[f"selection_{key}"] = value

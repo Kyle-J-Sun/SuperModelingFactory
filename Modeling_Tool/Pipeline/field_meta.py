@@ -467,7 +467,7 @@ _FIELD_DESCRIPTIONS = {
     "enable_batch": "Whether to explicitly enable CSV feature-batch mode; off by default. When off, feature_batch_size/feature_batches stay in the config but do not trigger batching.",
     "feature_batch_size": "Number of new features analyzed per batch in CSV wide-table mode.",
     "feature_batches": "Explicit list of new features for each batch; takes precedence over feature_batch_size.",
-    "batch_corr_mode": "within_batch computes correlations inside each batch only; block_pairwise additionally re-reads the CSV to compute cross-batch correlations.",
+    "batch_corr_mode": "Correlation report in batch mode: within_batch computes correlations inside each batch only; block_pairwise additionally re-reads the CSV to compute cross-batch correlations; off skips them. The selection compares the candidates of all batches unless this is off (an explicit selection_params corr_enabled wins).",
     "comparison_block_size": "Number of columns in each vectorized column block when the UAT compares wide tables flow by flow; smaller values lower peak memory.",
     "applied_sample": "1 outputs all applications; 0 outputs approved samples only.",
 }

@@ -956,6 +956,8 @@ def _weighted_woe_bins_screen(
                 x_ins = np.where(x_series.notna().to_numpy(), 1.0, np.nan)
             iv_val, n_b, miss, iv_floored = _weighted_iv_detail(
                 y_ins, w_ins, bins_ins, x_ins, content=floor_content,
+                # same convention as the unweighted screening on WOE bins: a class-pure bin counts with the 1e-6 floor
+                engine_eps=1e-6,
             )
             if floor_content is not None:
                 iv_floored_map[var] = iv_floored
