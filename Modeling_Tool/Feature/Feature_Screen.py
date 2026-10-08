@@ -467,8 +467,8 @@ def fit_screening_woe_engine(
     woe_engine : str, default "monotone"
         ``"monotone"`` (case-insensitive) fits a ``MonotoneWOEBinner``; any other value fits a ``WOE_Master``.
     woe_fit_query : str or None, default None
-        ``DataFrame.query`` expression that selects the rows of ``train`` used for the fit. A query that fails is
-        silently ignored and all rows are used.
+        ``DataFrame.query`` expression that selects the rows of ``train`` used for the fit. A query that fails, or that
+        selects no row, raises ``ValueError``.
     woe_params : Mapping[str, Any] or None, default None
         Keyword arguments of ``WOE_Master.fit`` (``WOE_Master`` engine only); the keys ``woe_suffix`` and
         ``missing_ref_value`` are passed to the ``WOE_Master`` constructor instead. ``None`` uses the ``fit`` defaults.
@@ -476,7 +476,8 @@ def fit_screening_woe_engine(
         Arguments of the monotone engine (monotone only): the tuning keys of the ``MonotoneWOEBinner`` constructor (for
         example ``n_init_bins``, ``min_bin_size``, ``min_n_bins``, ``special_values``; the columns are supplied by this
         function) and the ``fit`` keys ``chi2_binning``, ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Any other key is
-        silently dropped.
+        silently dropped. Without a ``special_values`` key the legacy sentinel ``-999999`` is declared a special value
+        when a numeric feature holds it.
     categorical_features : list of str or None, default None
         Names among ``features`` that the monotone engine fits as categorical; the other features are fitted as numeric.
         The ``WOE_Master`` engine ignores it.
@@ -496,20 +497,21 @@ def fit_screening_woe_engine(
     if woe_engine.lower() == "monotone":
         from Modeling_Tool import MonotoneWOEBinner
 
-        params = dict(monotone_woe_params or {})
-        init_params = {k: v for k, v in params.items() if k in _MONOTONE_INIT_KEYS}
-        fit_params = {k: v for k, v in params.items() if k in _MONOTONE_FIT_KEYS}
-        from Modeling_Tool.Pipeline._common import as_list
+        from Modeling_Tool.Pipeline._common import as_list, quiet_default_sentinel, with_default_special_values
 
         categorical = [col for col in as_list(categorical_features) if col in features]
         numeric = [col for col in features if col not in set(categorical)]
+        params = with_default_special_values(monotone_woe_params, fit_ins, numeric)
+        init_params = {k: v for k, v in params.items() if k in _MONOTONE_INIT_KEYS}
+        fit_params = {k: v for k, v in params.items() if k in _MONOTONE_FIT_KEYS}
         binner = MonotoneWOEBinner(
             feature_cols=numeric,
             target_col=target_col,
             cate_feats=categorical,
             **init_params,
         )
-        binner.fit(fit_ins, **fit_params)
+        with quiet_default_sentinel(monotone_woe_params):
+            binner.fit(fit_ins, **fit_params)
         return binner
 
     from Modeling_Tool import WOE_Master
@@ -1146,6 +1148,13 @@ def feature_screen(
                 UserWarning,
                 stacklevel=2,
             )
+
+    if weight_col is not None and target_col in splits["ins"].columns:
+        # Rows without a target cannot enter an IV: the weighted path cast the target to float and the NaN made every
+        # IV 0, which dropped all features (or kept them all through ``keep_all_warn``). The unweighted path skips them.
+        observed = splits["ins"][target_col].notna()
+        if not bool(observed.all()):
+            splits = {**splits, "ins": splits["ins"][observed]}
 
     if weight_col is not None:
         if use_woe_bins or prefit_woe_engine is not None:

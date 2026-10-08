@@ -21,27 +21,18 @@ from ._common import (
     predict_positive,
     assert_split_allowed,
     resolve_missing_oot,
+    quiet_default_sentinel,
     safe_to_csv,
+    split_settings,
     split_oot_by_flag,
     validate_binary_target,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
+    warn_precision_collapse,
     warn_rows_without_split,
+    with_default_special_values,
     write_basic_excel,
 )
-
-
-def _any_column_has_value(frame: pd.DataFrame, columns: list[str], value: Any) -> bool:
-    """Whether any of ``columns`` in ``frame`` holds ``value`` (dtype-incompatible columns never do)."""
-    for column in columns:
-        if column not in frame.columns:
-            continue
-        try:
-            if bool(frame[column].eq(value).any()):
-                return True
-        except TypeError:
-            continue
-    return False
 
 
 @dataclass
@@ -53,7 +44,10 @@ class CreditModelPipelineConfig:
     output_dir : str, default "output"
         Root of all outputs: the CSV files, the ``figs`` charts (``var_analysis``, ``woe``, ``mono_woe``, ``perf``),
         ``explain``, ``artifacts``, ``models`` (unless ``model_output_dir`` is set) and the Excel report. Directories are
-        created as needed when ``write_outputs``, ``write_excel`` or ``save_models`` is on.
+        created as needed when ``write_outputs``, ``write_excel`` or ``save_models`` is on. A run overwrites the files it
+        writes and leaves the others alone, so a second run into the same directory with fewer stages keeps the files of
+        the stages that no longer run (for example ``backward_summary.csv`` or ``models/model_xgb.pkl``); use a fresh
+        directory per run, or clear it first.
     target_col : str, default "badflag"
         Binary target column (1 = bad). It must be a column of the input data.
     feature_cols : list of str or None, default None
@@ -90,7 +84,8 @@ class CreditModelPipelineConfig:
     write_excel : bool, default True
         Whether to write ``SMF_Model_Report.xlsx`` into ``output_dir`` (its path is ``result.report_path``), with the
         sheets Feature_Selection, WOE_Table, Backward, LR_Param_Search, Warm_Start, Model_Feature_Source, Model_Paths,
-        ``Perf_<MODEL>`` and the ``Explain_*`` sheets.
+        ``Perf_<MODEL>`` and the ``Explain_*`` sheets, plus one ``FS_<table>`` sheet per table of the feature selection
+        summary (``FS_psi``, ``FS_iv``, ...). A text longer than an Excel cell holds is split over several rows.
     plot_outputs : bool, default True
         Whether to draw the charts: the IV and WOE analysis plots of the screening (``figs/var_analysis``), the WOE bin
         plots (``figs/woe`` or ``figs/mono_woe``), the performance figure of each model (``figs/perf/perf_<model>.png``)
@@ -194,7 +189,9 @@ class CreditModelPipelineConfig:
     warm_start_enabled : bool, default False
         Whether to start the GBM models from a prior score (LightGBM ``init_score``, XGBoost base margin), in training
         and in evaluation, so that a model's probability combines the prior score with its increment. It needs
-        ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only.
+        ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only. The prior is added to the training and
+        to the final evaluation only: early stopping, the Optuna search (``AUC_*`` of its table) and the SHAP/Owen
+        explanations see the increment alone, without the prior.
     warm_start_score_col : str or None, default None
         Column of the input data that holds the prior score. It is required when ``warm_start_enabled`` is on
         (``ValueError``), must exist (``KeyError``) and must have no missing values in any evaluated frame. It is copied
@@ -295,7 +292,9 @@ class CreditModelPipelineConfig:
     perf_pct_bins : int, default 10
         Number of percentile bins of the performance evaluation.
     perf_min_bin_prop : float, default 0.03
-        Minimum bin share of the performance evaluation bins.
+        Target minimum share of a performance evaluation bin; it lowers the number of bins when ``perf_pct_bins`` bins
+        would be smaller. It is a target, not a guarantee: with a large value (0.25 and above in a test) the bins can still
+        be smaller than asked, and the weighted evaluation (``weight_col`` or ``eval_weight_col``) ignores it.
     eval_target_cols : list of str or None, default None
         Extra label columns evaluated against the same model scores in addition to ``target_col`` (duplicates removed;
         the results are stacked with a ``tgt_name`` column). They must exist in the input data and in every
@@ -306,7 +305,9 @@ class CreditModelPipelineConfig:
         present in every evaluated frame (``KeyError`` otherwise).
     special_score_values : list of float or None, default None
         Sentinel scores (for example ``[-1]``) that get their own evaluation bin and are left out of the quantile edges
-        and the ranking metrics.
+        and the ranking metrics. In the unweighted evaluation the ``N`` and ``avgTrue`` of the summary leave the sentinel
+        rows out, in the weighted evaluation they count every row and ``N_SPECIAL`` reports the sentinel part, so the two
+        summaries are not comparable on those columns.
     gains_ascending : bool or None, default True
         Score direction of the evaluation summary, the gains tables and the figures: ``True`` ascending (bin 1 holds the
         lowest scores, the lowest risk), ``False`` descending, ``None`` keeps the historical direction of each code path.
@@ -329,8 +330,12 @@ class CreditModelPipelineConfig:
         becomes ``"from_artifact"``, and any other value behaves like ``"run"``.
     reuse_screening_woe : bool, default True
         With an artifact, reuse the WOE engine it carries for the target instead of fitting again, provided it covers
-        at least one selected feature (features it did not fit are left out); otherwise the engine is fitted as usual. No
-        effect without an artifact.
+        at least one selected feature (features it did not fit are left out of every model, with a ``RuntimeWarning``);
+        otherwise the engine is fitted as usual, with a ``RuntimeWarning`` when an artifact is given. A reused engine
+        keeps its own kind, bins and parameters: ``woe_engine``, ``woe_params``, ``monotone_woe_params`` and
+        ``woe_fit_query`` of this config do not apply to it. The artifact also records the INS/OOS split settings of the
+        validation run; a ``RuntimeWarning`` reports a split that differs from this run's, because the validation fitted the
+        bins and chose the features on rows that this run would then score as OOS. No effect without an artifact.
     """
 
     output_dir: str = "output"
@@ -498,8 +503,8 @@ class CreditModelPipelineResult:
     woe_artifacts : dict
         The WOE step: ``engine`` (a ``WOE_Master`` or an adapter of the monotone binner), ``engine_name``, ``features``,
         ``woe_features``, ``woe_suffix``, ``splits`` (the WOE-transformed frames by split name), ``extra_eval`` (the
-        transformed ``extra_eval_datasets``), ``woe_table`` and, when the screening engine was reused,
-        ``reused_from_screening``.
+        transformed ``extra_eval_datasets``), ``woe_table`` (the mapping the transform applies, one row per bin, with the
+        counts of the rows the engine was fitted on) and, when the screening engine was reused, ``reused_from_screening``.
     models : dict of str to tuple
         ``{model_name: (wrapper, raw_model, feature_cols)}`` for the trained models. ``feature_cols`` is the final feature
         list of that model, after the LR p-value elimination for ``lr``.
@@ -705,13 +710,50 @@ class CreditModelPipeline:
             make_dirs(self._model_output_dir(), output_dir / "artifacts")
 
         splits = self._apply_split_governance(self._split_data(data))
+        self._raw_splits = splits
+        self._data_columns = list(data.columns)
         check_woe_fit_query_rows(splits["ins"], cfg.woe_fit_query, context="INS")
+        if cfg.woe_engine.lower() != "monotone":
+            warn_precision_collapse(
+                splits["ins"], feature_cols, int(cfg.woe_params.get("precision", 5)), "CreditModelPipeline"
+            )
+        elif cfg.feature_selection_mode == "run" and cfg.feature_selection:
+            warn_precision_collapse(splits["ins"], feature_cols, 5, "CreditModelPipeline")
         fs_summary, final_features, screening_artifact = self._resolve_feature_selection(
             splits,
             feature_cols,
         )
         prefit_woe = screening_artifact.woe_artifacts if screening_artifact and cfg.reuse_screening_woe else None
+        absent_features = [col for col in final_features if col not in data.columns]
+        if absent_features:
+            raise KeyError(
+                f"The selected features {absent_features[:10]} (from the screening artifact) are not columns of the "
+                "modeling data."
+            )
         woe_artifacts = self._fit_woe(splits, final_features, prefit_woe_artifacts=prefit_woe)
+        if screening_artifact is not None and cfg.reuse_screening_woe and not woe_artifacts.get("reused_from_screening"):
+            warnings.warn(
+                "CreditModelPipeline: reuse_screening_woe=True, but the screening artifact holds no usable WOE engine for "
+                f"target {cfg.target_col!r}, so the WOE is fitted again with woe_engine={cfg.woe_engine!r} and its bins "
+                "differ from the ones the screening used. Fit the engine in the validation run (woe_enabled=True, not a "
+                "batch run over a csv) to hand its bins over.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        fitted_raw = set(woe_artifacts.get("features") or final_features)
+        unfitted = [col for col in final_features if col not in fitted_raw]
+        if unfitted:
+            # the reused engine did not bin these features (for example the missing-rate gate left them out of the fit);
+            # the raw-feature models used to train on them while the WOE models did not, and the summary claimed all
+            warnings.warn(
+                f"CreditModelPipeline: the WOE engine has no bins for {len(unfitted)} of the {len(final_features)} "
+                f"selected features ({unfitted[:10]}), so they are left out of every model.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            final_features = [col for col in final_features if col in fitted_raw]
+            fs_summary["final_features"] = list(final_features)
+            fs_summary["dropped_without_woe"] = unfitted
         woe_features = woe_artifacts["woe_features"]
         woe_splits = woe_artifacts["splits"]
         woe_suffix = woe_artifacts.get("woe_suffix", cfg.woe_params.get("woe_suffix", "_woe"))
@@ -784,11 +826,12 @@ class CreditModelPipeline:
             report_path = str(output_dir / "SMF_Model_Report.xlsx")
             sheets = {
                 "Feature_Selection": self._summary_to_frame(fs_summary),
+                **self._summary_tables(fs_summary),
                 "WOE_Table": woe_artifacts.get("woe_table"),
                 "Backward": backward_summary,
                 "LR_Param_Search": lr_search_results,
                 "Warm_Start": warm_start_summary,
-                "Model_Feature_Source": model_feature_source_summary,
+                "Model_Feature_Source": self._split_long_cells(model_feature_source_summary, "features"),
                 "Model_Paths": model_paths_frame,
             }
             for name, perf in perf_results.items():
@@ -844,6 +887,22 @@ class CreditModelPipeline:
             # CatBoost's own name for the seed is ``random_seed``: the wrapper turns ``random_state`` into it and lets it
             # win, so adding the config seed next to a ``random_seed`` of the user used to override the user's value.
             params.setdefault("random_state", self.config.random_state)
+        return params
+
+    def _effective_seed(self, name: str) -> Any:
+        """The seed the final model uses: the one in ``model_params`` when the user set it, else ``random_state``."""
+        params = self._model_params(name)
+        for key in ("random_state", "random_seed", "seed"):
+            if key in params:
+                return params[key]
+        return self.config.random_state
+
+    def _effective_model_params(self, name: str) -> dict[str, Any]:
+        """The parameters the final model is built with: the defaults, ``model_params[name]``, the seed, and for ``lr``
+        the best row of the LR search when ``use_lr_search_params`` is on."""
+        params = self._model_params(name)
+        if name == "lr" and self.config.use_lr_search_params and hasattr(self, "_lr_best_params"):
+            params = merge_dict(params, getattr(self, "_lr_best_params", {}))
         return params
 
     # Settings of the final models that must not reach the backward proxy: ``n_estimators`` and
@@ -1116,6 +1175,7 @@ class CreditModelPipeline:
 
         cfg = self.config
         work = data.copy()
+        self._split_mode = "random"
         sample_col = cfg.split_col or cfg.sample_col
         if cfg.split_col and cfg.split_col not in work.columns:
             raise KeyError(f"Missing split_col {cfg.split_col!r}")
@@ -1130,6 +1190,7 @@ class CreditModelPipeline:
             oos = work[lower == "oos"].copy()
             oot = work[lower == "oot"].copy()
             if len(ins) and len(oos):
+                self._split_mode = "label"
                 warn_rows_without_split(raw_split, sample_col, "CreditModelPipeline")
                 if not len(oot):
                     synthesized = resolve_missing_oot(
@@ -1197,6 +1258,7 @@ class CreditModelPipeline:
             if artifact is None:
                 raise ValueError("feature_selection_mode='from_artifact' requires screening_artifact.")
             artifact.validate_for_cm(target_col=cfg.target_col, weight_col=cfg.weight_col)
+            self._warn_split_differs_from_artifact(artifact)
             summary = dict(artifact.selection_summary or {})
             summary["from_artifact"] = True
             summary["artifact_source"] = artifact.source
@@ -1211,6 +1273,31 @@ class CreditModelPipeline:
             return summary, list(feature_cols), None
         summary, selected = self._feature_selection(splits, feature_cols)
         return summary, selected, None
+
+    def _warn_split_differs_from_artifact(self, artifact: Any) -> None:
+        """Warn when the artifact was built on another INS/OOS split than this run uses.
+
+        The validation fitted the WOE bins and chose the features on its INS sample. If this run's OOS sample holds those
+        rows, the OOS metrics are no longer out-of-sample (a pure-noise target showed an OOS AUC of 0.58 instead of 0.51).
+        """
+        recorded = (getattr(artifact, "config_snapshot", None) or {}).get("split")
+        if not recorded:
+            return
+        own = split_settings(self.config, getattr(self, "_data_columns", None))
+        keys = ("split_col", "sample_col") if getattr(self, "_split_mode", "random") == "label" else (
+            "oot_col", "test_size", "stratify", "random_state"
+        )
+        differing = {key: (recorded[key], own[key]) for key in keys if key in recorded and recorded[key] != own[key]}
+        if differing:
+            details = ", ".join(f"{key}: artifact {old!r} vs {new!r} here" for key, (old, new) in differing.items())
+            warnings.warn(
+                "CreditModelPipeline: the screening artifact was built on another INS/OOS split than this run uses "
+                f"({details}). Rows that the validation used to fit the WOE bins and to select features can fall into this "
+                "run's OOS sample, so its OOS metrics are optimistic. Use the same split_col / sample_col, or the same "
+                "split_config and random_state, in both runs.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     def _feature_selection(
         self,
@@ -1323,7 +1410,7 @@ class CreditModelPipeline:
         feature_cols: list[str],
         prefit_woe_artifacts: dict[str, Any],
     ) -> dict[str, Any] | None:
-        from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
+        from Modeling_Tool.WOE.WOE_Adapter import WOEMasterAdapter, as_woe_engine
 
         cfg = self.config
         by_target = prefit_woe_artifacts.get("by_target", {}) if prefit_woe_artifacts else {}
@@ -1333,8 +1420,10 @@ class CreditModelPipeline:
 
         adapter = item.get("adapter")
         if adapter is None and item.get("engine") is not None:
-            woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
-            adapter = as_woe_engine(item["engine"], woe_suffix=woe_suffix)
+            engine = item["engine"]
+            adapter = as_woe_engine(
+                engine, woe_suffix=getattr(engine, "woe_suffix", None) or cfg.woe_params.get("woe_suffix", "_woe")
+            )
         if adapter is None:
             return None
 
@@ -1344,6 +1433,9 @@ class CreditModelPipeline:
             return None
 
         woe_suffix = cfg.woe_params.get("woe_suffix", "_woe")
+        if isinstance(adapter, WOEMasterAdapter):
+            # a WOE_Master names its columns with its own suffix and the adapter ignores the one passed to transform
+            woe_suffix = getattr(adapter.engine, "woe_suffix", None) or adapter.woe_suffix
         woe_features = [f"{col}{woe_suffix}" for col in usable]
         woe_splits = {
             name: adapter.transform(df, varlist=usable, suffix=woe_suffix)
@@ -1376,7 +1468,12 @@ class CreditModelPipeline:
 
         return {
             "engine": adapter,
-            "engine_name": adapter.get_engine_name() if hasattr(adapter, "get_engine_name") else cfg.woe_engine,
+            # a WOE_Master adapter calls itself "master"; the self-fit path records the config name "equal_freq"
+            "engine_name": (
+                {"master": "equal_freq"}.get(adapter.get_engine_name(), adapter.get_engine_name())
+                if hasattr(adapter, "get_engine_name")
+                else cfg.woe_engine
+            ),
             "features": list(usable),
             "woe_features": woe_features,
             "woe_suffix": woe_suffix,
@@ -1395,7 +1492,6 @@ class CreditModelPipeline:
     ) -> dict[str, Any]:
         from Modeling_Tool import MonotoneWOEBinner, WOE_Master
         from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
-        from Modeling_Tool.WOE.WOE_Master import get_overall_woe_table
 
         cfg = self.config
         if prefit_woe_artifacts and cfg.reuse_screening_woe:
@@ -1414,16 +1510,10 @@ class CreditModelPipeline:
 
         if cfg.woe_engine.lower() == "monotone":
             defaults = {"feature_cols": feature_cols, "target_col": cfg.target_col}
-            if "special_values" not in cfg.monotone_woe_params:
-                # Declare the default sentinel -999999 only if it actually occurs in the fit
-                # sample. When it does not occur, declaring it makes no difference to binning or
-                # scoring; it would only trigger a "declared but not seen" warning (and, under
-                # unseen_special_policy='neutral', add a placeholder bin to every feature). An
-                # explicitly passed special_values is not affected.
-                defaults["special_values"] = (
-                    [-999999] if _any_column_has_value(fit_ins, feature_cols, -999999) else []
-                )
-            params = merge_dict(defaults, cfg.monotone_woe_params)
+            # the sentinel -999999 is declared only if the fit sample holds it (shared with the other monotone fits)
+            params = merge_dict(
+                defaults, with_default_special_values(cfg.monotone_woe_params, fit_ins, feature_cols)
+            )
             # fit()-only kwargs must not reach MonotoneWOEBinner.__init__ —
             # n_jobs / chi2_p / chi2_init_size in monotone_woe_params used to
             # raise TypeError on this self-fit path (the screening-side
@@ -1435,7 +1525,8 @@ class CreditModelPipeline:
             }
             fit_kwargs["chi2_binning"] = bool(fit_kwargs.get("chi2_binning", False))
             binner = MonotoneWOEBinner(**params)
-            binner.fit(fit_ins, **fit_kwargs)
+            with quiet_default_sentinel(cfg.monotone_woe_params):
+                binner.fit(fit_ins, **fit_kwargs)
             if cfg.write_outputs and cfg.plot_outputs:
                 binner.plot_woe_graph(graph_path=str(Path(cfg.output_dir) / "figs" / "mono_woe"))
             adapter = as_woe_engine(binner, woe_suffix=woe_suffix)
@@ -1472,7 +1563,7 @@ class CreditModelPipeline:
                     dirname="overall",
                     varlist=feature_cols,
                 )
-            woe_table = get_overall_woe_table(master, fit_ins, varlist=feature_cols)
+            woe_table = self._applied_woe_table(master, feature_cols)
             engine = master
             extra_eval = self._transform_extra_eval_datasets(master.transform, feature_cols)
 
@@ -1507,6 +1598,24 @@ class CreditModelPipeline:
             "extra_eval": extra_eval,
             "woe_table": woe_table,
         }
+
+    @staticmethod
+    def _applied_woe_table(master: Any, feature_cols: list[str]) -> pd.DataFrame:
+        """The mapping table that ``master.transform`` applies, one row per bin of ``feature_cols``.
+
+        The table used to be recomputed from the raw counts (``get_overall_woe_table``). That recomputation ignores the
+        special-value policies and smoothing, ``include_missing=False`` and ``precision``, so with those settings the
+        reported WOE differed from the WOE the models received.
+        """
+        mapping = master.get_mapping_table()
+        columns = [
+            "VAR", "BIN_NUM", "BIN_RANGE", "MIN", "MAX", "N", "AVG_BAD", "WOE", "IV", "N_BAD", "N_GOOD",
+            "BAD_PCT_PER_BIN", "GOOD_PCT_PER_BIN", "LIFT",
+        ]
+        order = {col: pos for pos, col in enumerate(feature_cols)}
+        mapping = mapping[mapping["VAR"].isin(order)]
+        mapping = mapping.assign(_order=mapping["VAR"].map(order)).sort_values("_order", kind="stable")
+        return mapping[[col for col in columns if col in mapping.columns]].reset_index(drop=True)
 
     def _resolve_gbm_feature_source(self, model_name: str) -> str:
         cfg = self.config
@@ -1608,9 +1717,7 @@ class CreditModelPipeline:
             if not feature_cols:
                 raise ValueError(f"No training features available for model type: {raw_name!r}")
             train, val = splits["ins"], splits["oos"]
-            params = self._model_params(name)
-            if name == "lr" and cfg.use_lr_search_params and hasattr(self, "_lr_best_params"):
-                params = merge_dict(params, getattr(self, "_lr_best_params", {}))
+            params = self._effective_model_params(name)
             if name == "lr":
                 lr_params = dict(params) if params else {}
                 standardize = bool(lr_params.pop("standardize", False))
@@ -2079,12 +2186,17 @@ class CreditModelPipeline:
             if allowed is not None:
                 splits = {name: df for name, df in splits.items() if name in set(allowed)}
             eval_splits = {**splits, **model_extra}
+            # the raw frames: with woe_suffix='' the WOE columns REPLACE the raw ones, and the rule is defined on raw values
+            raw_frames = {**getattr(self, "_raw_splits", {}), **(cfg.extra_eval_datasets or {})}
             nan_stats: dict[str, int] = {}
             for ds_name, df in eval_splits.items():
                 scored = df.copy()
                 scored[f"pred_{name}"] = self._predict_model_positive(name, wrapper, scored, feature_cols)
                 if cfg.all_missing_score_value is not None:
-                    override = all_missing_mask(scored, model_inputs[name].get("raw_features") or [])
+                    raw_frame = raw_frames.get(ds_name)
+                    if raw_frame is None or len(raw_frame) != len(scored):
+                        raw_frame = scored
+                    override = all_missing_mask(raw_frame, model_inputs[name].get("raw_features") or [])
                     if override.any():
                         scored.loc[override, f"pred_{name}"] = float(cfg.all_missing_score_value)
                 nan_stats[str(ds_name)] = int((~np.isfinite(scored[f"pred_{name}"].to_numpy(dtype=float))).sum())
@@ -2180,6 +2292,11 @@ class CreditModelPipeline:
                 n_bg = min(int(cfg.explain_params.get("background_n", 200)), len(splits["ins"]))
                 eval_x = splits["oos"][feature_cols].sample(n_eval, random_state=cfg.random_state)
                 background = splits["ins"][feature_cols].sample(n_bg, random_state=cfg.random_state)
+                if getattr(wrapper, "standardizer", None) is not None:
+                    # LRMaster(standardize=True) scales the features before its sklearn model; the explainer unwraps that
+                    # model, so it has to see the scaled values or it explains a model that was never scored
+                    eval_x = wrapper._apply_standardizer(eval_x)
+                    background = wrapper._apply_standardizer(background)
                 exp = ModelExplainer(model=wrapper, feature_names=feature_cols, background_data=background)
                 item: dict[str, Any] = {}
                 if name in explain_models:
@@ -2309,6 +2426,7 @@ class CreditModelPipeline:
                         "raw_features": list(woe_artifacts.get("features") or []),
                         "woe_features": list(woe_artifacts.get("woe_features") or []),
                         "woe_engine": woe_artifacts.get("engine_name"),
+                        "woe_suffix": woe_artifacts.get("woe_suffix"),
                         "random_state": cfg.random_state,
                     },
                     feature_cols=woe_artifacts.get("features"),
@@ -2326,10 +2444,17 @@ class CreditModelPipeline:
                 "feature_cols": list(feature_cols),
                 "feature_source": model_feature_sources.get(name),
                 "model_feature_set": model_feature_sets.get(name, list(feature_cols)),
-                "model_params": dict(cfg.model_params.get(name, {})),
-                "warm_start_enabled": bool(cfg.warm_start_enabled and name in warm_start_requested),
+                # what the model was built with, not only the overrides of the user: the defaults, the best row of the LR
+                # search and the pipeline seed used to be missing, and a search result contradicted the saved value
+                "model_params": self._effective_model_params(name),
+                # CatBoost cannot take an init score and an unknown name is skipped: neither is warm-started
+                "warm_start_enabled": bool(
+                    cfg.warm_start_enabled and name in warm_start_requested and name in {"lgb", "xgb"}
+                ),
                 "warm_start_score_col": cfg.warm_start_score_col,
-                "random_state": cfg.random_state,
+                "warm_start_score_type": cfg.warm_start_score_type,
+                "random_state": self._effective_seed(name),
+                "woe_suffix": woe_artifacts.get("woe_suffix"),
                 "candidate_mode": self._governance["candidate_mode"],
                 "oot_synthesized": self._governance["oot_synthesized"],
                 "oot_withheld": self._governance["oot_withheld"],
@@ -2401,11 +2526,41 @@ class CreditModelPipeline:
         for name, df in perf_results.items():
             safe_to_csv(df, output_dir / "perf" / f"perf_{name}.csv", index=False)
 
+    # an Excel cell holds 32,767 characters; a longer text was cut off without a message
+    _EXCEL_CELL_CHARS = 30000
+
     def _summary_to_frame(self, summary: dict[str, Any]) -> pd.DataFrame:
         rows = []
         for key, value in summary.items():
             if isinstance(value, pd.DataFrame):
-                rows.append({"item": key, "value": f"DataFrame{value.shape}"})
-            else:
-                rows.append({"item": key, "value": str(value)})
+                rows.append({"item": key, "value": f"DataFrame{value.shape} (sheet FS_{key})"})
+                continue
+            text = str(value)
+            if len(text) <= self._EXCEL_CELL_CHARS:
+                rows.append({"item": key, "value": text})
+                continue
+            parts = [text[i : i + self._EXCEL_CELL_CHARS] for i in range(0, len(text), self._EXCEL_CELL_CHARS)]
+            rows.extend({"item": f"{key} (part {n}/{len(parts)})", "value": part} for n, part in enumerate(parts, 1))
         return pd.DataFrame(rows)
+
+    @classmethod
+    def _split_long_cells(cls, frame: pd.DataFrame | None, column: str) -> pd.DataFrame | None:
+        """Copy of ``frame`` in which a ``column`` text longer than an Excel cell is continued on extra rows."""
+        if frame is None or column not in frame.columns:
+            return frame
+        limit = cls._EXCEL_CELL_CHARS
+        rows = []
+        for record in frame.to_dict("records"):
+            text = str(record[column])
+            if len(text) <= limit:
+                rows.append(record)
+                continue
+            parts = [text[i : i + limit] for i in range(0, len(text), limit)]
+            rows.append({**record, column: parts[0]})
+            rows.extend({key: ("" if key != column else part) for key in record} for part in parts[1:])
+        return pd.DataFrame(rows, columns=list(frame.columns))
+
+    @staticmethod
+    def _summary_tables(summary: dict[str, Any]) -> dict[str, pd.DataFrame]:
+        """The tables of the feature selection summary, one report sheet each (they used to show only as their shape)."""
+        return {f"FS_{key}": value for key, value in summary.items() if isinstance(value, pd.DataFrame)}

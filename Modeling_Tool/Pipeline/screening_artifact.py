@@ -169,7 +169,7 @@ class FeatureScreeningArtifact:
         weight_col : str or None
             Sample-weight column used by the screen.
         woe_artifacts : dict or None
-            WOE artifacts to store; when None, the engine that the screen itself fitted is wrapped (if there is one).
+            WOE artifacts to store; when None or empty, the engine that the screen itself fitted is wrapped (if there is one).
         source : {"fvp", "cm", "standalone"}
             Which pipeline produced the result.
         config_snapshot : dict or None, default None
@@ -179,8 +179,9 @@ class FeatureScreeningArtifact:
         -------
         FeatureScreeningArtifact
         """
-        if woe_artifacts is None:
-            # G00: reuse the engine the screen itself fitted, when available.
+        if not woe_artifacts:
+            # G00: reuse the engine the screen itself fitted, when available (an empty dict, which a run with
+            # woe_enabled=False passes, carries nothing to reuse either).
             woe_artifacts = woe_artifacts_from_screen_result(result, target_col)
         return cls(
             selected_features=list(result.selected_features),

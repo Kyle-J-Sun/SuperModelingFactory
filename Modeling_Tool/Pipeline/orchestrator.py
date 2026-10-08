@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import warnings
+from dataclasses import fields, replace
 from typing import Any
 
 import pandas as pd
@@ -27,8 +28,9 @@ def run_modeling_from_validation(
     """Run feature validation/selection, then credit modeling on the same dataset.
 
     The feature-validation result is turned into a ``FeatureScreeningArtifact``, which is handed to the credit-model
-    pipeline: the artifact's ``target_col`` and ``weight_col`` replace those of ``cm_config``, and its selected features
-    replace ``cm_config.feature_cols`` when there are any.
+    pipeline: the artifact's ``target_col`` and ``weight_col`` replace those of ``cm_config`` (a ``UserWarning`` names a
+    column of ``cm_config`` that is replaced by another one), and its selected features replace ``cm_config.feature_cols``
+    when there are any.
 
     Parameters
     ----------
@@ -57,6 +59,19 @@ def run_modeling_from_validation(
     artifact = FeatureScreeningArtifact.from_fvp_result(fvp_result)
 
     cm_cfg = cm_config or CreditModelPipelineConfig()
+    if cm_config is not None:
+        defaults = {item.name: item.default for item in fields(CreditModelPipelineConfig)}
+        for name, kept in (("target_col", artifact.target_col), ("weight_col", artifact.weight_col)):
+            given = getattr(cm_config, name)
+            if given != defaults.get(name) and given != kept:
+                # the validation's column replaces the one in cm_config; a weight column that silently disappears makes
+                # the model unweighted and a different target trains another model
+                warnings.warn(
+                    f"run_modeling_from_validation: cm_config.{name}={given!r} is replaced by {kept!r}, the {name} of the "
+                    "feature-validation run. Set the same column in both configs to silence this warning.",
+                    UserWarning,
+                    stacklevel=2,
+                )
     cm_overrides: dict[str, Any] = {
         "screening_artifact": artifact,
         "reuse_screening_woe": reuse_screening_woe,

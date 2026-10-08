@@ -33,7 +33,7 @@ from .Coalition_Structure import build_coalition_structure as _build_coalition_s
 
 __all__ = ["ModelExplainer"]
 
-_TREE_MODEL_TYPES = frozenset({"lgb", "lightgbm", "xgb", "xgboost"})
+_TREE_MODEL_TYPES = frozenset({"lgb", "lightgbm", "xgb", "xgboost", "cat", "catboost"})
 _LINEAR_MODEL_TYPES = frozenset({"lr", "linear", "logisticregression"})
 
 

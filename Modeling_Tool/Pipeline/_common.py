@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import warnings
+from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -53,6 +54,60 @@ def as_list(value: Any | Iterable[Any] | None, default: list[Any] | None = None)
     if isinstance(value, str):
         return [value]
     return list(value)
+
+
+def split_settings(config: Any, columns: Iterable[str] | None = None) -> dict[str, Any]:
+    """The settings that decide which rows are INS, OOS and OOT, as stored in the screening artifact.
+
+    Both pipelines read the sample label from ``split_col`` (or ``sample_col``) when the data has it and otherwise split
+    at random with ``test_size``, ``stratify`` and a seed; ``oot_col`` cuts the OOT sample out first. Two runs that agree
+    on these settings and see the same data build the same samples. With ``columns`` (the columns of the data) a
+    column name that the data does not have is recorded as ``None``: it has no effect on the split.
+    """
+    split_config = dict(getattr(config, "split_config", None) or {})
+    present = None if columns is None else set(columns)
+    keep = (lambda name: name) if present is None else (lambda name: name if name in present else None)
+    return {
+        "split_col": config.split_col,
+        "sample_col": keep(config.sample_col),
+        "oot_col": keep(config.oot_col),
+        "test_size": float(split_config.get("test_size", 0.3)),
+        "stratify": bool(split_config.get("stratify", True)),
+        "random_state": int(split_config.get("random_state", config.random_state)),
+    }
+
+
+def warn_precision_collapse(
+    frame: pd.DataFrame, features: Iterable[str], precision: int, owner: str
+) -> list[str]:
+    """Warn about numeric features whose values the rounding to ``precision`` decimals merges, and return their names.
+
+    The equal-frequency WOE engine and the screening bin the values rounded to a fixed number of decimals (5 by
+    default), whatever the scale of the feature. A feature in units of 1e-6 keeps all its information but collapses to
+    one or two distinct values, gets an IV of about 0 and is dropped by the screening (or enters the model as a
+    constant) without any message.
+    """
+    collapsed: list[str] = []
+    for column in features:
+        if column not in frame.columns or not pd.api.types.is_numeric_dtype(frame[column]):
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if values.empty:
+            continue
+        distinct = values.nunique()
+        if distinct <= 20:
+            continue
+        if values.round(precision).nunique() < 0.5 * distinct:
+            collapsed.append(str(column))
+    if collapsed:
+        warnings.warn(
+            f"{owner}: rounding to {precision} decimals merges the values of {len(collapsed)} feature(s) "
+            f"({collapsed[:8]}), so their bins and IV are computed on a handful of distinct values. Multiply such features "
+            "by a constant (change their unit) or raise woe_params['precision'].",
+            UserWarning,
+            stacklevel=3,
+        )
+    return collapsed
 
 
 def normalize_split_values(values: pd.Series) -> pd.Series:
@@ -144,6 +199,52 @@ def normalize_group_specs(
             }
         )
     return normalized
+
+
+@contextmanager
+def quiet_default_sentinel(params: Mapping[str, Any] | None):
+    """Silence the "declared special values never occur" warning when the special values were not set by the user.
+
+    ``with_default_special_values`` declares the ``-999999`` sentinel for every feature as soon as one feature holds it;
+    for the features that do not, the binner would warn about a value that the user never declared.
+    """
+    if "special_values" in (params or {}):
+        yield
+        return
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".*declared special value\(s\) never occur in the fit sample.*")
+        yield
+
+
+def any_column_has_value(frame: pd.DataFrame, columns: Iterable[str], value: Any) -> bool:
+    """Whether any of ``columns`` in ``frame`` holds ``value`` (dtype-incompatible columns never do)."""
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        try:
+            if bool(frame[column].eq(value).any()):
+                return True
+        except TypeError:
+            continue
+    return False
+
+
+def with_default_special_values(
+    params: Mapping[str, Any] | None, frame: pd.DataFrame, columns: Iterable[str]
+) -> dict[str, Any]:
+    """Copy of the monotone engine parameters that declares the legacy ``-999999`` missing sentinel as a special value.
+
+    The sentinel is declared only when no ``special_values`` key is given and ``frame`` holds it in one of ``columns``:
+    declaring a value that does not occur changes neither binning nor scoring and would only warn (or add a placeholder
+    bin to every feature under ``unseen_special_policy='neutral'``). Without it the sentinel is binned as a very small
+    real value and shares a bin with the lowest real values. Every place that fits the monotone engine (the credit-model
+    self-fit, the screening engine and the feature-validation WOE stage) calls this one function, so an engine handed
+    from one to the other bins the same data the same way.
+    """
+    merged = dict(params or {})
+    if "special_values" not in merged:
+        merged["special_values"] = [-999999] if any_column_has_value(frame, columns, -999999) else []
+    return merged
 
 
 def merge_dict(base: Mapping[str, Any] | None, override: Mapping[str, Any] | None) -> dict[str, Any]:

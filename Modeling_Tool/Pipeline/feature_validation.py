@@ -25,10 +25,14 @@ from ._common import (
     warn_rows_without_split,
     resolve_missing_oot,
     safe_to_csv,
+    quiet_default_sentinel,
     split_oot_by_flag,
+    split_settings,
     validate_binary_target,
+    warn_precision_collapse,
     validate_woe_fit_query_columns,
     validate_woe_fit_query_syntax,
+    with_default_special_values,
 )
 
 
@@ -67,7 +71,11 @@ class FeatureValidationPipelineConfig:
     enable_batch : bool, default False
         Process a CSV in batches of feature columns to limit memory. It requires CSV input, and ``feature_batch_size`` or
         ``feature_batches`` (``ValueError`` otherwise). If batch settings are given while this is False, the CSV is read
-        in full and a ``RuntimeWarning`` is issued.
+        in full and a ``RuntimeWarning`` is issued. With ``selection_enabled`` the selection runs inside each batch and the
+        result is the union of the batches' choices (a ``UserWarning`` says so): features of different batches are not
+        compared for correlation and ``max_selected_features`` / ``min_selected_features`` apply per batch. A batch that
+        fails is recorded in ``batch_metadata`` with its error and warned about; its features are left out of every
+        output and counted in ``n_failed_features``.
     feature_batch_size : int or None, default None
         Number of new features per batch; must be positive.
     feature_batches : list of list of str or None, default None
@@ -139,7 +147,9 @@ class FeatureValidationPipelineConfig:
     monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'normal_bin'}
         Used with ``woe_engine='monotone'``: constructor keys of ``MonotoneWOEBinner`` and the ``fit`` keys
         ``chi2_binning``, ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Keys outside the built-in allowlist are dropped
-        silently.
+        silently. Without a ``special_values`` key the legacy sentinel ``-999999`` is declared a special value when a
+        numeric feature holds it in the fit sample (``CreditModelPipeline`` does the same, so a screening artifact
+        and a self-fit bin the same data the same way).
     categorical_features : list of str or None, default None
         Features binned as categorical by the monotone engine (``cate_feats``); also passed to the selection stage.
     monotone_refine_cate_enabled : bool, default False
@@ -170,7 +180,7 @@ class FeatureValidationPipelineConfig:
         (``'global'`` adds nothing by itself).
     psi_use_woe_bins : bool, default True
         Whether to bin with the WOE engine of each target when available. Otherwise ``PSICalculator`` bins the data with
-        ``psi_params``.
+        ``psi_params``; that numeric PSI skips the non-numeric features with a ``UserWarning``.
     psi_params : dict, default {'buckets': 10, 'equal_freq': True, 'min_bin_prop': 0.05}
         Keyword arguments of ``PSICalculator``.
     ivks_enabled : bool, default True
@@ -224,7 +234,8 @@ class FeatureValidationPipelineConfig:
         bins are still fitted without weights.
     synthesize_missing_oot : bool or None, default False
         When no OOT rows exist, True copies the OOS rows in as a stand-in OOT (with a ``UserWarning``); False keeps OOT
-        empty. ``None`` counts as False.
+        empty. ``None`` counts as False. The stand-in rows are the OOS rows twice, so the tables that pool every split
+        (the distribution, ``n_rows`` of the summary and the global IV/KS) count them twice.
     woe_fit_scope : {'all', 'post_missing_gate'}, default 'post_missing_gate'
         ``'all'`` fits the WOE on every new feature. ``'post_missing_gate'`` first drops the features above
         ``missing_rate_threshold`` (a no-op when it is None or there is no target) and continues with the remaining ones.
@@ -551,6 +562,7 @@ class FeatureValidationPipeline:
             incumbent_features,
             target_cols,
             batch_mode=False,
+            columns=work.columns,
         )
 
         output_dir = Path(cfg.output_dir)
@@ -589,8 +601,15 @@ class FeatureValidationPipeline:
                 missing_rate_threshold=cfg.missing_rate_threshold,
                 missing_rate_ref=cfg.woe_params.get("missing_ref_value", -999999),
             )
+            if len(missing_gate_dropped):
+                # when every feature exceeds the threshold the gate keeps them all (and warns): they were not dropped
+                missing_gate_dropped = missing_gate_dropped[~missing_gate_dropped["var"].isin(woe_fit_features)]
         if cfg.woe_enabled and target_cols:
             check_woe_fit_query_rows(splits["ins"], cfg.woe_fit_query, context="INS")
+            if cfg.woe_engine.lower() != "monotone":
+                warn_precision_collapse(
+                    splits["ins"], new_features, int(cfg.woe_params.get("precision", 5)), "FeatureValidationPipeline"
+                )
         woe_artifacts = (
             self._fit_woe(
                 splits,
@@ -748,7 +767,9 @@ class FeatureValidationPipeline:
         cfg = self.config
         header = list(self._read_csv(csv_path, nrows=0).columns)
         header_set = set(header)
-        new_features = self._resolve_csv_new_features(header)
+        new_features = self._resolve_csv_new_features(
+            header, None if cfg.new_feature_cols else self._read_csv(csv_path, nrows=1000)
+        )
         if not new_features:
             raise ValueError("new_feature_cols cannot be empty")
         incumbent_features = [col for col in as_list(cfg.incumbent_feature_cols) if col in header_set and col not in set(new_features)]
@@ -797,7 +818,10 @@ class FeatureValidationPipeline:
                     write_outputs=cfg.write_outputs and cfg.batch_keep_intermediate,
                     write_excel=False,
                 )
-                batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
+                with warnings.catch_warnings():
+                    # the split of the whole file already warned about rows without a label
+                    warnings.filterwarnings("ignore", message=r".*missing or unknown label in '_smf_batch_split'.*")
+                    batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
                 batch_results.append(self._slim_batch_result(batch_result))
                 row["n_rows"] = len(batch_df)
             except Exception as exc:
@@ -811,7 +835,10 @@ class FeatureValidationPipeline:
 
         batch_metadata = pd.DataFrame(batch_rows)
         if not batch_results:
-            raise ValueError("All feature validation batches failed; inspect batch_metadata for errors.")
+            errors = list(dict.fromkeys(str(err) for err in batch_metadata.get("error", pd.Series(dtype=object)).dropna()))
+            raise ValueError(
+                f"All {len(batch_metadata)} feature validation batches failed. First error(s): {'; '.join(errors[:3])}"
+            )
 
         result = self._merge_batch_results(
             batch_results=batch_results,
@@ -875,8 +902,18 @@ class FeatureValidationPipeline:
             unknown = sorted(set(sum((list(batch) for batch in cfg.feature_batches), [])) - set(new_features))
             if unknown:
                 raise ValueError(f"feature_batches contains unknown features: {unknown}")
+        if cfg.selection_enabled:
+            warnings.warn(
+                "FeatureValidationPipeline: with enable_batch=True the selection runs inside each batch and the result is "
+                "the union of the batches' choices. A pair of correlated features in different batches is not compared, "
+                "and max_selected_features / min_selected_features apply to every batch separately, so the union can hold "
+                "more features than the cap and correlated ones. Run the selection on the merged result (or in one batch) "
+                "when the cap or the cross-batch correlation matters.",
+                UserWarning,
+                stacklevel=3,
+            )
 
-    def _resolve_csv_new_features(self, header: list[str]) -> list[str]:
+    def _resolve_csv_new_features(self, header: list[str], sample: pd.DataFrame | None = None) -> list[str]:
         cfg = self.config
         header_set = set(header)
         if cfg.new_feature_cols:
@@ -884,20 +921,14 @@ class FeatureValidationPipeline:
             if missing:
                 raise KeyError(f"Missing new_feature_cols in CSV: {missing}")
             return list(dict.fromkeys(cfg.new_feature_cols))
-        excluded = {cfg.id_col, cfg.apply_time_col, cfg.sample_col}
-        excluded.update(as_list(cfg.target_cols))
-        excluded.update(as_list(cfg.incumbent_feature_cols))
-        excluded.update(as_list(cfg.categorical_features))
-        excluded.update(as_list(cfg.population_dims))
-        excluded.update(as_list(cfg.time_dims))
-        excluded.update(as_list(cfg.woe_plot_groups))
-        if cfg.split_col:
-            excluded.add(cfg.split_col)
-        if cfg.oot_col:
-            excluded.add(cfg.oot_col)
+        excluded = self._auto_excluded_columns()
         if cfg.batch_base_cols:
             excluded.update(cfg.batch_base_cols)
-        return [col for col in header if col not in excluded]
+        candidates = [col for col in header if col not in excluded]
+        if sample is not None:
+            # the DataFrame path takes numeric columns only; the sample of the first rows gives the CSV path the dtypes
+            candidates = [col for col in candidates if col in sample.columns and pd.api.types.is_numeric_dtype(sample[col])]
+        return candidates
 
     def _make_feature_batches(self, new_features: list[str]) -> list[list[str]]:
         cfg = self.config
@@ -938,6 +969,7 @@ class FeatureValidationPipeline:
                 *cfg.population_dims,
                 *as_list(cfg.categorical_features),
                 *as_list(cfg.woe_plot_groups),
+                *self._grouping_columns(),
                 *incumbent_features,
             ]
         )
@@ -949,11 +981,15 @@ class FeatureValidationPipeline:
         if cfg.split_col and cfg.split_col in base_df.columns:
             return normalize_split_values(base_df[cfg.split_col])
 
-        labels = pd.Series("ins", index=base_df.index, dtype=object)
+        # a row that belongs to no split (missing or unknown label) keeps a missing label: starting every row as "ins"
+        # used to promote those rows to the training sample of every batch while the non-batch run leaves them out
+        labels = pd.Series(pd.NA, index=base_df.index, dtype=object)
+        ins_ids = set(splits.get("ins", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
         oos_ids = set(splits.get("oos", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
         oot_ids = set(splits.get("oot", pd.DataFrame()).get("_smf_batch_row_id", pd.Series(dtype=int)).tolist())
         unique_oot_ids = oot_ids - oos_ids
         row_ids = base_df["_smf_batch_row_id"]
+        labels.loc[row_ids.isin(ins_ids)] = "ins"
         labels.loc[row_ids.isin(oos_ids)] = "oos"
         labels.loc[row_ids.isin(unique_oot_ids)] = "oot"
         for name, frame in splits.items():
@@ -975,10 +1011,33 @@ class FeatureValidationPipeline:
         csv_path: Path,
         feature_batches: list[list[str]],
     ) -> FeatureValidationPipelineResult:
+        # a failed batch has no result: carry the id of the batch with each result so that the keys of the merged outputs
+        # still match batch_metadata and the folders on disk
+        status = batch_metadata["status"] if "status" in batch_metadata else pd.Series(dtype=object)
+        batch_ids = [int(idx) for idx in batch_metadata.loc[status.eq("ok"), "batch_id"]]
+        failed_rows = batch_metadata.loc[status.ne("ok")]
+        if len(failed_rows):
+            failed_features = {
+                col for text in failed_rows["features"].astype(str) for col in text.split(",") if col
+            }
+            analysed_features = [col for col in new_features if col not in failed_features]
+            feature_batches = [batch for idx, batch in enumerate(feature_batches) if idx in set(batch_ids)]
+            warnings.warn(
+                f"FeatureValidationPipeline: {len(failed_rows)} of {len(batch_metadata)} batches failed "
+                f"(batch_id {failed_rows['batch_id'].tolist()}); their {len(failed_features)} features are missing from "
+                f"every output. First error: {failed_rows['error'].iloc[0]}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            new_features = analysed_features
+        else:
+            failed_features = set()
         distribution_summary = self._merge_distribution_summaries([res.distribution_summary for res in batch_results])
-        woe_artifacts = self._merge_woe_artifacts([res.woe_artifacts for res in batch_results], batch_metadata)
+        woe_artifacts = self._merge_woe_artifacts(
+            [res.woe_artifacts for res in batch_results], batch_metadata, incumbent_features
+        )
         psi_summary = self._concat_frames([res.psi_summary for res in batch_results])
-        psi_details = self._merge_psi_details(batch_results)
+        psi_details = self._merge_psi_details(batch_results, batch_ids)
         ivks_summary = self._concat_frames([res.ivks_summary for res in batch_results])
         corr_matrix = self._merge_corr_matrices([res.corr_matrix for res in batch_results])
         high_corr_pairs = self._concat_frames([res.high_corr_pairs for res in batch_results])
@@ -1008,6 +1067,7 @@ class FeatureValidationPipeline:
             high_corr_pairs=high_corr_pairs,
             woe_artifacts=woe_artifacts,
             batch_metadata=batch_metadata,
+            n_failed_features=len(failed_features),
         )
         selected_features = self._dedupe(
             [feat for res in batch_results for feat in as_list(res.selected_features)]
@@ -1017,6 +1077,7 @@ class FeatureValidationPipeline:
             incumbent_features,
             target_cols,
             batch_mode=True,
+            columns=base_splits["ins"].columns,
         )
         selection_summary: dict[str, Any] = {}
         screening_artifact = None
@@ -1027,6 +1088,8 @@ class FeatureValidationPipeline:
                 "target_col": target_cols[0],
                 "config_snapshot": config_snapshot,
             }
+            if failed_features:
+                selection_summary["failed_features"] = sorted(failed_features)
             if selected_features:
                 from .screening_artifact import FeatureScreeningArtifact
 
@@ -1055,7 +1118,8 @@ class FeatureValidationPipeline:
         tables["batch_metadata"] = batch_metadata
         output_paths, report_path = self._write_outputs(tables)
         return FeatureValidationPipelineResult(
-            splits=base_splits,
+            # the row id that the batch run added is internal
+            splits={name: frame.drop(columns=["_smf_batch_row_id"], errors="ignore") for name, frame in base_splits.items()},
             distribution_summary=distribution_summary,
             woe_artifacts=woe_artifacts,
             psi_summary=psi_summary,
@@ -1073,7 +1137,7 @@ class FeatureValidationPipeline:
                     "output_paths": res.output_paths,
                     "report_path": res.report_path,
                 }
-                for idx, res in enumerate(batch_results)
+                for idx, res in zip(batch_ids, batch_results)
             },
             selected_features=selected_features,
             selection_summary=selection_summary,
@@ -1096,11 +1160,23 @@ class FeatureValidationPipeline:
         self,
         artifacts: list[dict[str, Any]],
         batch_metadata: pd.DataFrame,
+        incumbent_features: list[str] | None = None,
     ) -> dict[str, Any]:
         valid = [item for item in artifacts if item]
+        woe_table = self._concat_frames([item.get("woe_table", pd.DataFrame()) for item in valid])
+        var_col = next((col for col in ("VAR", "var") if col in woe_table.columns), None)
+        if var_col is not None and incumbent_features:
+            # every batch fits the incumbent features again (for the correlation), so their bins came out once per batch
+            # and the IV summed over the table was multiplied by the number of batches
+            is_incumbent = woe_table[var_col].isin(list(incumbent_features))
+            woe_table = (
+                pd.concat([woe_table[~is_incumbent], woe_table[is_incumbent].drop_duplicates()])
+                .sort_index()
+                .reset_index(drop=True)
+            )
         return {
             "by_target": {},
-            "woe_table": self._concat_frames([item.get("woe_table", pd.DataFrame()) for item in valid]),
+            "woe_table": woe_table,
             "refine_summary": self._concat_frames([item.get("refine_summary", pd.DataFrame()) for item in valid]),
             "categorical_transform_stats_by_target": self._merge_transform_stats(
                 valid, "categorical_transform_stats_by_target"
@@ -1142,9 +1218,11 @@ class FeatureValidationPipeline:
         return pd.concat(valid, ignore_index=True) if valid else pd.DataFrame()
 
     @staticmethod
-    def _merge_psi_details(batch_results: list[FeatureValidationPipelineResult]) -> dict[str, Any]:
+    def _merge_psi_details(
+        batch_results: list[FeatureValidationPipelineResult], batch_ids: list[int] | None = None
+    ) -> dict[str, Any]:
         details: dict[str, Any] = {}
-        for idx, result in enumerate(batch_results):
+        for idx, result in zip(batch_ids if batch_ids is not None else range(len(batch_results)), batch_results):
             for key, value in (result.psi_details or {}).items():
                 details[f"batch_{idx:03d}:{key}"] = value
         return details
@@ -1328,10 +1406,12 @@ class FeatureValidationPipeline:
         high_corr_pairs: pd.DataFrame,
         woe_artifacts: dict[str, Any],
         batch_metadata: pd.DataFrame,
+        n_failed_features: int = 0,
     ) -> pd.DataFrame:
         rows = [
             {"metric": "n_rows", "value": n_rows},
             {"metric": "n_new_features", "value": len(new_features)},
+            {"metric": "n_failed_features", "value": n_failed_features},
             {"metric": "n_incumbent_features", "value": len(incumbent_features)},
             {"metric": "n_targets", "value": len(target_cols)},
             {"metric": "woe_engine", "value": self.config.woe_engine},
@@ -1352,6 +1432,7 @@ class FeatureValidationPipeline:
         target_cols: list[str],
         *,
         batch_mode: bool,
+        columns: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         cfg = self.config
         return {
@@ -1373,6 +1454,7 @@ class FeatureValidationPipeline:
                 "refine_min_n_bins_policy", "warn"
             ),
             "batch_mode": bool(batch_mode),
+            "split": split_settings(cfg, columns),
         }
 
     def _validate_input(
@@ -1394,6 +1476,19 @@ class FeatureValidationPipeline:
         validate_binary_target(data, target_cols, owner="FeatureValidationPipeline", allow_missing=True)
         if cfg.woe_engine.lower() not in {"monotone", "equal_freq"}:
             raise ValueError("woe_engine must be 'monotone' or 'equal_freq'")
+        if cfg.woe_enabled and cfg.woe_engine.lower() == "monotone":
+            declared = set(as_list(cfg.categorical_features))
+            undeclared = [
+                col for col in new_features + incumbent_features
+                if col not in declared and not pd.api.types.is_numeric_dtype(data[col])
+            ]
+            if undeclared:
+                # the numeric fit failed on them, the message of the failure was lost in the console and the run crashed
+                # later with an unrelated KeyError ("WOE column ... was not produced")
+                raise ValueError(
+                    f"Non-numeric feature(s) {undeclared[:8]} are not listed in categorical_features; the monotone WOE "
+                    "engine bins them only as categorical. Declare them in categorical_features, encode them, or drop them."
+                )
         if cfg.psi_reference_dataset not in {"ins", "oos", "oot", "external"}:
             raise ValueError("psi_reference_dataset must be one of ins/oos/oot/external")
         if cfg.psi_reference_dataset == "external" and cfg.psi_reference_data is None:
@@ -1402,10 +1497,30 @@ class FeatureValidationPipeline:
             validate_woe_fit_query_columns(cfg.woe_fit_query, data.columns, context="input data")
             validate_woe_fit_query_syntax(data, cfg.woe_fit_query)
 
-    def _resolve_new_features(self, data: pd.DataFrame) -> list[str]:
+    def _grouping_columns(self) -> list[str]:
+        """Columns that the grouped analyses and the weighted selection read besides the features: the time and
+        population dimensions, the plot, selection, PSI and IV/KS group columns, the columns of ``group_specs`` and the
+        weight column."""
         cfg = self.config
-        if cfg.new_feature_cols:
-            return list(dict.fromkeys(cfg.new_feature_cols))
+        columns = [
+            *as_list(cfg.time_dims),
+            *as_list(cfg.population_dims),
+            *as_list(cfg.woe_plot_groups),
+            *as_list(cfg.selection_group_dims),
+            *self._resolve_group_dim_columns(list(as_list(cfg.psi_group_dims))),
+            *[dim for dim in as_list(cfg.ivks_group_dims) if dim not in {"global", "time", "population"}],
+        ]
+        if cfg.group_specs is not None:
+            for spec in normalize_group_specs(cfg.group_specs):
+                columns.extend(spec["columns"])
+        if cfg.weight_col:
+            columns.append(cfg.weight_col)
+        return self._dedupe([str(col) for col in columns if col])
+
+    def _auto_excluded_columns(self) -> set[str]:
+        """Columns that are never inferred as new features: the roles (id, time, labels, targets, incumbents, weight and
+        grouping columns). The same rule serves the DataFrame and the CSV path."""
+        cfg = self.config
         excluded = {cfg.id_col, cfg.apply_time_col, cfg.sample_col}
         if cfg.split_col:
             excluded.add(cfg.split_col)
@@ -1413,6 +1528,14 @@ class FeatureValidationPipeline:
             excluded.add(cfg.oot_col)
         excluded.update(as_list(cfg.target_cols))
         excluded.update(as_list(cfg.incumbent_feature_cols))
+        excluded.update(self._grouping_columns())
+        return excluded
+
+    def _resolve_new_features(self, data: pd.DataFrame) -> list[str]:
+        cfg = self.config
+        if cfg.new_feature_cols:
+            return list(dict.fromkeys(cfg.new_feature_cols))
+        excluded = self._auto_excluded_columns()
         return [col for col in data.columns if col not in excluded and pd.api.types.is_numeric_dtype(data[col])]
 
     def _resolve_incumbent_features(self, data: pd.DataFrame, new_features: list[str]) -> list[str]:
@@ -1425,13 +1548,49 @@ class FeatureValidationPipeline:
         cfg = self.config
         if cfg.apply_time_col not in data.columns:
             return
-        dt = pd.to_datetime(data[cfg.apply_time_col], errors="coerce")
+        needed = [name for name in ("apply_week", "apply_month", "apply_quarter") if name in cfg.time_dims and name not in data.columns]
+        if not needed:
+            return
+        dt = self._parse_apply_time(data[cfg.apply_time_col])
         if "apply_week" in cfg.time_dims and "apply_week" not in data.columns:
             data["apply_week"] = dt.dt.to_period("W").astype(str)
         if "apply_month" in cfg.time_dims and "apply_month" not in data.columns:
             data["apply_month"] = dt.dt.to_period("M").astype(str)
         if "apply_quarter" in cfg.time_dims and "apply_quarter" not in data.columns:
             data["apply_quarter"] = dt.dt.to_period("Q").astype(str)
+
+    def _parse_apply_time(self, values: pd.Series) -> pd.Series:
+        """Parse the application time. Numbers are read as YYYYMMDD integers or Unix epochs (seconds or milliseconds),
+        strings of mixed formats (date and date-time) are parsed one by one; ``to_datetime(errors="coerce")`` alone
+        read an integer date as nanoseconds since 1970 (every row in '1970-01') and turned half of a mixed column into
+        NaT. A warning reports the values that still cannot be parsed."""
+        if pd.api.types.is_datetime64_any_dtype(values):
+            return pd.to_datetime(values, errors="coerce")
+        if pd.api.types.is_numeric_dtype(values) and not pd.api.types.is_bool_dtype(values):
+            numbers = pd.to_numeric(values, errors="coerce")
+            observed = numbers.dropna()
+            if len(observed) and observed.between(19000101, 22001231).all():
+                parsed = pd.to_datetime(numbers.astype("Int64").astype("string"), format="%Y%m%d", errors="coerce")
+            elif len(observed) and observed.abs().max() >= 1e11:
+                parsed = pd.to_datetime(numbers, unit="ms", errors="coerce")
+            elif len(observed) and observed.abs().max() >= 1e8:
+                parsed = pd.to_datetime(numbers, unit="s", errors="coerce")
+            else:
+                parsed = pd.to_datetime(numbers, errors="coerce")
+        else:
+            try:
+                parsed = pd.to_datetime(values, errors="coerce", format="mixed")
+            except (TypeError, ValueError):
+                parsed = pd.to_datetime(values, errors="coerce")
+        lost = int((parsed.isna() & values.notna()).sum())
+        if lost:
+            warnings.warn(
+                f"FeatureValidationPipeline: {lost} of {len(values)} values of {self.config.apply_time_col!r} could not be "
+                "parsed as dates; their rows have no week, month or quarter.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return parsed
 
     def _synthesize_missing_oot(self) -> bool:
         """Resolve missing-OOT governance without mutating the user config."""
@@ -1540,6 +1699,18 @@ class FeatureValidationPipeline:
             + [{"feature": col, "feature_source": "incumbent"} for col in incumbent_features]
         )
 
+    def _note_absent_group_columns(self, name: str, group_cols: list[str], columns: Any) -> None:
+        """Skip a group spec with an absent column: silently for the time and population dimensions (documented), with a
+        warning for the groupings that the user wrote (``group_specs`` and the extra ``ivks_group_dims``)."""
+        if name.startswith(("time:", "population:", "time_population:")):
+            return
+        missing = [col for col in group_cols if col not in set(columns)]
+        warnings.warn(
+            f"FeatureValidationPipeline: the group {name!r} needs the absent column(s) {missing} and is skipped.",
+            UserWarning,
+            stacklevel=3,
+        )
+
     def _group_specs(self, include_global: bool = True) -> dict[str, list[str]]:
         cfg = self.config
         if cfg.group_specs is not None:
@@ -1575,6 +1746,10 @@ class FeatureValidationPipeline:
         tables: dict[str, pd.DataFrame] = {}
         for name, group_cols in self._group_specs(include_global=True).items():
             valid_group_cols = [col for col in group_cols if col in data.columns]
+            if len(valid_group_cols) != len(group_cols):
+                # a group column that is absent used to collapse the table into the global one under another name
+                self._note_absent_group_columns(name, group_cols, data.columns)
+                continue
             if numeric_features:
                 table = _proc_means_by_grp(
                     data,
@@ -1717,7 +1892,7 @@ class FeatureValidationPipeline:
         cfg = self.config
         categorical = [col for col in as_list(cfg.categorical_features) if col in features]
         numeric = [col for col in features if col not in set(categorical)]
-        params = dict(cfg.monotone_woe_params or {})
+        params = with_default_special_values(cfg.monotone_woe_params, train, numeric)
         init_params = {k: v for k, v in params.items() if k in self._MONOTONE_INIT_KEYS}
         fit_params = {k: v for k, v in params.items() if k in self._MONOTONE_FIT_KEYS}
         binner = MonotoneWOEBinner(
@@ -1726,7 +1901,8 @@ class FeatureValidationPipeline:
             cate_feats=categorical,
             **init_params,
         )
-        binner.fit(train, **fit_params)
+        with quiet_default_sentinel(cfg.monotone_woe_params):
+            binner.fit(train, **fit_params)
         refine_rows.append({"target": target, "step": "fit_monotone", "status": "ok", "features": ",".join(features)})
 
         if cfg.monotone_refine_cate_enabled:
@@ -1951,6 +2127,7 @@ class FeatureValidationPipeline:
 
         ins = splits["ins"]
         primary = target_cols[0]
+        missing_ref = getattr(screen_cfg, "missing_rate_ref", None)
         w_ins = None
         if cfg.weight_col:
             from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
@@ -2004,7 +2181,7 @@ class FeatureValidationPipeline:
                         "n": int(len(positions)),
                         "iv": self._evidence_iv(bins, y_g, sample_weight=w_g),
                         "direction": point_biserial_direction(
-                            sub[var], sub[primary], sample_weight=w_g
+                            sub[var], sub[primary], sample_weight=w_g, missing_ref=missing_ref
                         ),
                     })
             return pd.DataFrame(rows, columns=["var", "group", "n", "iv", "direction"])
@@ -2029,7 +2206,7 @@ class FeatureValidationPipeline:
                         rows.append({
                             "var": var, "target": target, "iv": np.nan,
                             "direction": point_biserial_direction(
-                                data[var], data[target], sample_weight=w_t
+                                data[var], data[target], sample_weight=w_t, missing_ref=missing_ref
                             )
                             if var in data.columns else 0,
                             "status": "engine_missing",
@@ -2042,7 +2219,7 @@ class FeatureValidationPipeline:
                         "target": target,
                         "iv": self._evidence_iv(bins, y, sample_weight=w_t),
                         "direction": point_biserial_direction(
-                            data[var], data[target], sample_weight=w_t
+                            data[var], data[target], sample_weight=w_t, missing_ref=missing_ref
                         ),
                         "status": "ok",
                     })
@@ -2115,6 +2292,15 @@ class FeatureValidationPipeline:
             "vif_use_woe_bins": screen_cfg.vif_use_woe_bins,
             "selection_group_dims": list(cfg.selection_group_dims or []),
             "evidence_weight_col": cfg.weight_col,
+            # the thresholds the screening really used (selection_params holds only the keys that the user overrode)
+            "psi_threshold": screen_cfg.psi_threshold,
+            "psi_compare_splits": list(screen_cfg.psi_compare_splits or []),
+            "iv_threshold": screen_cfg.iv_threshold,
+            "corr_threshold": screen_cfg.corr_threshold,
+            "corr_method": screen_cfg.corr_method,
+            "corr_base_metric": screen_cfg.corr_base_metric,
+            "on_empty_stage": screen_cfg.on_empty_stage,
+            "missing_rate_ref": screen_cfg.missing_rate_ref,
         })
         selection_summary = {
             "initial_features": list(new_features),
@@ -2124,6 +2310,10 @@ class FeatureValidationPipeline:
         }
         selection_summary.update(screen_result_to_summary(result, new_features))
         selection_summary["config_snapshot"] = selection_config_snapshot
+        gate_dropped = (woe_artifacts or {}).get("missing_gate_dropped")
+        if isinstance(gate_dropped, pd.DataFrame) and len(gate_dropped):
+            # features removed by the missing-rate gate before the WOE fit never reach the screening: record them here
+            selection_summary["missing_gate_dropped"] = gate_dropped["var"].tolist()
         artifact = FeatureScreeningArtifact.from_screen_result(
             result,
             initial_features=list(new_features),
@@ -2133,6 +2323,8 @@ class FeatureValidationPipeline:
             source="fvp",
             config_snapshot=selection_config_snapshot,
         )
+        if "missing_gate_dropped" in selection_summary:
+            artifact.selection_summary["missing_gate_dropped"] = list(selection_summary["missing_gate_dropped"])
         return list(result.selected_features), selection_summary, artifact
 
     def _run_psi(
@@ -2149,6 +2341,22 @@ class FeatureValidationPipeline:
         reference = cfg.psi_reference_data.copy() if cfg.psi_reference_dataset == "external" else splits[cfg.psi_reference_dataset].copy()
         if cfg.psi_reference_dataset == "external":
             self._add_time_columns(reference)
+        if cfg.psi_reference_dataset == "external":
+            absent = [col for col in features if col not in reference.columns]
+            if absent:
+                raise ValueError(
+                    f"psi_reference_data lacks the feature column(s) {absent[:8]}; the PSI needs every analysed feature in the "
+                    "reference sample."
+                )
+        if reference.empty:
+            # an empty reference gave every feature a large PSI (all mass against none) without any message
+            warnings.warn(
+                f"FeatureValidationPipeline: the PSI reference sample {cfg.psi_reference_dataset!r} has no rows, so the PSI "
+                "is not computed.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return pd.DataFrame(), {}
         group_cols = self._resolve_group_dim_columns(cfg.psi_group_dims)
         if "sample" in cfg.psi_group_dims:
             group_cols = ["_smf_split"] + group_cols
@@ -2158,10 +2366,24 @@ class FeatureValidationPipeline:
         details: dict[str, Any] = {}
         engines = self._psi_engines(target_cols, woe_artifacts)
         for target_key, engine in engines.items():
-            calc = PSICalculator(binning_engine=engine, **cfg.psi_params) if cfg.psi_use_woe_bins and engine is not None else PSICalculator(**cfg.psi_params)
+            use_woe_bins = cfg.psi_use_woe_bins and engine is not None
+            calc = PSICalculator(binning_engine=engine, **cfg.psi_params) if use_woe_bins else PSICalculator(**cfg.psi_params)
+            psi_features = list(features)
+            if not use_woe_bins:
+                # the numeric PSI cannot bin text: one categorical feature used to turn the PSI of every feature into a
+                # single error row
+                psi_features = [col for col in features if pd.api.types.is_numeric_dtype(combined[col])]
+                skipped = [col for col in features if col not in set(psi_features)]
+                if skipped:
+                    warnings.warn(
+                        f"FeatureValidationPipeline: the PSI without WOE bins (psi_use_woe_bins=False or no WOE engine) "
+                        f"skips the non-numeric feature(s) {skipped[:8]}; set psi_use_woe_bins=True to include them.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
             prepared_bins = (
-                calc._prepare_woe_bins(reference, combined, features)
-                if cfg.psi_use_woe_bins and engine is not None
+                calc._prepare_woe_bins(reference, combined, psi_features)
+                if use_woe_bins
                 else None
             )
             for group_col in group_cols or [None]:
@@ -2171,7 +2393,7 @@ class FeatureValidationPipeline:
                             prepared_bins[0],
                             prepared_bins[1],
                             combined,
-                            features,
+                            psi_features,
                             group_col,
                             True,
                             calc.psi_missing_bucket_policy,
@@ -2180,7 +2402,7 @@ class FeatureValidationPipeline:
                         result = calc.calculate(
                             reference,
                             combined,
-                            features,
+                            psi_features,
                             group_by=None,
                             group_name=group_col,
                             return_details=True,
@@ -2258,6 +2480,9 @@ class FeatureValidationPipeline:
             group_specs = self._ivks_group_specs()
             for group_name, group_cols in group_specs.items():
                 valid_group_cols = [col for col in group_cols if col in data.columns]
+                if len(valid_group_cols) != len(group_cols):
+                    self._note_absent_group_columns(group_name, group_cols, data.columns)
+                    continue
                 if not valid_group_cols:
                     if bins_frame is not None:
                         rows.append(

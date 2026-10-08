@@ -30,7 +30,7 @@ from .Weighted_Screen import _apply_stage_keep, _check_tie_breaker, _summary_row
 
 
 def point_biserial_direction(
-    x: pd.Series, y: pd.Series, sample_weight: np.ndarray | None = None
+    x: pd.Series, y: pd.Series, sample_weight: np.ndarray | None = None, missing_ref: float | None = None
 ) -> int:
     """Sign of the point-biserial association between a numeric feature and a
     binary target: +1 when higher x means higher bad rate (WOE increasing),
@@ -50,6 +50,9 @@ def point_biserial_direction(
         Binary target (1 = bad, 0 = good); rows that are not numeric are ignored.
     sample_weight : numpy.ndarray or None, default None
         Weights aligned by position with ``x`` and ``y``; None gives the unweighted comparison of the class means.
+    missing_ref : float or None, default None
+        The value that stands for "missing" in ``x`` (for example -999999). Rows that hold it are left out like NaN;
+        otherwise the sentinel counted as a very small real value and dragged the class means.
 
     Returns
     -------
@@ -58,6 +61,8 @@ def point_biserial_direction(
         usable rows, a class without rows or weight, or equal means).
     """
     xv = pd.to_numeric(x, errors="coerce")
+    if missing_ref is not None:
+        xv = xv.mask(xv == missing_ref)
     yv = pd.to_numeric(y, errors="coerce")
     mask = xv.notna() & yv.notna()
     if not bool(mask.any()):

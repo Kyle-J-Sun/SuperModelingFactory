@@ -1491,7 +1491,8 @@ class MonotoneWOEBinner:
                     break
             elif self._is_monotone_dir(woes, expected_dir):
                 break
-            if len(edges) < self.min_n_bins - 1:
+            if len(edges) + 1 <= self.min_n_bins:
+                # merging would leave fewer than min_n_bins bins (the guard used to allow one merge too many)
                 break
 
             if expected_dir is None:

@@ -416,7 +416,7 @@ class MonotoneBinnerAdapter(WOEEngineAdapter):
     def __init__(self, engine: Any, woe_suffix: str = "_woe"):
         super().__init__(engine=engine, engine_name="monotone", woe_suffix=woe_suffix)
 
-    def transform(self, data: pd.DataFrame, varlist: Optional[list[str]] = None, suffix: str = "_woe") -> pd.DataFrame:
+    def transform(self, data: pd.DataFrame, varlist: Optional[list[str]] = None, suffix: Optional[str] = None) -> pd.DataFrame:
         """Transform ``data`` with the wrapped ``MonotoneWOEBinner``.
 
         Parameters
@@ -425,8 +425,10 @@ class MonotoneBinnerAdapter(WOEEngineAdapter):
             Data that holds the raw feature columns.
         varlist : list of str or None, default None
             Variables to transform. ``None`` transforms every fitted feature.
-        suffix : str, default "_woe"
-            Suffix of the WOE columns. It is passed to ``apply_woe``.
+        suffix : str or None, default None
+            Suffix of the WOE columns. It is passed to ``apply_woe``. ``None`` uses the ``woe_suffix`` of the adapter
+            (a pipeline that fitted the engine with ``woe_suffix='_x'`` and saved it got ``_woe`` columns when the loaded
+            engine was called without a suffix, and the model's ``_x`` features were missing).
 
         Returns
         -------
@@ -435,6 +437,8 @@ class MonotoneBinnerAdapter(WOEEngineAdapter):
             transformed variable. A listed variable that was not fitted, or is not in ``data``, is skipped without
             an error.
         """
+        if suffix is None:
+            suffix = self.woe_suffix
         transformed = self.engine.apply_woe(
             data,
             suffix=suffix,
@@ -496,7 +500,7 @@ class MonotoneBinnerAdapter(WOEEngineAdapter):
         return {k: v for k, v in edges.items() if k in set(varlist)}
 
 
-def as_woe_engine(engine: Any, woe_suffix: str = "_woe") -> Optional[WOEEngineAdapter]:
+def as_woe_engine(engine: Any, woe_suffix: Optional[str] = None) -> Optional[WOEEngineAdapter]:
     """Return a unified adapter for supported fitted WOE engines.
 
     Parameters
@@ -504,8 +508,10 @@ def as_woe_engine(engine: Any, woe_suffix: str = "_woe") -> Optional[WOEEngineAd
     engine : WOE_Master, MonotoneWOEBinner, WOEEngineAdapter or None
         ``WOE_Master``, ``MonotoneWOEBinner`` or an existing adapter. ``None`` is
         returned unchanged so callers can preserve legacy behavior.
-    woe_suffix : str, default "_woe"
-        Suffix used for generated WOE columns. It is not applied to an engine that is already an adapter.
+    woe_suffix : str or None, default None
+        Suffix used for generated WOE columns. ``None`` takes the ``woe_suffix`` of a ``WOE_Master`` (it names its own
+        columns, so an adapter with another suffix could not find them) and ``"_woe"`` for the other engines. It is not
+        applied to an engine that is already an adapter.
 
     Returns
     -------
@@ -523,6 +529,8 @@ def as_woe_engine(engine: Any, woe_suffix: str = "_woe") -> Optional[WOEEngineAd
         return None
     if isinstance(engine, WOEEngineAdapter):
         return engine
+    if woe_suffix is None:
+        woe_suffix = getattr(engine, "woe_suffix", None) or "_woe"
     if hasattr(engine, "get_mapping_table") and hasattr(engine, "transform"):
         return WOEMasterAdapter(engine, woe_suffix=woe_suffix)
     if hasattr(engine, "get_final_bins") and hasattr(engine, "apply_woe"):
