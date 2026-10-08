@@ -77,22 +77,29 @@ def _positive_class_score(pred):
     return arr[:, 1] if arr.ndim == 2 else arr
 
 
-def _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col=None):
+def _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col=None, eval_init_scores=None):
     if metric != "auc":
         raise ValueError("Only metric='auc' is currently supported.")
     metric_dict = {}
     for name, df_eval in eval_sets.items():
-        proba = _positive_class_score(candidate.predict(df_eval[varlist]))
+        offset = None if eval_init_scores is None else eval_init_scores.get(name)
+        if offset is not None:
+            # score the combined model: the log-odds offset of the rows plus the raw score of the candidate
+            proba = _positive_class_score(candidate.predict_with_base_margin(df_eval[varlist], offset, return_prob=True))
+        else:
+            proba = _positive_class_score(candidate.predict(df_eval[varlist]))
         sw = resolve_sample_weight(data=df_eval, weight_col=eval_weight_col, expected_len=len(df_eval))
         metric_dict[name] = roc_auc_score(df_eval[tgt_name], proba, sample_weight=sw)
     return metric_dict
 
 
 def _fit_candidate(model_type, base_params, candidate_params, data, varlist, tgt_name,
-                   validation_df, fit_kwargs, weight_col=None, eval_weight_col=None):
+                   validation_df, fit_kwargs, weight_col=None, eval_weight_col=None, validation_init_score=None):
     params = {**base_params, **candidate_params}
     candidate = GradientBoostingModel(model_type, params)
     fk = dict(fit_kwargs)
+    if validation_init_score is not None:
+        fk["eval_init_score"] = validation_init_score
     train_sw = resolve_sample_weight(data=data, weight_col=weight_col, expected_len=len(data))
     eval_sw = resolve_sample_weight(data=validation_df, weight_col=eval_weight_col, expected_len=len(validation_df))
     if train_sw is not None:
@@ -154,7 +161,7 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
                       primary_set=None, gap_ref_sets=None, metric="auc",
                       validation_set=None, n_trials=50, refit=True,
                       verbose=True, fit_kwargs=None, random_state=None,
-                      weight_col=None, eval_weight_col=None):
+                      weight_col=None, eval_weight_col=None, eval_init_scores=None):
     if metric != "auc":
         raise ValueError("Only metric='auc' is currently supported.")
     fit_kwargs = {} if fit_kwargs is None else dict(fit_kwargs)
@@ -162,6 +169,15 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
     _validate_columns(data, varlist, tgt_name, eval_sets, weight_col, eval_weight_col)
     validation_name = _resolve_validation_set(eval_sets, primary_set, validation_set)
     validation_df = eval_sets[validation_name]
+    eval_init_scores = None if eval_init_scores is None else dict(eval_init_scores)
+    for name, offset in (eval_init_scores or {}).items():
+        if name not in eval_sets:
+            raise ValueError("eval_init_scores names an unknown eval set: {0}".format(name))
+        if len(offset) != len(eval_sets[name]):
+            raise ValueError(
+                "eval_init_scores[{0!r}] has {1} values for {2} rows".format(name, len(offset), len(eval_sets[name]))
+            )
+    validation_init_score = None if eval_init_scores is None else eval_init_scores.get(validation_name)
     use_gap = (not callable(objective)) and objective == "oot_gap_penalized" and len(gap_ref_sets) > 0
     rows = []
 
@@ -172,8 +188,8 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
         for combo in combos:
             params = dict(zip(param_names, combo))
             candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name,
-                                       validation_df, fit_kwargs, weight_col, eval_weight_col)
-            metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col)
+                                       validation_df, fit_kwargs, weight_col, eval_weight_col, validation_init_score)
+            metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col, eval_init_scores)
             score = _score_from_metrics(metric_dict, objective, primary_set, gap_ref_sets)
             rows.append(_format_search_row(params, set_names, metric_dict, score, use_gap, primary_set, gap_ref_sets))
     elif engine == "optuna":
@@ -187,8 +203,8 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
         def _objective(trial):
             params = {name: _suggest_from_spec(trial, name, spec) for name, spec in search_space.items()}
             candidate = _fit_candidate(self.model_type, self.params, params, data, varlist, tgt_name,
-                                       validation_df, fit_kwargs, weight_col, eval_weight_col)
-            metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col)
+                                       validation_df, fit_kwargs, weight_col, eval_weight_col, validation_init_score)
+            metric_dict = _evaluate_candidate(candidate, eval_sets, varlist, tgt_name, metric, eval_weight_col, eval_init_scores)
             score = _score_from_metrics(metric_dict, objective, primary_set, gap_ref_sets)
             for set_name, value in metric_dict.items():
                 trial.set_user_attr("AUC_{0}".format(set_name), float(value))
@@ -233,6 +249,8 @@ def _gbm_param_search(self, data, varlist, tgt_name, eval_sets, search_space,
             refit_kwargs["sample_weight"] = train_sw
         if eval_sw is not None:
             refit_kwargs["eval_sample_weight"] = eval_sw
+        if validation_init_score is not None:
+            refit_kwargs["eval_init_score"] = validation_init_score
         self.fit(data[varlist], data[tgt_name], validation_df[varlist], validation_df[tgt_name], **refit_kwargs)
     return search_df
 

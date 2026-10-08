@@ -35,6 +35,31 @@ from ._common import (
 )
 
 
+_WARM_START_PRIOR_COL = "warm_start_prior"
+
+
+class _WarmStartScoredModel:
+    """A fitted warm-start LightGBM/XGBoost model that scores ``sigmoid(prior logit + trees)``.
+
+    The prior logit travels as the last input column, so an explainer sees the prior as one more input and its Owen
+    values add up to the probability that the pipeline scores (the trees alone explain only the increment).
+    """
+
+    model_type = "warm_start_scored"
+
+    def __init__(self, gbm: Any, features: list[str], prior_col: str = _WARM_START_PRIOR_COL):
+        self.gbm = gbm
+        self.features = list(features)
+        self.prior_col = prior_col
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        columns = self.features + [self.prior_col]
+        frame = X if isinstance(X, pd.DataFrame) else pd.DataFrame(np.asarray(X), columns=columns)
+        margin = np.asarray(self.gbm.get_base_margin(frame[self.features])).ravel() + frame[self.prior_col].to_numpy(dtype=float)
+        positive = 1.0 / (1.0 + np.exp(-margin))
+        return np.column_stack([1.0 - positive, positive])
+
+
 @dataclass
 class CreditModelPipelineConfig:
     """Configuration of :class:`CreditModelPipeline`.
@@ -189,9 +214,9 @@ class CreditModelPipelineConfig:
     warm_start_enabled : bool, default False
         Whether to start the GBM models from a prior score (LightGBM ``init_score``, XGBoost base margin), in training
         and in evaluation, so that a model's probability combines the prior score with its increment. It needs
-        ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only. The prior is added to the training and
-        to the final evaluation only: early stopping, the Optuna search (``AUC_*`` of its table) and the SHAP/Owen
-        explanations see the increment alone, without the prior.
+        ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only. By default (see
+        ``warm_start_score_scope``) the prior is added to the training and to the final evaluation only: early stopping,
+        the Optuna search (``AUC_*`` of its table) and the Owen explanations see the increment alone, without the prior.
     warm_start_score_col : str or None, default None
         Column of the input data that holds the prior score. It is required when ``warm_start_enabled`` is on
         (``ValueError``), must exist (``KeyError``) and must have no missing values in any evaluated frame. It is copied
@@ -210,6 +235,15 @@ class CreditModelPipelineConfig:
     warm_start_apply_to_optuna : bool, default False
         Whether to pass the prior score as ``init_score`` to the Optuna search of the warm-start models (``lgb`` and
         ``xgb``).
+    warm_start_score_scope : {"train", "full"}, default "train"
+        Where the prior score is seen. ``"train"`` (legacy) adds it to the training and to the final evaluation only:
+        early stopping, the ``AUC_*`` of the Optuna search table and the Owen explanations then see the increment alone.
+        ``"full"`` also adds it to the validation set of the early stopping (so the models stop when the combined model
+        stops improving), to the scoring of the Optuna candidates (with ``warm_start_apply_to_optuna``), and to the Owen
+        explanation, where the prior enters as a group of its own, ``warm_start_prior``, so that the Owen values add up
+        to the scored probability. ``"full"`` changes the trained models and the search table; any other value raises
+        ``ValueError`` when warm start is enabled. SHAP values of the trees are unaffected by the prior (it is an
+        additive offset in log-odds), so ``explain_models`` gives the same feature importance in both scopes.
     backward_enabled : bool, default True
         Whether to run backward variable elimination on the WOE features before the models are trained.
     backward_model : str, default "lgb"
@@ -424,6 +458,7 @@ class CreditModelPipelineConfig:
     warm_start_models: list[str] = field(default_factory=lambda: ["lgb", "xgb"])
     warm_start_on_unsupported: Literal["skip", "raise"] = "skip"
     warm_start_apply_to_optuna: bool = False
+    warm_start_score_scope: Literal["train", "full"] = "train"
 
     backward_enabled: bool = True
     backward_model: str = "lgb"
@@ -958,6 +993,8 @@ class CreditModelPipeline:
                 raise ValueError("warm_start_score_type must be 'probability' or 'log_odds'")
             if cfg.warm_start_on_unsupported not in {"skip", "raise"}:
                 raise ValueError("warm_start_on_unsupported must be 'skip' or 'raise'")
+            if cfg.warm_start_score_scope not in {"train", "full"}:
+                raise ValueError("warm_start_score_scope must be 'train' or 'full'")
         if cfg.lr_elimination_mode is not None:
             if cfg.lr_elimination_mode != "pvalue":
                 raise ValueError(
@@ -1742,12 +1779,17 @@ class CreditModelPipeline:
                         raise NotImplementedError("CatBoost does not support warm-start init_score")
                 gbm = GradientBoostingModel(name, params)
                 init_score = self._get_warm_start_init_score(name, train)
+                extra_fit: dict[str, Any] = {}
+                if init_score is not None and cfg.warm_start_score_scope == "full":
+                    # early stopping measures the combined model (prior plus trees), not the trees alone
+                    extra_fit["eval_init_score"] = self._get_warm_start_init_score(name, val)
                 gbm.fit(
                     x=train[feature_cols],
                     y=train[cfg.target_col].astype(int),
                     valx=val[feature_cols],
                     valy=val[cfg.target_col].astype(int),
                     init_score=init_score,
+                    **extra_fit,
                     **self._gbm_weight_kwargs(train, val),
                 )
                 raw = gbm._model.model if hasattr(gbm, "_model") else gbm
@@ -2139,14 +2181,22 @@ class CreditModelPipeline:
             try:
                 searcher = GradientBoostingModel(name, self._model_params(name))
                 fit_kwargs = dict(cfg.optuna_params.get("fit_kwargs", {}))
+                search_extra: dict[str, Any] = {}
                 if cfg.warm_start_apply_to_optuna and self._warm_start_requested_for(name):
                     fit_kwargs["init_score"] = self._get_warm_start_init_score(name, splits["ins"])
+                    if cfg.warm_start_score_scope == "full":
+                        # candidates are early-stopped and scored as the combined model (prior plus trees)
+                        search_extra["eval_init_scores"] = {
+                            set_name: self._get_warm_start_init_score(name, frame)
+                            for set_name, frame in common["eval_sets"].items()
+                        }
                 results[name] = searcher.param_search(
                     data=splits["ins"],
                     search_space=search_spaces[name],
                     fit_kwargs=fit_kwargs or None,
                     weight_col=cfg.weight_col,
                     eval_weight_col=self._resolve_eval_weight_col(),
+                    **search_extra,
                     **common,
                 )
             except Exception as exc:
@@ -2290,8 +2340,10 @@ class CreditModelPipeline:
             try:
                 n_eval = min(int(cfg.explain_params.get("sample_n", 500)), len(splits["oos"]))
                 n_bg = min(int(cfg.explain_params.get("background_n", 200)), len(splits["ins"]))
-                eval_x = splits["oos"][feature_cols].sample(n_eval, random_state=cfg.random_state)
-                background = splits["ins"][feature_cols].sample(n_bg, random_state=cfg.random_state)
+                eval_rows = splits["oos"].sample(n_eval, random_state=cfg.random_state)
+                background_rows = splits["ins"].sample(n_bg, random_state=cfg.random_state)
+                eval_x = eval_rows[feature_cols]
+                background = background_rows[feature_cols]
                 if getattr(wrapper, "standardizer", None) is not None:
                     # LRMaster(standardize=True) scales the features before its sklearn model; the explainer unwraps that
                     # model, so it has to see the scaled values or it explains a model that was never scored
@@ -2310,18 +2362,43 @@ class CreditModelPipeline:
                         except Exception as plot_exc:
                             item["plot_error"] = repr(plot_exc)
                 if cfg.owen_enabled and name != "xgb":
-                    item["owen"] = self._run_owen(exp, eval_x, feature_cols)
+                    owen_exp, owen_x, owen_cols, owen_groups = exp, eval_x, feature_cols, None
+                    if (
+                        cfg.warm_start_score_scope == "full"
+                        and name in {"lgb", "xgb"}
+                        and self._warm_start_requested_for(name)
+                    ):
+                        # explain the scored probability: the prior is one more input, with a group of its own
+                        prior_col = _WARM_START_PRIOR_COL
+                        owen_x = eval_x.assign(**{prior_col: self._get_warm_start_init_score(name, eval_rows)})
+                        owen_bg = background.assign(**{prior_col: self._get_warm_start_init_score(name, background_rows)})
+                        owen_cols = list(feature_cols) + [prior_col]
+                        owen_exp = ModelExplainer(
+                            model=_WarmStartScoredModel(wrapper, feature_cols, prior_col),
+                            feature_names=owen_cols,
+                            background_data=owen_bg,
+                        )
+                        owen_groups = {prior_col: [prior_col]}
+                    item["owen"] = self._run_owen(owen_exp, owen_x, owen_cols, extra_groups=owen_groups)
                 outputs[name] = item
             except Exception as exc:
                 outputs[name] = {"error": repr(exc)}
         return outputs
 
-    def _run_owen(self, explainer: Any, eval_x: pd.DataFrame, feature_cols: list[str]) -> dict[str, Any]:
+    def _run_owen(
+        self,
+        explainer: Any,
+        eval_x: pd.DataFrame,
+        feature_cols: list[str],
+        extra_groups: dict[str, list[str]] | None = None,
+    ) -> dict[str, Any]:
         cfg = self.config
         try:
             from Modeling_Tool.Explainability.Coalition_Structure import build_coalition_structure
 
             prior_groups = self._filtered_prior_groups(feature_cols)
+            if extra_groups:
+                prior_groups = {**(prior_groups or {}), **extra_groups}
             coalition_structure = build_coalition_structure(
                 eval_x,
                 prior_groups=prior_groups,

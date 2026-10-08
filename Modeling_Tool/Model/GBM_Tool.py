@@ -239,7 +239,7 @@ def set_num_leaves(max_depth=5, wgt=1):
     return int(2 ** max_depth - 2 ** max_depth * wgt)
 
 
-def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sample_weight=None):
+def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sample_weight=None, eval_init_score=None):
     """Quickly train a LightGBM model.
 
     Train a LightGBM model on the training and validation sets, with early stopping support.
@@ -262,10 +262,14 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sam
     wgt : array-like, optional
         Sample weights of the training set.
     init_score : array-like, optional
-        Initial scores (log-odds offset) of the training set. The validation set gets no offset.
+        Initial scores (log-odds offset) of the training set. Unless ``eval_init_score`` is given, the validation set
+        gets no offset.
     eval_sample_weight : array-like, optional
         Sample weights of the validation set. They weight the validation metric that drives early stopping; with
         ``None`` the validation set is unweighted.
+    eval_init_score : array-like, optional
+        Initial scores (log-odds offset) of the validation set. With it, early stopping measures the combined model
+        (offset plus trees) instead of the trees alone. ``None`` keeps the legacy behavior.
 
     Returns
     -------
@@ -299,7 +303,8 @@ def lgb_model(x, y, valx, valy, params_dict, wgt=None, init_score=None, eval_sam
         ],
         sample_weight=wgt,
         eval_sample_weight=[eval_sample_weight] if eval_sample_weight is not None else None,
-        init_score=init_score
+        init_score=init_score,
+        eval_init_score=[eval_init_score] if eval_init_score is not None else None,
     )
     return model
 
@@ -389,7 +394,8 @@ def lgbm_quick_train(train_data, validation_data, x, y, params, wgt_col = None, 
     return model
 
 
-def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_eval_set=None, base_margin=None):
+def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_eval_set=None, base_margin=None,
+              eval_base_margin=None):
     """Train an XGBoost model.
 
     Train an XGBoost model on the training and validation sets, with early stopping support.
@@ -413,7 +419,11 @@ def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_e
         List of sample weights for the validation set. It holds one array-like, because the single evaluation set is
         ``(valx, valy)``.
     base_margin : array-like, optional
-        Base margin (initial prediction offset) of the training set. No margin is passed for the validation set.
+        Base margin (initial prediction offset) of the training set. Unless ``eval_base_margin`` is given, no margin is
+        passed for the validation set.
+    eval_base_margin : array-like, optional
+        Base margin of the validation set, so that early stopping measures the combined model (offset plus trees).
+        ``None`` keeps the legacy behavior.
 
     Returns
     -------
@@ -447,7 +457,8 @@ def xgb_model(x, y, valx, valy, params_dict, sample_weight=None, sample_weight_e
         verbose=False,
         sample_weight=sample_weight,
         sample_weight_eval_set=sample_weight_eval_set,
-        base_margin=base_margin
+        base_margin=base_margin,
+        base_margin_eval_set=[eval_base_margin] if eval_base_margin is not None else None,
     )
     return model
 
@@ -745,7 +756,7 @@ class LightGBMModel:
         self.model = model
         self.feature_names_ = None
 
-    def fit(self, x, y, valx, valy, wgt=None, init_score=None, sample_weight=None, eval_sample_weight=None):
+    def fit(self, x, y, valx, valy, wgt=None, init_score=None, sample_weight=None, eval_sample_weight=None, eval_init_score=None):
         """Train the LightGBM model.
 
         Train the model on the training and validation sets, with early stopping support.
@@ -763,13 +774,16 @@ class LightGBMModel:
         wgt : array-like, optional
             Sample weights of the training set.
         init_score : array-like, optional
-            Initial scores (log-odds offset) of the training set. The validation set gets no offset.
+            Initial scores (log-odds offset) of the training set. Unless ``eval_init_score`` is given, the validation set
+            gets no offset.
         sample_weight : array-like, optional
             Alias of ``wgt`` for the training-set sample weights. It is used only when ``wgt`` is ``None``; ``wgt`` wins
             when both are given.
         eval_sample_weight : array-like, optional
             Sample weights of the validation set. They weight the validation metric that drives early stopping; with
             ``None`` the validation set is unweighted.
+        eval_init_score : array-like, optional
+            Initial scores (log-odds offset) of the validation set, so that early stopping measures the combined model.
 
         Returns
         -------
@@ -787,7 +801,7 @@ class LightGBMModel:
         self.model = lgb_model(
             x=x, y=y, valx=valx, valy=valy,
             params_dict=self.params, wgt=wgt, init_score=init_score,
-            eval_sample_weight=eval_sample_weight
+            eval_sample_weight=eval_sample_weight, eval_init_score=eval_init_score,
         )
         if hasattr(x, 'columns'):
             self.feature_names_ = list(x.columns)
@@ -987,7 +1001,7 @@ class XGBoostModel:
         self.model = model
         self.feature_names_ = None
 
-    def fit(self, x, y, valx, valy, sample_weight=None, sample_weight_eval_set=None, base_margin=None):
+    def fit(self, x, y, valx, valy, sample_weight=None, sample_weight_eval_set=None, base_margin=None, eval_base_margin=None):
         """Train the XGBoost model.
 
         Parameters
@@ -1007,7 +1021,9 @@ class XGBoostModel:
             is ``(valx, valy)``.
         base_margin : array-like, optional
             Base margin (init_score / log-odds offset) of the training set, used for incremental training (warm start).
-            No margin is passed for the validation set.
+            Unless ``eval_base_margin`` is given, no margin is passed for the validation set.
+        eval_base_margin : array-like, optional
+            Base margin of the validation set, so that early stopping measures the combined model.
 
         Returns
         -------
@@ -1025,7 +1041,8 @@ class XGBoostModel:
             params_dict=self.params,
             sample_weight=sample_weight,
             sample_weight_eval_set=sample_weight_eval_set,
-            base_margin=base_margin
+            base_margin=base_margin,
+            eval_base_margin=eval_base_margin,
         )
         if hasattr(x, 'columns'):
             self.feature_names_ = list(x.columns)
@@ -1640,7 +1657,8 @@ class GradientBoostingModel:
         z = np.clip(np.asarray(z, dtype=float), -709, 709)
         return 1.0 / (1.0 + np.exp(-z))
 
-    def fit(self, x, y, valx, valy, init_score=None, sample_weight=None, eval_sample_weight=None, sample_weight_eval_set=None, **kwargs):
+    def fit(self, x, y, valx, valy, init_score=None, sample_weight=None, eval_sample_weight=None, sample_weight_eval_set=None,
+            eval_init_score=None, **kwargs):
         """Train the model (supports incremental learning with a warm start).
 
         When ``init_score`` is passed, it is used as a log-odds offset and training continues on
@@ -1671,6 +1689,11 @@ class GradientBoostingModel:
         sample_weight_eval_set : list, optional
             XGBoost only: list of sample weights for the validation set (one array-like, because there is one
             validation set). It takes precedence over ``eval_sample_weight``. Silently ignored by 'lgb' and 'cat'.
+        eval_init_score : array-like, optional
+            Log-odds offset of the validation set (LightGBM ``eval_init_score``, XGBoost ``base_margin_eval_set``). With
+            it, early stopping measures the combined model (offset plus trees), which is what ``init_score`` makes the
+            training fit. ``None`` (default) keeps the legacy behavior in which the validation set gets no offset.
+            CatBoost raises ``NotImplementedError``.
         **kwargs
             Remaining keyword arguments are passed through to the ``fit`` of the underlying wrapper
             (``LightGBMModel`` / ``XGBoostModel`` / ``CatBoostModel``). In practice only ``wgt`` (for 'lgb', an
@@ -1689,13 +1712,13 @@ class GradientBoostingModel:
 
         Notes
         -----
-        As in the existing production workflow, the offset is applied to the training set only.
+        By default, as in the existing production workflow, the offset is applied to the training set only.
         The validation set receives no offset, so the early-stopping eval metric is evaluated
-        in the space "without the offset". For strict consistency, pass lgb's ``eval_init_score``
-        / xgb's ``base_margin_eval_set`` through later.
+        in the space "without the offset". Pass ``eval_init_score`` (the offset of the validation rows) to
+        evaluate the combined model instead.
         """
         if self.model_type == 'cat':
-            if init_score is not None:
+            if init_score is not None or eval_init_score is not None:
                 raise NotImplementedError(
                     "CatBoost does not support init_score in GradientBoostingModel.fit"
                 )
@@ -1706,6 +1729,7 @@ class GradientBoostingModel:
                 init_score=init_score,
                 sample_weight=sample_weight,
                 eval_sample_weight=eval_sample_weight,
+                eval_init_score=eval_init_score,
                 **kwargs,
             )
         else:
@@ -1714,6 +1738,7 @@ class GradientBoostingModel:
             self._model.fit(
                 x, y, valx, valy,
                 base_margin=init_score,
+                eval_base_margin=eval_init_score,
                 sample_weight=sample_weight,
                 sample_weight_eval_set=sample_weight_eval_set,
                 **kwargs,
