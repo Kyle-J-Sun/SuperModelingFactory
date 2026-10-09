@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +10,7 @@ import pandas as pd
 import warnings
 
 from ._common import (
+    OutputManifest,
     add_dataset_with_optional_weight,
     all_missing_mask,
     apply_woe_fit_query,
@@ -34,6 +36,7 @@ from ._common import (
     write_basic_excel,
 )
 
+_logger = logging.getLogger(__name__)
 
 _WARM_START_PRIOR_COL = "warm_start_prior"
 
@@ -71,8 +74,13 @@ class CreditModelPipelineConfig:
         ``explain``, ``artifacts``, ``models`` (unless ``model_output_dir`` is set) and the Excel report. Directories are
         created as needed when ``write_outputs``, ``write_excel`` or ``save_models`` is on. A run overwrites the files it
         writes and leaves the others alone, so a second run into the same directory with fewer stages keeps the files of
-        the stages that no longer run (for example ``backward_summary.csv`` or ``models/model_xgb.pkl``); use a fresh
-        directory per run, or clear it first.
+        the stages that no longer run (for example ``backward_summary.csv`` or ``models/model_xgb.pkl``) unless
+        ``clean_output_dir`` is on. Every run that writes files lists them in ``output_dir/.smf_manifest_credit_model.json``.
+    clean_output_dir : bool, default False
+        After a successful run, remove the files that the previous manifest of this pipeline lists and this run did not
+        write again (the outputs of stages that no longer run), and the directories they leave empty. Only files of the
+        manifest are removed: files written by hand, by another pipeline, by a version without the manifest, or under
+        ``model_output_dir`` outside ``output_dir`` stay.
     target_col : str, default "badflag"
         Binary target column (1 = bad). It must be a column of the input data.
     feature_cols : list of str or None, default None
@@ -327,9 +335,10 @@ class CreditModelPipelineConfig:
     perf_pct_bins : int, default 10
         Number of percentile bins of the performance evaluation.
     perf_min_bin_prop : float, default 0.03
-        Target minimum share of a performance evaluation bin; it lowers the number of bins when ``perf_pct_bins`` bins
-        would be smaller. It is a target, not a guarantee: with a large value (0.25 and above in a test) the bins can still
-        be smaller than asked, and the weighted evaluation (``weight_col`` or ``eval_weight_col``) ignores it.
+        Minimum share of a bin in the Gains tables of the performance evaluation (``IV``, ``LIFT``, ``KS_IN_GAINS``,
+        ``N_BINS``, ... of ``perf_results``), weighted or not: they use ``perf_pct_bins`` bins capped at
+        ``1 / perf_min_bin_prop``, so each bin holds about that share or more (ties in the scores can move a few rows).
+        The Top/Btm percentile bands keep ``perf_pct_bins``.
     eval_target_cols : list of str or None, default None
         Extra label columns evaluated against the same model scores in addition to ``target_col`` (duplicates removed;
         the results are stacked with a ``tgt_name`` column). They must exist in the input data and in every
@@ -373,6 +382,7 @@ class CreditModelPipelineConfig:
     """
 
     output_dir: str = "output"
+    clean_output_dir: bool = False
     target_col: str = "badflag"
     feature_cols: list[str] | None = None
     split_col: str | None = None
@@ -725,6 +735,26 @@ class CreditModelPipeline:
         The failures that the feature selection, the backward elimination, each Optuna search and the explanations catch
         are not raised; they are recorded in the result (see the class notes).
         """
+        cfg = self.config
+        manifest = None
+        if not getattr(self, "_nested_run", False) and (cfg.write_outputs or cfg.write_excel or cfg.save_models):
+            manifest = OutputManifest.begin(cfg.output_dir, "credit_model", clean=cfg.clean_output_dir)
+        try:
+            result = self._run(data)
+        except BaseException:
+            if manifest is not None:
+                try:
+                    manifest.finish(clean=False)  # list what the failed run wrote; remove nothing
+                except Exception:
+                    pass
+            raise
+        if manifest is not None:
+            removed = manifest.finish()
+            if removed:
+                _logger.info("CreditModelPipeline: clean_output_dir removed %d stale file(s): %s", len(removed), removed)
+        return result
+
+    def _run(self, data: pd.DataFrame) -> CreditModelPipelineResult:
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
         self._validate_input(data, feature_cols)

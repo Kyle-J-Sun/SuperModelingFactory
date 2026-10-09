@@ -16,6 +16,7 @@ _logger = logging.getLogger(__name__)
 from Modeling_Tool._utils.frames import concat_non_empty
 
 from ._common import (
+    OutputManifest,
     apply_woe_fit_query,
     as_list,
     check_woe_fit_query_rows,
@@ -44,7 +45,14 @@ class FeatureValidationPipelineConfig:
     ----------
     output_dir : str, default 'output/feature_validation'
         Output directory. CSV tables and the Excel report are written directly into it, WOE plots to
-        ``figs/woe/<target>`` and batch results to ``<batch_output_subdir>/batch_NNN``.
+        ``figs/woe/<target>`` and batch results to ``<batch_output_subdir>/batch_NNN``. A run overwrites the files it
+        writes and leaves the others alone; every run that writes files lists them in
+        ``output_dir/.smf_manifest_feature_validation.json``.
+    clean_output_dir : bool, default False
+        After a successful run, remove the files that the previous manifest of this pipeline lists and this run did not
+        write again (tables of stages that no longer run, batch folders of a former batch layout), and the directories
+        they leave empty. Only files of the manifest are removed: files written by hand, by another pipeline or by a
+        version without the manifest stay.
     id_col : str, default 'flow_id'
         Unique row identifier column. It must exist in the data (``KeyError``) and is never treated as a feature.
     apply_time_col : str, default 'apply_time'
@@ -257,6 +265,7 @@ class FeatureValidationPipelineConfig:
     """
 
     output_dir: str = "output/feature_validation"
+    clean_output_dir: bool = False
     id_col: str = "flow_id"
     apply_time_col: str = "apply_time"
     target_cols: list[str] | None = None
@@ -545,6 +554,28 @@ class FeatureValidationPipeline:
         In CSV batch mode a failing batch is recorded in ``batch_metadata`` (``status='error'``) and the run continues
         with the remaining batches.
         """
+        cfg = self.config
+        manifest = None
+        if not getattr(self, "_nested_run", False) and (cfg.write_outputs or cfg.write_excel):
+            manifest = OutputManifest.begin(cfg.output_dir, "feature_validation", clean=cfg.clean_output_dir)
+        try:
+            result = self._run(data)
+        except BaseException:
+            if manifest is not None:
+                try:
+                    manifest.finish(clean=False)  # list what the failed run wrote; remove nothing
+                except Exception:
+                    pass
+            raise
+        if manifest is not None:
+            removed = manifest.finish()
+            if removed:
+                _logger.info(
+                    "FeatureValidationPipeline: clean_output_dir removed %d stale file(s): %s", len(removed), removed
+                )
+        return result
+
+    def _run(self, data: pd.DataFrame | str | Path) -> FeatureValidationPipelineResult:
         input_type = self._resolve_input_type(data)
         if self.config.enable_batch and input_type != "csv":
             raise ValueError("enable_batch=True currently requires CSV input.")
@@ -843,7 +874,9 @@ class FeatureValidationPipeline:
                     warnings.filterwarnings(
                         "ignore", message=r".*keeping all of them \(on_empty_stage='keep_all_warn'\).*"
                     )
-                    batch_result = FeatureValidationPipeline(batch_cfg).run(batch_df)
+                    batch_pipeline = FeatureValidationPipeline(batch_cfg)
+                    batch_pipeline._nested_run = True
+                    batch_result = batch_pipeline.run(batch_df)
                 batch_results.append(self._slim_batch_result(batch_result))
                 row["n_rows"] = len(batch_df)
             except Exception as exc:
@@ -938,7 +971,9 @@ class FeatureValidationPipeline:
         )
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=r".*missing or unknown label in '_smf_batch_split'.*")
-            return FeatureValidationPipeline(selection_cfg).run(data)
+            selection_pipeline = FeatureValidationPipeline(selection_cfg)
+            selection_pipeline._nested_run = True
+            return selection_pipeline.run(data)
 
     @staticmethod
     def _slim_batch_result(result: FeatureValidationPipelineResult) -> FeatureValidationPipelineResult:

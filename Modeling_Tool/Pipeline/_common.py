@@ -835,3 +835,94 @@ def hash_id_values(values: Iterable[Any]) -> str:
         digest.update(value.encode("utf-8"))
         digest.update(b"\x00")
     return digest.hexdigest()
+
+
+_MANIFEST_PREFIX = ".smf_manifest_"
+
+
+class OutputManifest:
+    """Files that a pipeline run wrote under its ``output_dir``, kept in the hidden file ``.smf_manifest_<pipeline>.json``.
+
+    ``begin`` takes a snapshot of the directory before the run, ``finish`` lists the files that the run created or
+    rewrote. With ``clean=True`` ``finish`` also removes the files that the previous manifest of the same pipeline lists
+    and this run did not write again (outputs of stages that no longer run), and the directories they leave empty. Only
+    files listed in a manifest are ever removed, never a path outside ``output_dir``; files written by another pipeline
+    or by hand are left alone.
+    """
+
+    def __init__(self, output_dir: str | Path, pipeline: str, clean: bool = False):
+        self.root = Path(output_dir)
+        self.path = self.root / f"{_MANIFEST_PREFIX}{pipeline}.json"
+        self.pipeline = pipeline
+        self.clean = bool(clean)
+        self._before: dict[str, tuple[int, int]] = {}
+
+    @classmethod
+    def begin(cls, output_dir: str | Path, pipeline: str, clean: bool = False) -> "OutputManifest":
+        manifest = cls(output_dir, pipeline, clean)
+        manifest._before = manifest._scan()
+        return manifest
+
+    def _scan(self) -> dict[str, tuple[int, int]]:
+        if not self.root.is_dir():
+            return {}
+        found: dict[str, tuple[int, int]] = {}
+        for path in self.root.rglob("*"):
+            if path.is_file() and not path.name.startswith(_MANIFEST_PREFIX):
+                stat = path.stat()
+                found[path.relative_to(self.root).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+        return found
+
+    def _previous(self) -> list[str]:
+        if not self.path.is_file():
+            return []
+        try:
+            import json
+
+            files = json.loads(self.path.read_text(encoding="utf-8")).get("files", [])
+        except (OSError, ValueError, AttributeError):
+            return []
+        return [str(name) for name in files if isinstance(name, str)]
+
+    def _inside(self, relative: str) -> Path | None:
+        candidate = (self.root / relative).resolve()
+        root = self.root.resolve()
+        return candidate if candidate != root and root in candidate.parents else None
+
+    def finish(self, clean: bool | None = None) -> list[str]:
+        """Write the manifest of this run and, when cleaning, remove the stale files; return the removed paths."""
+        import json
+
+        clean = self.clean if clean is None else bool(clean)
+        after = self._scan()
+        written = sorted(name for name, stamp in after.items() if self._before.get(name) != stamp)
+        previous = self._previous()
+        removed: list[str] = []
+        kept_previous: list[str] = []
+        for name in previous:
+            if name in written:
+                continue
+            target = self._inside(name)
+            if target is None or not target.is_file():
+                continue
+            if clean:
+                try:
+                    target.unlink()
+                except OSError as exc:
+                    # a locked or read-only file stays listed; the run itself succeeded
+                    warnings.warn(f"clean_output_dir could not remove {target}: {exc}", RuntimeWarning, stacklevel=3)
+                    kept_previous.append(name)
+                    continue
+                removed.append(name)
+                parent = target.parent
+                root = self.root.resolve()
+                while parent != root and root in parent.parents and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            else:
+                kept_previous.append(name)
+        files = sorted(set(written) | set(kept_previous))
+        if files or self.path.is_file():
+            self.root.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({"pipeline": self.pipeline, "files": files}, indent=1), encoding="utf-8")
+        return removed

@@ -237,6 +237,7 @@ _FIELD_LABELS = {
     "weight_col": "Sample weight column",
     "random_state": "Random seed",
     "write_outputs": "Write CSV/files",
+    "clean_output_dir": "Remove stale outputs",
     "write_excel": "Write Excel report",
     "plot_outputs": "Write charts",
     "save_models": "Save models",
@@ -449,6 +450,7 @@ _FIELD_DESCRIPTIONS = {
     "oot_col": "OOT flag column; used to carve out OOT when neither split_col nor sample_col is set.",
     "weight_col": "Sample weight column name. None means equal weights.",
     "write_outputs": "Whether to write CSV, chart, model, and other files to disk.",
+    "clean_output_dir": "After a successful run, remove the files that an earlier run of this pipeline wrote into output_dir and this run did not write again (listed in the hidden .smf_manifest_<pipeline>.json); other files are never touched.",
     "write_excel": "Whether to generate the ExcelMaster/Excel report.",
     "plot_outputs": "Whether to generate the Pipeline's automatic analysis charts; still governed by the write_outputs master switch and does not affect CSV or Excel output.",
     "write_ri_datasets": "Whether to write the augmented dataset of each RI method; can be very large for wide tables.",
@@ -775,7 +777,7 @@ def _humanize(name: str) -> str:
 
 
 def _infer_group(name: str) -> str:
-    if name in {"output_dir", "write_outputs", "write_excel", "plot_outputs", "save_models", "model_output_dir", "output_path", "write_csv"}:
+    if name in {"output_dir", "clean_output_dir", "write_outputs", "write_excel", "plot_outputs", "save_models", "model_output_dir", "output_path", "write_csv"}:
         return OUTPUT_GROUP
     if name in {"split_col", "sample_col", "oot_col", "split_config", "oot_frac", "oot_time_dim", "oot_windows", "ins_oos_ratios"}:
         return SPLIT_GROUP

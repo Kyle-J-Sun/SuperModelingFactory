@@ -2225,7 +2225,10 @@ class PerformanceEvaluator:
     precision : int, default 5
         Precision of the bin boundary values.
     min_bin_prop : float, default 0.05
-        Minimum proportion of samples per bin.
+        Minimum share of a bin in the Gains tables of ``evaluate`` (summary columns ``IV``, ``LIFT``, ``KS_IN_GAINS``,
+        ``N_BINS``, ...), weighted or not: they use ``pct_bins`` bins capped at ``1 / min_bin_prop``, so each bin holds
+        about that share of the rows (of the weight) or more; ties in the scores can move a few rows. The percentile
+        bands (``Top``/``Btm``) keep ``pct_bins``. 0 sets no cap.
     include_missing : bool, default False
         Whether to include missing values.
     equal_freq : bool, default True
@@ -2302,7 +2305,10 @@ class PerformanceEvaluator:
         precision : int, default 5
             Precision of the bin boundary values.
         min_bin_prop : float, default 0.05
-            Minimum proportion of samples per bin.
+            Minimum share of a bin in the Gains tables of ``evaluate`` (summary columns ``IV``, ``LIFT``, ``KS_IN_GAINS``,
+            ``N_BINS``, ...), weighted or not: they use ``pct_bins`` bins capped at ``1 / min_bin_prop``, so each bin holds
+            about that share of the rows (of the weight) or more; ties in the scores can move a few rows. The percentile
+            bands (``Top``/``Btm``) keep ``pct_bins``. 0 sets no cap.
         include_missing : bool, default False
             Whether to include missing values.
         equal_freq : bool, default True
@@ -2355,6 +2361,15 @@ class PerformanceEvaluator:
         self.datasets = {}
         self.dataset_weight_cols = {}
         self.evaluate_status = None
+
+    def _gains_nbins(self):
+        """Bins of the Gains tables: ``pct_bins`` capped at ``1 / min_bin_prop`` (without the floor of 5 bins that the
+        generic binning applies), the same on the weighted and the unweighted path."""
+        nbins = int(self.pct_bins)
+        prop = float(self.min_bin_prop or 0.0)
+        if prop > 0.0:
+            nbins = min(nbins, int(np.floor(1.0 / prop + 1e-9)))
+        return max(1, nbins)
 
     def _governed_eval_kwargs(self):
         """Kwargs to thread spec_values/ascending into underlying eval calls.
@@ -2530,7 +2545,7 @@ class PerformanceEvaluator:
                         self.tgt_name,
                         scr_name,
                         weight_col=wc,
-                        nbins=self.pct_bins,
+                        nbins=self._gains_nbins(),
                         ascending=bool(self.ascending) if self.ascending is not None else False,
                         spec_values=self.spec_values or None,
                     )
@@ -2672,7 +2687,7 @@ class PerformanceEvaluator:
                 data = benchmark_df,
                 score = benchmark_score,
                 dep = self.tgt_name,
-                nbins = self.pct_bins,
+                nbins = self._gains_nbins(),
                 precision = self.precision,
                 min_bin_prop = self.min_bin_prop,
                 include_missing = self.include_missing,
@@ -2768,7 +2783,7 @@ class PerformanceEvaluator:
                     gains_res = get_gains_table(
                         data = data,
                         dep = self.tgt_name,
-                        nbins = benchmark_bin_edges if benchmark_bin_edges is not None else self.pct_bins,
+                        nbins = benchmark_bin_edges if benchmark_bin_edges is not None else self._gains_nbins(),
                         precision = self.precision,
                         min_bin_prop = self.min_bin_prop,
                         include_missing = self.include_missing,
