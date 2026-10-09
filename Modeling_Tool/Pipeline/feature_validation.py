@@ -157,7 +157,7 @@ class FeatureValidationPipelineConfig:
         ``WOE_Master`` and every other key is passed to ``WOE_Master.fit``. ``missing_ref_value`` is also read as the
         missing-value sentinel of the missing-rate gate and the selection stage, and the whole dict is forwarded to the
         selection stage.
-    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'normal_bin'}
+    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'neutral'}
         Used with ``woe_engine='monotone'``: constructor keys of ``MonotoneWOEBinner`` and the ``fit`` keys
         ``chi2_binning``, ``chi2_p``, ``chi2_init_size`` and ``n_jobs``. Keys outside the built-in allowlist are dropped
         silently. Without a ``special_values`` key the legacy sentinel ``-999999`` is declared a special value when a
@@ -318,7 +318,7 @@ class FeatureValidationPipelineConfig:
         }
     )
     # unseen_special_policy (monotone only): declared special values absent from
-    # the fit sample — "normal_bin" (legacy) or "neutral" placeholder bins.
+    # the fit sample — "neutral" placeholder bins (default since 0.9.0) or "normal_bin" (legacy).
     monotone_woe_params: dict[str, Any] = field(
         default_factory=lambda: {
             "n_init_bins": 20,
@@ -328,7 +328,7 @@ class FeatureValidationPipelineConfig:
             "sv_small_policy": "keep",
             "sv_woe_smoothing": "none",
             "sv_smoothing_alpha": 0.0,
-            "unseen_special_policy": "normal_bin",
+            "unseen_special_policy": "neutral",
         }
     )
     categorical_features: list[str] | None = None

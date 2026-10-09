@@ -331,21 +331,22 @@ class MonotoneWOEBinner:
         Smoothing strength alpha (pseudo-count); 0.0 is numerically equivalent to the old WOE. It must be >= 0.
         Approach 1 takes precedence: a low-share bin handled by the fallback is **not** smoothed
         again; smoothing only applies to SV bins that meet the share threshold (or policy='keep').
-    unseen_special_policy : {'normal_bin', 'neutral'}, default 'normal_bin'
+    unseen_special_policy : {'neutral', 'normal_bin'}, default 'neutral'
         How to handle numeric special values that are declared but have no rows in the fit sample.
-        'normal_bin' (default, legacy behavior): no bin is created and apply_woe bins them as
-        ordinary numbers (e.g. -1 falls into the lowest bin); by-group charts and group IV
-        use the same convention;
-        'neutral': at fit time a placeholder special-value bin is appended (n=0, woe=missing_woe,
-        iv=0, sv_policy_applied='unseen_at_fit'); scoring / screening / charts
-        all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
+        'neutral' (default since 0.9.0): at fit time a placeholder special-value bin is appended (n=0, woe=missing_woe,
+        iv=0, sv_policy_applied='unseen_at_fit'); scoring / screening / charts all treat these values as special
+        values, and group IV excludes them.
+        'normal_bin' (the legacy behavior, the default up to 0.8.2): no bin is created and apply_woe bins them as
+        ordinary numbers (e.g. -1 falls into the lowest bin); by-group charts and group IV use the same convention.
+        A pickled binner keeps the setting it was created with ('normal_bin' for every binner from 0.8.2 or earlier). Not
+        applicable to NaN or categorical features.
         Under both policies fit and apply_woe record such values (fit warns under normal_bin);
         see _unseen_special_at_fit / _unseen_special_stats.
     sv_total_basis : {'all', 'ordinary'}, default 'all'
         The bad and good totals that the WOE of a bin is measured against.
         'all' (default): every bin is measured against the totals of all rows (the textbook scorecard definition), so
         the WOE of all bins is comparable, the shares add up to 1 and IV is the sum over one base.
-        'ordinary' (the legacy behavior, and the default up to 0.8.2): an ordinary bin (or category) is measured against
+        'ordinary' (the behavior of 0.8.2 and earlier): an ordinary bin (or category) is measured against
         the totals of the ordinary rows, a special-value or [Missing] bin against the totals of all rows, so bins of
         equal risk get different WOE when special values or missing values exist, and the shares of the bins do not add
         up to 1. Pass it to reproduce scorecards built before the change.
@@ -405,7 +406,7 @@ class MonotoneWOEBinner:
         sv_small_policy: str = "keep",
         sv_woe_smoothing: str = "none",
         sv_smoothing_alpha: float = 0.0,
-        unseen_special_policy: str = "normal_bin",
+        unseen_special_policy: str = "neutral",
         sv_total_basis: str = "all",
     ):
         self.feature_cols      = list(feature_cols)

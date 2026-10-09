@@ -4,7 +4,7 @@ The modeling engine of [SuperModelingFactory](../README.md): binning and WOE enc
 evaluation, explainability, sample management, deployment consistency checks, and one-click pipelines for credit-risk
 scorecard development.
 
-- **Version**: 0.8.2
+- **Version**: 0.9.0
 - **Author**: Jingkai Sun
 
 Full documentation: <https://kyle-j-sun.github.io/SuperModelingFactory_doc/>
@@ -13,7 +13,7 @@ Full documentation: <https://kyle-j-sun.github.io/SuperModelingFactory_doc/>
 
 ```python
 import Modeling_Tool as smf
-print(smf.__version__)          # 0.8.2
+print(smf.__version__)          # 0.9.0
 print(len(smf.__all__))         # curated top-level API
 ```
 

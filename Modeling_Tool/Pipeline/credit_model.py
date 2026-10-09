@@ -175,7 +175,7 @@ class CreditModelPipelineConfig:
         constructor, all other keys to ``WOE_Master.fit``. The default dict holds ``nbins``, ``equal_freq`` and
         ``min_bin_prop`` plus the four special-value bin settings ``sv_*``, which reproduce the behavior before 0.8.0. A
         dict you pass replaces the default; omitted keys take the ``fit`` defaults.
-    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'normal_bin'}
+    monotone_woe_params : dict, default {'n_init_bins': 20, 'min_bin_size': 0.03, 'min_n_bins': 2, 'sv_min_bin_size': 0.0, 'sv_small_policy': 'keep', 'sv_woe_smoothing': 'none', 'sv_smoothing_alpha': 0.0, 'unseen_special_policy': 'neutral'}
         Parameters of the ``MonotoneWOEBinner`` engine: its constructor keys, and the fit-only keys ``chi2_binning``
         (default False), ``chi2_p``, ``chi2_init_size`` and ``n_jobs``, which are passed to ``fit``. Without a
         ``special_values`` key, the sentinel -999999 is declared only when it occurs in the fit sample. A dict you pass
@@ -248,7 +248,7 @@ class CreditModelPipelineConfig:
         stopping (so the models stop when the combined model stops improving), to the scoring of the Optuna candidates
         (with ``warm_start_apply_to_optuna``), to the final evaluation and to the Owen explanation, where the prior enters
         as a group of its own, ``warm_start_prior``, so that the Owen values add up to the scored probability.
-        ``"train"`` (the legacy behavior, and the default up to 0.8.2) adds it to the training and to the final
+        ``"train"`` (the behavior of 0.8.2 and earlier) adds it to the training and to the final
         evaluation only: early stopping, the ``AUC_*`` of the Optuna search table and the Owen explanations then see the
         increment alone; pass it to reproduce models trained before the change. Any other value raises ``ValueError``
         when warm start is enabled. SHAP values of the trees are unaffected by the prior (it is an
@@ -429,7 +429,7 @@ class CreditModelPipelineConfig:
         }
     )
     # unseen_special_policy (monotone only): declared special values absent from
-    # the fit sample — "normal_bin" (legacy) or "neutral" placeholder bins.
+    # the fit sample — "neutral" placeholder bins (default since 0.9.0) or "normal_bin" (legacy).
     # Without an explicit "special_values" key the monotone self-fit declares the
     # legacy -999999 sentinel only when the WOE fit sample contains it.
     monotone_woe_params: dict[str, Any] = field(
@@ -441,7 +441,7 @@ class CreditModelPipelineConfig:
             "sv_small_policy": "keep",
             "sv_woe_smoothing": "none",
             "sv_smoothing_alpha": 0.0,
-            "unseen_special_policy": "normal_bin",
+            "unseen_special_policy": "neutral",
         }
     )
 
