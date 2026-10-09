@@ -75,8 +75,11 @@ class RejectInferencePipelineConfig:
         Approval flag column: 1 marks approved rows and 0 rejected rows. Rows with any other value (including missing)
         belong to neither group.
     target_col : str, default "badflag"
-        Performance label (1 = bad). Approved rows need it; the labels of rejected rows are inferred, so any existing
-        values are overwritten in the RI datasets.
+        Performance label (1 = bad). The labels of rejected rows are inferred, so any existing values are overwritten in
+        the RI datasets. Approved rows whose target is missing (not yet performed) stay in the RI datasets but are left
+        out of the pre-score, of the reference statistics, of model training and of the validation and OOT samples, and
+        so are rejected rows that get no inferred label (``hard_cutoff`` with a missing score); ``ri_summary`` and
+        ``ri_model_perf`` count them and a ``UserWarning`` names them.
     score_col : str, default "prescore_prob"
         Pre-score column holding the probability of bad (see ``ri_score_direction``). It is created, or overwritten with
         a ``UserWarning``, when the pre-score is trained.
@@ -135,8 +138,9 @@ class RejectInferencePipelineConfig:
         Whether to also train an approved-only model named ``no_ri_benchmark`` that takes part in the ``ri_model_perf``
         ranking; it is not added to ``ri_datasets``.
     ri_validation_frac : float, default 0.2
-        Share of the approved training pool sampled (stratified by target) as validation data unless approved OOS rows are
-        available. Must lie in (0, 1), and ``oot_frac + ri_validation_frac`` must be below 1.
+        Share of the approved training pool with an observed target sampled (stratified by target) as validation data
+        unless approved OOS rows with an observed target are available. Must lie in (0, 1), and
+        ``oot_frac + ri_validation_frac`` must be below 1.
     save_models : bool, default False
         Whether to pickle the models with ``save_model`` into ``model_output_dir``: ``prescore_model.pkl`` (only if the
         pre-score was trained) and ``ri_model_<method>.pkl`` for every RI model and the benchmark.
@@ -157,8 +161,8 @@ class RejectInferencePipelineConfig:
         feature columns; rows with a missing target are dropped with a ``UserWarning`` and ``ValueError`` is raised if
         none remains.
     oot_frac : float, default 0.2
-        Share of the approved rows (at least one row) randomly held out as OOT when neither ``oot_data`` nor OOT rows from
-        ``split_col`` exist. Must lie in [0, 1).
+        Share of the approved rows with an observed target (at least one row) randomly held out as OOT when neither
+        ``oot_data`` nor OOT rows from ``split_col`` exist. Must lie in [0, 1).
     perf_pct_bins : int, default 10
         Number of percentile bins of ``PerformanceEvaluator`` for the model reports.
     min_bin_prop : float, default 0.03
@@ -254,11 +258,14 @@ class RejectInferencePipelineResult:
         labels, plus an ``ri_method`` column and, for ``fuzzy_augment``, a ``_weight`` column (each rejected row appears
         twice, as bad and as good).
     ri_summary : pandas.DataFrame
-        One row per method: ``ri_method``, ``N_total``, ``N_approved``, ``N_rejected``, ``bad_rate_appr``,
-        ``bad_rate_rej``, ``bad_rate_total`` (weighted when ``_weight`` exists), ``has_weight_col``, ``prescore_AUC``
-        (oriented so that high means high risk), ``prescore_AUC_raw`` and ``prescore_score_direction``.
+        One row per method: ``ri_method``, ``N_total``, ``N_approved``, ``N_rejected``, ``N_approved_unlabelled`` and
+        ``N_rejected_unlabelled`` (rows whose target is missing), ``bad_rate_appr``, ``bad_rate_rej``,
+        ``bad_rate_total`` (over the labelled rows, weighted when ``_weight`` exists), ``has_weight_col``,
+        ``prescore_AUC`` (on the approved rows with an observed target, oriented so that high means high risk),
+        ``prescore_AUC_raw`` and ``prescore_score_direction``.
     ri_model_perf : pandas.DataFrame or None, default None
-        One row per trained model (each RI method and ``no_ri_benchmark``) with ``train_N``, ``oot_N``,
+        One row per trained model (each RI method and ``no_ri_benchmark``) with ``train_N`` (rows trained on),
+        ``train_unlabelled_n`` (rows of the training pool left out because their target is missing), ``oot_N``,
         ``weighted_train`` and the train, validation and OOT ``AUC``, ``KS`` and ``Gini``, sorted by ``oot_AUC``
         descending. None when ``train_ri_models`` is False.
     best_method : str or None, default None
@@ -464,6 +471,15 @@ class RejectInferencePipeline:
         from Modeling_Tool import GradientBoostingModel, LRMaster
 
         cfg = self.config
+        # The cast below would turn a missing target into 0 (good), so callers
+        # must leave unlabelled rows out before fitting.
+        for frame_name, frame in (("training", train), ("validation", val)):
+            n_missing = int(pd.to_numeric(frame[cfg.target_col], errors="coerce").isna().sum())
+            if n_missing:
+                raise ValueError(
+                    f"{frame_name} frame has {n_missing} row(s) with a missing {cfg.target_col!r}; "
+                    f"unlabelled rows must be left out before fitting"
+                )
         train_fit = train.copy()
         val_fit = val.copy()
         train_fit[cfg.target_col] = (pd.to_numeric(train_fit[cfg.target_col]) > 0.5).astype(int)
@@ -589,13 +605,14 @@ class RejectInferencePipeline:
         ValueError
             If the configuration is inconsistent (unknown model type, method or direction, invalid fractions, conflicting
             ``ri_approved_*`` settings, invalid ``split_col`` labels), if no approved row has an observed target for the
-            pre-score, or if a training, validation, OOT or reference sample is empty.
+            pre-score or (with ``train_ri_models``) for the models, or if a training, validation, OOT or reference sample
+            is empty.
 
         Notes
         -----
         Warnings are issued when ``train_prescore=True`` overwrites an existing ``score_col``, when rows with a missing
-        target are dropped from an external OOT, and when non-finite values are imputed or predicted. With
-        ``save_models=True`` the models are pickled even if ``write_outputs`` is False.
+        target are dropped from an external OOT or left out of model training, and when non-finite values are imputed
+        or predicted. With ``save_models=True`` the models are pickled even if ``write_outputs`` is False.
         """
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
@@ -1090,9 +1107,11 @@ class RejectInferencePipeline:
         for method, df in datasets.items():
             appr = df[cfg.approved_col] == 1
             rej = df[cfg.approved_col] == 0
+            unlabelled = pd.to_numeric(df[cfg.target_col], errors="coerce").isna()
             try:
-                approved_target = df.loc[appr, cfg.target_col]
-                approved_score = df.loc[appr, cfg.score_col]
+                # AUC of the pre-score on the approved rows with an observed target
+                approved_target = df.loc[appr & ~unlabelled, cfg.target_col]
+                approved_score = df.loc[appr & ~unlabelled, cfg.score_col]
                 raw_auc = roc_auc_score(approved_target, approved_score)
                 risk_score = approved_score if cfg.ri_score_direction == "high_bad" else -approved_score
                 direction_adjusted_auc = roc_auc_score(approved_target, risk_score)
@@ -1105,6 +1124,8 @@ class RejectInferencePipeline:
                     "N_total": len(df),
                     "N_approved": int(appr.sum()),
                     "N_rejected": int(rej.sum()),
+                    "N_approved_unlabelled": int((appr & unlabelled).sum()),
+                    "N_rejected_unlabelled": int((rej & unlabelled).sum()),
                     "bad_rate_appr": _target_mean(df.loc[appr]),
                     "bad_rate_rej": _target_mean(df.loc[rej]),
                     "bad_rate_total": _target_mean(df),
@@ -1131,6 +1152,13 @@ class RejectInferencePipeline:
         rng = np.random.default_rng(cfg.random_state)
         exclude_train_ids: set[Any] = set()
         exclude_train_split = None
+        # Only approved rows with an observed target can be trained on or evaluated
+        labelled_approved = approved[approved[cfg.target_col].notna()]
+        if labelled_approved.empty:
+            raise ValueError(
+                f"No approved row has an observed {cfg.target_col!r}, so the RI models cannot be "
+                f"validated or evaluated; set train_ri_models=False to only build the RI datasets"
+            )
         if cfg.oot_data is not None:
             oot, oot_summary = self._prepare_external_oot_data(feature_cols)
             val_ids = self._sample_validation_ids(approved, rng, exclude_ids=set())
@@ -1142,16 +1170,16 @@ class RejectInferencePipeline:
                 feature_cols=feature_cols,
                 source="split_col",
             )
-            if "_smf_ri_split" in approved.columns and (approved["_smf_ri_split"] == "oos").any():
-                val = approved[approved["_smf_ri_split"] == "oos"].copy()
+            if "_smf_ri_split" in approved.columns and (labelled_approved["_smf_ri_split"] == "oos").any():
+                val = labelled_approved[labelled_approved["_smf_ri_split"] == "oos"].copy()
                 exclude_train_split = "oos"
             else:
                 val_ids = self._sample_validation_ids(approved, rng, exclude_ids=set())
                 exclude_train_ids.update(val_ids)
                 val = approved[approved["_smf_ri_row_id"].isin(val_ids)].copy()
         else:
-            n_oot = max(1, int(len(approved) * cfg.oot_frac))
-            oot_ids = set(rng.choice(approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
+            n_oot = max(1, int(len(labelled_approved) * cfg.oot_frac))
+            oot_ids = set(rng.choice(labelled_approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
             oot = approved[approved["_smf_ri_row_id"].isin(oot_ids)].copy()
             exclude_train_ids.update(oot_ids)
             val_ids = self._sample_validation_ids(approved, rng, exclude_ids=oot_ids)
@@ -1176,12 +1204,21 @@ class RejectInferencePipeline:
             training_datasets["no_ri_benchmark"] = benchmark
         training_datasets.update(ri_datasets)
 
+        unlabelled_by_method: dict[str, tuple[int, int]] = {}
         for method, df_ri in training_datasets.items():
             train = df_ri.copy()
             if "_smf_ri_row_id" in train.columns and exclude_train_ids:
                 train = train[~train["_smf_ri_row_id"].isin(exclude_train_ids)]
             if exclude_train_split and "_smf_ri_split" in train.columns:
                 train = train[train["_smf_ri_split"] != exclude_train_split]
+            # Approved rows without an observed target and rejected rows without an
+            # inferred label (hard_cutoff with a missing score) carry no label to learn
+            unlabelled = pd.to_numeric(train[cfg.target_col], errors="coerce").isna()
+            n_unlabelled = int(unlabelled.sum())
+            if n_unlabelled:
+                n_unlabelled_appr = int((unlabelled & (train[cfg.approved_col] == 1)).sum())
+                unlabelled_by_method[str(method)] = (n_unlabelled_appr, n_unlabelled - n_unlabelled_appr)
+                train = train[~unlabelled]
             if len(train) == 0:
                 raise ValueError(f"No training rows remain for RI method {method!r} after OOT/validation exclusion")
             if len(val) == 0:
@@ -1231,7 +1268,13 @@ class RejectInferencePipeline:
             )
             for name, ds in eval_sets.items():
                 add_dataset_with_optional_weight(evaluator, name, ds, "_weight" if "_weight" in ds.columns else None)
-            row = {"ri_method": method, "train_N": len(train), "oot_N": len(oot), "weighted_train": "_weight" in train.columns}
+            row = {
+                "ri_method": method,
+                "train_N": len(train),
+                "train_unlabelled_n": n_unlabelled,
+                "oot_N": len(oot),
+                "weighted_train": "_weight" in train.columns,
+            }
             for ds_name in ["train", "validation", "oot"]:
                 metrics = self._binary_eval_metrics(eval_sets[ds_name])
                 for metric_name, metric_value in metrics.items():
@@ -1277,6 +1320,18 @@ class RejectInferencePipeline:
                     metrics=row,
                 )
 
+        if unlabelled_by_method:
+            detail = "; ".join(
+                f"{method}: {n_appr} approved without an observed target, {n_rej} rejected without an inferred label"
+                for method, (n_appr, n_rej) in unlabelled_by_method.items()
+            )
+            warnings.warn(
+                f"Rows with a missing {cfg.target_col!r} were left out of RI model training ({detail}). "
+                f"They stay in ri_datasets; ri_model_perf['train_unlabelled_n'] counts them per model.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         perf_df = pd.DataFrame(rows)
         sort_col = "oot_AUC" if "oot_AUC" in perf_df.columns else None
         if sort_col:
@@ -1309,6 +1364,8 @@ class RejectInferencePipeline:
         cfg = self.config
         if "_smf_ri_row_id" not in approved.columns:
             return set()
+        # Validation rows need an observed target
+        approved = approved[approved[cfg.target_col].notna()]
         pool = approved[~approved["_smf_ri_row_id"].isin(exclude_ids)].copy()
         if len(pool) == 0:
             pool = approved.copy()
