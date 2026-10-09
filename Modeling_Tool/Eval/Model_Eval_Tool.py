@@ -2244,9 +2244,9 @@ class PerformanceEvaluator:
         Default weight column; each ``add_dataset`` call can also specify its own.
     spec_values : list, optional
         Sentinel score values (for example -1 for a score override) that carry no ordering information. Rows with such a
-        score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates) and of the figures, and are
-        binned separately in the Gains tables; on the weighted path ``N`` still counts them and the columns ``N_SPECIAL``
-        and ``N_SPECIAL_RAW`` report them. Default is None, which is stored as an empty list.
+        score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates and their lifts) and of the
+        figures, and are binned separately in the Gains tables; ``N`` and ``avgTrue`` count every row on both paths, and
+        ``N_SPECIAL`` / ``N_SPECIAL_RAW`` report the sentinel part. Default is None, which is stored as an empty list.
     ascending : bool, optional
         Score direction applied uniformly to the summary, the Gains tables and the figures, including the weighted paths.
         Default is None, which keeps the legacy direction of every underlying function.
@@ -2321,9 +2321,10 @@ class PerformanceEvaluator:
             Default weight column; each ``add_dataset`` call can also specify its own.
         spec_values : list, optional
             Sentinel score values (for example -1 for a score override) that carry no ordering information. Rows with such
-            a score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates) and of the figures, and
-            are binned separately in the Gains tables; on the weighted path ``N`` still counts them and the columns
-            ``N_SPECIAL`` and ``N_SPECIAL_RAW`` report them. Default is None, which is stored as an empty list.
+            a score are left out of the ranking metrics (``AUC``, ``KS``, the Top/Btm target rates and their lifts) and of
+            the figures, and are binned separately in the Gains tables; ``N`` and ``avgTrue`` count every row on both
+            paths, and ``N_SPECIAL`` / ``N_SPECIAL_RAW`` report the sentinel part. Default is None, which is stored as an
+            empty list.
         ascending : bool, optional
             Score direction applied uniformly to the summary, the Gains tables and the figures, including the weighted
             paths. Default is None, which keeps the legacy direction of every underlying function.
@@ -2737,6 +2738,26 @@ class PerformanceEvaluator:
                 model_eval_result_df[f"Top{quantile}%_Lift"] = model_eval_result_df[top_str] / model_eval_result_df["avgTrue"]
                 model_eval_result_df["AUC_Shift"] = model_eval_result_df["AUC"].shift(1) / model_eval_result_df["AUC"] - 1
                 model_eval_result_df["KS_Shift"] = model_eval_result_df["KS"].shift(1) / model_eval_result_df["KS"] - 1
+
+            if self.spec_values:
+                # the ranking columns above describe the rows with a real score; N and avgTrue describe every row and the
+                # sentinel part is reported apart, as on the weighted path (they used to leave the sentinel rows out)
+                all_rows = {}
+                for name, data in dataset_dict.items():
+                    if data is None:
+                        continue
+                    y_score = np.asarray(_get_score(data))
+                    n_special = int(pd.Series(y_score).isin(self.spec_values).sum())
+                    avg_true = _weighted_eval.safe_weighted_average(np.asarray(data[self.tgt_name]), None)
+                    all_rows[name] = (len(data), avg_true, n_special)
+                if "index" in model_eval_result_df.columns:
+                    names = model_eval_result_df["index"]
+                    model_eval_result_df["N"] = names.map(lambda key: all_rows.get(key, (np.nan,))[0])
+                    model_eval_result_df["avgTrue"] = names.map(lambda key: all_rows.get(key, (np.nan, np.nan))[1])
+                    if any(item[2] for item in all_rows.values()):
+                        n_special = names.map(lambda key: all_rows.get(key, (0, 0, 0))[2])
+                        model_eval_result_df["N_SPECIAL"] = n_special.where(n_special > 0).astype(float)
+                        model_eval_result_df["N_SPECIAL_RAW"] = n_special.where(n_special > 0)
 
             gains_table_cols = ['N_BUMP', 'MIN_RISK_DEP', 'MAX_RISK_DEP', 'KS_IN_GAINS', 'LIFT_IN_GAINS', 'IV', 'N_BINS']
             gains_summ_list = []

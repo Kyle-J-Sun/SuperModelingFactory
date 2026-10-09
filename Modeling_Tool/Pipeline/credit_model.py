@@ -339,9 +339,8 @@ class CreditModelPipelineConfig:
         present in every evaluated frame (``KeyError`` otherwise).
     special_score_values : list of float or None, default None
         Sentinel scores (for example ``[-1]``) that get their own evaluation bin and are left out of the quantile edges
-        and the ranking metrics. In the unweighted evaluation the ``N`` and ``avgTrue`` of the summary leave the sentinel
-        rows out, in the weighted evaluation they count every row and ``N_SPECIAL`` reports the sentinel part, so the two
-        summaries are not comparable on those columns.
+        and the ranking metrics (``AUC``, ``KS``, the Top/Btm rates and lifts). ``N`` and ``avgTrue`` of the summary count
+        every row, weighted or not, and ``N_SPECIAL`` / ``N_SPECIAL_RAW`` report the sentinel part.
     gains_ascending : bool or None, default True
         Score direction of the evaluation summary, the gains tables and the figures: ``True`` ascending (bin 1 holds the
         lowest scores, the lowest risk), ``False`` descending, ``None`` keeps the historical direction of each code path.

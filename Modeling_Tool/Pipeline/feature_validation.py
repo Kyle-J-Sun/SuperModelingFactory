@@ -197,7 +197,8 @@ class FeatureValidationPipelineConfig:
         Whether to compute IV/KS on the bins of the WOE engine of each target when available.
     ivks_params : dict, default {'iv_cut': 0.0}
         ``iv_cut`` (minimum IV of the reported features), ``feature_block_size`` (columns per block with WOE bins,
-        default 64) and, without WOE bins, other keyword arguments of ``VarExtractionInsights``.
+        default 64), ``missing_rate_ref`` (the sentinel counted as missing, default ``woe_params['missing_ref_value']``)
+        and, without WOE bins, other keyword arguments of ``VarExtractionInsights``.
     corr_enabled : bool, default True
         Whether to compute ``corr_matrix``, ``high_corr_pairs`` and ``correlated_detail``.
     corr_include_incumbent : bool, default True
@@ -239,8 +240,10 @@ class FeatureValidationPipelineConfig:
         bins are still fitted without weights.
     synthesize_missing_oot : bool or None, default False
         When no OOT rows exist, True copies the OOS rows in as a stand-in OOT (with a ``UserWarning``); False keeps OOT
-        empty. ``None`` counts as False. The stand-in rows are the OOS rows twice, so the tables that pool every split
-        (the distribution, ``n_rows`` of the summary and the global IV/KS) count them twice.
+        empty. ``None`` counts as False. The stand-in rows feed only what is reported per split (the ``oot`` group of the
+        PSI by ``sample``, the OOT comparisons of the selection); the tables that pool every split (the distribution,
+        ``n_rows`` of the summary, the global and grouped PSI and IV/KS, the correlation) count each row once. The
+        stand-in frame in ``result.splits['oot']`` carries ``attrs['smf_stand_in_oot'] = True``.
     woe_fit_scope : {'all', 'post_missing_gate'}, default 'post_missing_gate'
         ``'all'`` fits the WOE on every new feature. ``'post_missing_gate'`` first drops the features above
         ``missing_rate_threshold`` (a no-op when it is None or there is no target) and continues with the remaining ones.
@@ -400,7 +403,9 @@ class FeatureValidationPipelineResult:
         Detailed PSI tables keyed ``<target>:<group_col>`` (prefixed ``batch_NNN:`` in batch mode).
     ivks_summary : pandas.DataFrame
         IV, KS and lift of each feature per target and group (``target``, ``group_spec``, ``var``, ``n``, ``iv``,
-        ``ks_in_gains``, ``lift_in_gains``, ``missing_rate``, ``n_bins``, ...), limited to ``iv >= iv_cut``.
+        ``ks_in_gains``, ``lift_in_gains``, ``missing_rate``, ``n_bins``, ...), limited to ``iv >= iv_cut``. ``n``,
+        ``missing_rate``, ``min``, ``mean`` and ``max`` count ``ivks_params['missing_rate_ref']`` (default
+        ``woe_params['missing_ref_value']``, -999999) as missing, with or without WOE bins.
     corr_matrix : pandas.DataFrame
         Correlation matrix of the numeric features (and incumbents when included); empty with fewer than two features or
         when correlation is disabled.
@@ -409,7 +414,9 @@ class FeatureValidationPipelineResult:
         ``pair_type`` (``new_new``, ``new_incumbent``, ``incumbent_incumbent`` or ``new_new_cross_batch``).
     correlated_detail : pandas.DataFrame
         Per correlated pair and target the metrics of both features (``iv``, ``ks_in_gains``, ``lift_in_gains``) and a
-        ``recommended_action`` (``keep`` or ``remove``) from ``CorrelationFilter``.
+        ``recommended_action`` (``keep`` or ``remove``) from ``CorrelationFilter``. The cross-batch rows of
+        ``batch_corr_mode='block_pairwise'`` take the metrics of the global ``ivks_summary`` rows when both use the WOE
+        engine (``metric_source='ivks_summary'``), else the raw values (``'raw_values'``).
     validation_summary : pandas.DataFrame
         Two columns ``metric`` and ``value`` with row, feature and target counts, table sizes and, with selection, the
         number of selected features.
@@ -1123,7 +1130,9 @@ class FeatureValidationPipeline:
                 if "pair_type" in high_corr_pairs.columns
                 else pd.DataFrame()
             )
-            cross_detail = self._cross_batch_correlated_detail(csv_path, cross_pairs_for_detail, target_cols)
+            cross_detail = self._cross_batch_correlated_detail(
+                csv_path, cross_pairs_for_detail, target_cols, ivks_summary=ivks_summary
+            )
             correlated_detail = self._concat_frames([correlated_detail, cross_detail])
 
         feature_sources = self._feature_source_frame(new_features, incumbent_features)
@@ -1407,7 +1416,12 @@ class FeatureValidationPipeline:
         csv_path: Path,
         cross_pairs: pd.DataFrame,
         target_cols: list[str],
+        ivks_summary: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
+        """Detail rows of the pairs that ``block_pairwise`` found across batches. The engines of the batches are not
+        kept, so the metrics come from the global rows of the merged ``ivks_summary`` when the rows of a batch use the
+        WOE engine too (``corr_use_woe_bins`` and ``ivks_use_woe_bins``); otherwise, or for a feature that the summary
+        lacks, they are computed on the raw values as the correlation filter does. ``metric_source`` says which."""
         if cross_pairs.empty or not target_cols:
             return pd.DataFrame()
         required_cols = {"var1", "var2"}
@@ -1446,6 +1460,11 @@ class FeatureValidationPipeline:
                 if "var" in gains.columns
                 else {}
             )
+            metric_source = {var: "raw_values" for var in metric_map}
+            engine_map = self._ivks_engine_metrics(ivks_summary, target)
+            for var, metrics in engine_map.items():
+                metric_map[var] = metrics
+                metric_source[var] = "ivks_summary"
             for pair in cross_pairs.to_dict("records"):
                 var1 = str(pair.get("var1"))
                 var2 = str(pair.get("var2"))
@@ -1486,9 +1505,26 @@ class FeatureValidationPipeline:
                             "pair_type": "new_new_cross_batch",
                             "batch_left": pair.get("batch_left"),
                             "batch_right": pair.get("batch_right"),
+                            "metric_source": metric_source.get(var, "raw_values"),
                         }
                     )
         return pd.DataFrame(rows)
+
+    def _ivks_engine_metrics(self, ivks_summary: pd.DataFrame | None, target: str) -> dict[str, dict[str, Any]]:
+        """``iv``, ``ks_in_gains`` and ``lift_in_gains`` per feature from the global rows of ``ivks_summary`` for
+        ``target``, when those rows and the in-batch correlation detail both come from the WOE engine; else empty."""
+        cfg = self.config
+        if not (cfg.woe_enabled and cfg.corr_use_woe_bins and cfg.ivks_use_woe_bins):
+            return {}
+        if not isinstance(ivks_summary, pd.DataFrame) or ivks_summary.empty:
+            return {}
+        if not {"target", "group_spec", "var"} <= set(ivks_summary.columns):
+            return {}
+        rows = ivks_summary[ivks_summary["target"].eq(target) & ivks_summary["group_spec"].eq("global")]
+        metric_cols = [col for col in ("iv", "ks_in_gains", "lift_in_gains") if col in rows.columns]
+        if rows.empty or not metric_cols:
+            return {}
+        return rows.drop_duplicates("var").set_index("var")[metric_cols].to_dict("index")
 
     def _corr_subchunks(self, columns: list[str]) -> list[list[str]]:
         size = self.config.batch_corr_pair_chunk_size
@@ -1742,7 +1778,7 @@ class FeatureValidationPipeline:
                     )
                     # FVP keeps the empty-OOT representation: downstream
                     # stages already guard every OOT consumer with len(oot).
-                    oot = synthesized if synthesized is not None else oot
+                    oot = self._mark_stand_in_oot(synthesized) if synthesized is not None else oot
                 splits = {"ins": ins, "oos": oos, "oot": oot}
                 if cfg.split_col:
                     reserved = set(splits)
@@ -1762,6 +1798,8 @@ class FeatureValidationPipeline:
         if len(ins_oos) == 0:
             return {"ins": ins_oos.copy(), "oos": ins_oos.copy(), "oot": oot.copy()}
 
+        synthesized = None
+
         if target_col and bool(cfg.split_config.get("stratify", True)) and target_col in ins_oos.columns:
             observed = ins_oos[ins_oos[target_col].notna()].copy()
             missing = ins_oos[ins_oos[target_col].isna()].copy()
@@ -1778,7 +1816,10 @@ class FeatureValidationPipeline:
             )
             if synthesized is not None:
                 oot = synthesized
-        return {"ins": ins.copy(), "oos": oos.copy(), "oot": oot.copy()}
+        splits = {"ins": ins.copy(), "oos": oos.copy(), "oot": oot.copy()}
+        if synthesized is not None:
+            self._mark_stand_in_oot(splits["oot"])
+        return splits
 
     def _split_frame(self, data: pd.DataFrame, target_col: str | None) -> tuple[pd.DataFrame, pd.DataFrame]:
         cfg = self.config
@@ -1803,9 +1844,23 @@ class FeatureValidationPipeline:
         ins = data.drop(index=oos.index)
         return ins.reset_index(drop=True), oos.reset_index(drop=True)
 
-    def _combine_splits(self, splits: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    @staticmethod
+    def _mark_stand_in_oot(frame: pd.DataFrame) -> pd.DataFrame:
+        """Tag the OOS copy that stands in for a missing OOT, so that the pooled tables can leave it out."""
+        frame.attrs["smf_stand_in_oot"] = True
+        return frame
+
+    @staticmethod
+    def _has_stand_in_oot(splits: dict[str, pd.DataFrame]) -> bool:
+        return any(bool(df.attrs.get("smf_stand_in_oot")) for df in splits.values())
+
+    def _combine_splits(self, splits: dict[str, pd.DataFrame], include_stand_in: bool = False) -> pd.DataFrame:
+        """Pool the splits, tagged with ``_smf_split``. The stand-in OOT (a copy of OOS) is left out unless
+        ``include_stand_in``: pooled tables would count those rows twice."""
         frames = []
         for name, df in splits.items():
+            if not include_stand_in and df.attrs.get("smf_stand_in_oot"):
+                continue
             item = df.copy()
             item["_smf_split"] = name
             frames.append(item)
@@ -2489,6 +2544,12 @@ class FeatureValidationPipeline:
         if "sample" in cfg.psi_group_dims:
             group_cols = ["_smf_split"] + group_cols
         group_cols = list(dict.fromkeys([col for col in group_cols if col in combined.columns]))
+        # the PSI by sample reports the stand-in OOT as its own group; every other grouping pools the real rows once
+        by_sample = (
+            self._combine_splits(splits, include_stand_in=True)
+            if "_smf_split" in group_cols and self._has_stand_in_oot(splits)
+            else combined
+        )
 
         rows = []
         details: dict[str, Any] = {}
@@ -2509,18 +2570,18 @@ class FeatureValidationPipeline:
                         UserWarning,
                         stacklevel=3,
                     )
-            prepared_bins = (
-                calc._prepare_woe_bins(reference, combined, psi_features)
-                if use_woe_bins
-                else None
-            )
+            prepared: dict[int, Any] = {}
             for group_col in group_cols or [None]:
+                frame = by_sample if group_col == "_smf_split" else combined
                 try:
+                    if use_woe_bins and id(frame) not in prepared:
+                        prepared[id(frame)] = calc._prepare_woe_bins(reference, frame, psi_features)
+                    prepared_bins = prepared.get(id(frame))
                     if prepared_bins is not None:
                         result = calc._calculate_prebinned(
                             prepared_bins[0],
                             prepared_bins[1],
-                            combined,
+                            frame,
                             psi_features,
                             group_col,
                             True,
@@ -2529,7 +2590,7 @@ class FeatureValidationPipeline:
                     else:
                         result = calc.calculate(
                             reference,
-                            combined,
+                            frame,
                             psi_features,
                             group_by=None,
                             group_name=group_col,
@@ -2702,6 +2763,7 @@ class FeatureValidationPipeline:
         params = dict(cfg.ivks_params or {})
         params.pop("feature_block_size", None)
         iv_cut = float(params.pop("iv_cut", 0.0))
+        params["missing_rate_ref"] = self._ivks_missing_ref()
         insights = VarExtractionInsights(
             data=data,
             dep=target,
@@ -2719,6 +2781,31 @@ class FeatureValidationPipeline:
         for key, value in group_info.items():
             report[key] = value
         return report
+
+    def _ivks_missing_ref(self) -> Any:
+        """Sentinel that the IV/KS report counts as missing on both paths: ``ivks_params['missing_rate_ref']``, else
+        ``woe_params['missing_ref_value']`` (-999999)."""
+        params = self.config.ivks_params or {}
+        if "missing_rate_ref" in params:
+            return params["missing_rate_ref"]
+        return (self.config.woe_params or {}).get("missing_ref_value", -999999)
+
+    def _ivks_value_stats(self, series: pd.Series) -> dict[str, Any]:
+        """``n_all``, ``n``, ``missing_rate``, ``min``, ``mean`` and ``max`` of a feature with the sentinel counted as
+        missing, the rule of the report without WOE bins (``proc_means_for_screening``)."""
+        is_numeric = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+        ref = self._ivks_missing_ref()
+        values = series.mask(series == ref) if is_numeric and ref is not None else series
+        n_all = len(values)
+        n = int(values.notna().sum())
+        return {
+            "n_all": n_all,
+            "n": n,
+            "missing_rate": float(1.0 - n / n_all) if n_all else np.nan,
+            "min": float(values.min()) if is_numeric else np.nan,
+            "mean": float(values.mean()) if is_numeric else np.nan,
+            "max": float(values.max()) if is_numeric else np.nan,
+        }
 
     def _ivks_from_binner(self, data: pd.DataFrame, features: list[str], target: str, binner: Any) -> pd.DataFrame:
         from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
@@ -2787,21 +2874,14 @@ class FeatureValidationPipeline:
                 ordered = grouped.sort_values("bad_rate", ascending=False).reset_index(drop=True)
                 ks = float((ordered["bad_pct"].cumsum() - ordered["good_pct"].cumsum()).abs().max())
                 lift = float((ordered["bad_rate"] / overall_bad).replace([np.inf, -np.inf], np.nan).max())
-                series = data[var]
-                is_numeric = pd.api.types.is_numeric_dtype(series)
                 rows.append(
                     {
                         "var": var,
-                        "n_all": len(series),
-                        "n": int(series.notna().sum()),
+                        **self._ivks_value_stats(data[var]),
                         "ks_in_gains": ks,
                         "lift_in_gains": lift,
                         "iv": float(grouped["iv_component"].sum()),
                         "n_bump": int(grouped.shape[0]),
-                        "missing_rate": float(series.isna().mean()),
-                        "min": float(series.min()) if is_numeric else np.nan,
-                        "mean": float(series.mean()) if is_numeric else np.nan,
-                        "max": float(series.max()) if is_numeric else np.nan,
                         "n_bins": int(grouped.shape[0]),
                     }
                 )
@@ -2914,20 +2994,13 @@ class FeatureValidationPipeline:
                 lift_values = bad_rate / overall_bad
                 lift = float(np.nanmax(lift_values)) if len(lift_values) else np.nan
 
-                series = data[var].iloc[positions]
-                is_numeric = pd.api.types.is_numeric_dtype(series)
                 row = {
                     "var": var,
-                    "n_all": len(series),
-                    "n": int(series.notna().sum()),
+                    **self._ivks_value_stats(data[var].iloc[positions]),
                     "ks_in_gains": ks,
                     "lift_in_gains": lift,
                     "iv": iv,
                     "n_bump": int(observed.sum()),
-                    "missing_rate": float(series.isna().mean()),
-                    "min": float(series.min()) if is_numeric else np.nan,
-                    "mean": float(series.mean()) if is_numeric else np.nan,
-                    "max": float(series.max()) if is_numeric else np.nan,
                     "n_bins": int(observed.sum()),
                 }
                 row.update(group_info)
