@@ -341,15 +341,17 @@ class MonotoneWOEBinner:
         all treat these values as special values, and group IV excludes them. Not applicable to NaN or categorical features.
         Under both policies fit and apply_woe record such values (fit warns under normal_bin);
         see _unseen_special_at_fit / _unseen_special_stats.
-    sv_total_basis : {'ordinary', 'all'}, default 'ordinary'
+    sv_total_basis : {'all', 'ordinary'}, default 'all'
         The bad and good totals that the WOE of a bin is measured against.
-        'ordinary' (default, legacy behavior): an ordinary bin (or category) is measured against the totals of the
-        ordinary rows, a special-value or [Missing] bin against the totals of all rows, so bins of equal risk get
-        different WOE when special values or missing values exist, and the shares of the bins do not add up to 1.
-        'all': every bin is measured against the totals of all rows (the textbook scorecard definition), so the WOE of
-        all bins is comparable, the shares add up to 1 and IV is the sum over one base. The bin edges are the same in
-        both modes; the WOE of the ordinary bins moves by one constant. The setting is applied at fit and again after
-        refine_chi2 / refine_dtree / refine_cate. Bins loaded with load_woe_bins keep the WOE they were saved with.
+        'all' (default): every bin is measured against the totals of all rows (the textbook scorecard definition), so
+        the WOE of all bins is comparable, the shares add up to 1 and IV is the sum over one base.
+        'ordinary' (the legacy behavior, and the default up to 0.8.2): an ordinary bin (or category) is measured against
+        the totals of the ordinary rows, a special-value or [Missing] bin against the totals of all rows, so bins of
+        equal risk get different WOE when special values or missing values exist, and the shares of the bins do not add
+        up to 1. Pass it to reproduce scorecards built before the change.
+        The bin edges are the same in both modes; the WOE of the ordinary bins moves by one constant. The setting is
+        applied at fit and again after refine_chi2 / refine_dtree / refine_cate. Bins loaded with load_woe_bins keep the
+        WOE they were saved with, and a binner pickled before the setting existed keeps 'ordinary'.
 
     Attributes
     ----------
@@ -404,7 +406,7 @@ class MonotoneWOEBinner:
         sv_woe_smoothing: str = "none",
         sv_smoothing_alpha: float = 0.0,
         unseen_special_policy: str = "normal_bin",
-        sv_total_basis: str = "ordinary",
+        sv_total_basis: str = "all",
     ):
         self.feature_cols      = list(feature_cols)
         self.target_col        = target_col
@@ -840,7 +842,9 @@ class MonotoneWOEBinner:
 
         Uses the same convention as vr["iv"] at fit time, with the sample replaced by this group:
           - Ordinary bins: rows are assigned to the fitted bins; the denominators are the bad/good
-            counts of the group's rows that fall into ordinary bins.
+            counts of the group's rows that fall into ordinary bins, or of all rows of the group when the
+            feature was fitted with sv_total_basis='all' (bins loaded without that record use the binner's
+            own sv_total_basis).
           - Special-value bins: the denominators are the bad/good counts of all rows of the group; the
             sv_policy_applied decision made at fit time is reused and the share is not re-judged within
             the group: keep → empirical value (smoothed with the fit-time smoothing parameters if
@@ -862,8 +866,12 @@ class MonotoneWOEBinner:
         sub = normal_df[[feat, target]].dropna(subset=[feat]).copy()
         sub["_bin"] = self._assign_normal_bins(sub, feat, vr, fitted_edges)
         sub = sub[sub["_bin"].notna()]
-        norm_bad  = float(sub[target].sum())
-        norm_good = float((sub[target] == 0).sum())
+        if vr.get("sv_total_basis", self._sv_total_basis()) == "all":
+            norm_bad = float(grp_df[target].sum())
+            norm_good = float((grp_df[target] == 0).sum())
+        else:
+            norm_bad  = float(sub[target].sum())
+            norm_good = float((sub[target] == 0).sum())
         iv_normal = 0.0
         for _, bin_rows in sub.groupby("_bin"):
             stats = self._compute_woe_single_bin(bin_rows, norm_bad, norm_good)
@@ -912,6 +920,12 @@ class MonotoneWOEBinner:
                 if smoothed or (stats["bad"] > 0 and stats["good"] > 0):
                     iv_sv += stats["iv"]
         return iv_normal, iv_sv
+
+    def _plot_woe_totals(self, full_df: pd.DataFrame, binned_normal: pd.DataFrame, vr: Dict) -> tuple:
+        """Bad and good totals that the per-group WOE lines of the ordinary bins are measured against: all rows of the
+        chart sample with sv_total_basis='all' (as the fitted WOE), the binned ordinary rows with 'ordinary'."""
+        rows = full_df if vr.get("sv_total_basis", self._sv_total_basis()) == "all" else binned_normal
+        return float(rows[self.target_col].sum()), float((rows[self.target_col] == 0).sum())
 
     def _compute_woe_single_bin(
         self, sub: pd.DataFrame, total_bad: float, total_good: float,
@@ -1453,7 +1467,8 @@ class MonotoneWOEBinner:
         give the same edges; the rebase afterwards moves the ordinary WOE by a constant.
         """
         res = self._greedy_fit_one_core(df, feat, chi2_binning, chi2_p, chi2_init_size)
-        if self.sv_total_basis == "all":
+        res["sv_total_basis"] = self._sv_total_basis()
+        if self._sv_total_basis() == "all":
             res["totals_all"] = (
                 float(df[self.target_col].sum()),
                 float((df[self.target_col] == 0).sum()),
@@ -1485,8 +1500,12 @@ class MonotoneWOEBinner:
 
     def _rebase_after_refine(self, feat: str) -> None:
         """Re-apply ``sv_total_basis='all'`` to a feature whose bins a refine step has just replaced."""
-        if self.sv_total_basis == "all":
+        if self._sv_total_basis() == "all":
             self._rebase_to_all_rows(self._results[feat])
+
+    def _sv_total_basis(self) -> str:
+        # a binner pickled before the setting existed was fitted with the legacy basis: keep it when it is refitted
+        return getattr(self, "sv_total_basis", "ordinary")
 
     def _greedy_fit_one_core(
         self,
@@ -4755,8 +4774,7 @@ class MonotoneWOEBinner:
                 all_normal_sub["_bin"] = self._assign_normal_bins(
                     all_normal_sub, feat, vr, fitted_edges)
                 all_normal_sub = all_normal_sub[all_normal_sub["_bin"].notna()]
-                all_total_bad  = float(all_normal_sub[self.target_col].sum())
-                all_total_good = float((all_normal_sub[self.target_col] == 0).sum())
+                all_total_bad, all_total_good = self._plot_woe_totals(_df_for_group, all_normal_sub, vr)
 
                 # ── Bar mode: pooled (one set of full-sample bars) vs clustered (side-by-side bars per group) ──
                 if bar_mode == "pooled":
@@ -5016,8 +5034,7 @@ class MonotoneWOEBinner:
         all_normal_sub["_bin"] = self._assign_normal_bins(
             all_normal_sub, feat, vr, fitted_edges)
         all_normal_sub = all_normal_sub[all_normal_sub["_bin"].notna()]
-        all_total_bad  = float(all_normal_sub[self.target_col].sum())
-        all_total_good = float((all_normal_sub[self.target_col] == 0).sum())
+        all_total_bad, all_total_good = self._plot_woe_totals(_df_for_group, all_normal_sub, vr)
 
         groups   = sorted(_df_for_group[group_name].dropna().unique())
         n_groups = len(groups)

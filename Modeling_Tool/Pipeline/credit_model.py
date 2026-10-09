@@ -215,8 +215,8 @@ class CreditModelPipelineConfig:
         Whether to start the GBM models from a prior score (LightGBM ``init_score``, XGBoost base margin), in training
         and in evaluation, so that a model's probability combines the prior score with its increment. It needs
         ``warm_start_score_col`` and is supported for ``lgb`` and ``xgb`` only. By default (see
-        ``warm_start_score_scope``) the prior is added to the training and to the final evaluation only: early stopping,
-        the Optuna search (``AUC_*`` of its table) and the Owen explanations see the increment alone, without the prior.
+        ``warm_start_score_scope``) the prior is also seen by early stopping, the Optuna search (``AUC_*`` of its table)
+        and the Owen explanations, so every stage judges the combined model.
     warm_start_score_col : str or None, default None
         Column of the input data that holds the prior score. It is required when ``warm_start_enabled`` is on
         (``ValueError``), must exist (``KeyError``) and must have no missing values in any evaluated frame. It is copied
@@ -235,14 +235,15 @@ class CreditModelPipelineConfig:
     warm_start_apply_to_optuna : bool, default False
         Whether to pass the prior score as ``init_score`` to the Optuna search of the warm-start models (``lgb`` and
         ``xgb``).
-    warm_start_score_scope : {"train", "full"}, default "train"
-        Where the prior score is seen. ``"train"`` (legacy) adds it to the training and to the final evaluation only:
-        early stopping, the ``AUC_*`` of the Optuna search table and the Owen explanations then see the increment alone.
-        ``"full"`` also adds it to the validation set of the early stopping (so the models stop when the combined model
-        stops improving), to the scoring of the Optuna candidates (with ``warm_start_apply_to_optuna``), and to the Owen
-        explanation, where the prior enters as a group of its own, ``warm_start_prior``, so that the Owen values add up
-        to the scored probability. ``"full"`` changes the trained models and the search table; any other value raises
-        ``ValueError`` when warm start is enabled. SHAP values of the trees are unaffected by the prior (it is an
+    warm_start_score_scope : {"full", "train"}, default "full"
+        Where the prior score is seen. ``"full"`` (default) adds it to the training, to the validation set of the early
+        stopping (so the models stop when the combined model stops improving), to the scoring of the Optuna candidates
+        (with ``warm_start_apply_to_optuna``), to the final evaluation and to the Owen explanation, where the prior enters
+        as a group of its own, ``warm_start_prior``, so that the Owen values add up to the scored probability.
+        ``"train"`` (the legacy behavior, and the default up to 0.8.2) adds it to the training and to the final
+        evaluation only: early stopping, the ``AUC_*`` of the Optuna search table and the Owen explanations then see the
+        increment alone; pass it to reproduce models trained before the change. Any other value raises ``ValueError``
+        when warm start is enabled. SHAP values of the trees are unaffected by the prior (it is an
         additive offset in log-odds), so ``explain_models`` gives the same feature importance in both scopes.
     backward_enabled : bool, default True
         Whether to run backward variable elimination on the WOE features before the models are trained.
@@ -457,7 +458,7 @@ class CreditModelPipelineConfig:
     warm_start_models: list[str] = field(default_factory=lambda: ["lgb", "xgb"])
     warm_start_on_unsupported: Literal["skip", "raise"] = "skip"
     warm_start_apply_to_optuna: bool = False
-    warm_start_score_scope: Literal["train", "full"] = "train"
+    warm_start_score_scope: Literal["train", "full"] = "full"
 
     backward_enabled: bool = True
     backward_model: str = "lgb"
