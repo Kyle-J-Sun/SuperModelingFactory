@@ -1399,6 +1399,11 @@ def validate_pipeline_config(pipeline_key: str, values: dict[str, Any] | Any) ->
             errors.append("Select at least one entry in ri_methods.")
         if vals.get("train_prescore") is False and missing("score_col"):
             errors.append("score_col is required when train_prescore=False.")
+        if vals.get("train_prescore", True) is not False and vals.get("ri_score_direction") == "high_good":
+            errors.append(
+                "ri_score_direction='high_good' needs your own score with train_prescore=False: "
+                "the pre-score the Pipeline trains is the probability of bad."
+            )
         if vals.get("ri_approved_frac") is not None and vals.get("ri_approved_n") is not None:
             errors.append("ri_approved_frac and ri_approved_n cannot both be set.")
     elif entry.key == "score_comparison":

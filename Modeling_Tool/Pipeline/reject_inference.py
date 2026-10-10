@@ -102,7 +102,9 @@ class RejectInferencePipelineConfig:
         Whether to write ``report/RI_Pipeline_Report.xlsx`` (its path is ``report_path``).
     train_prescore : bool, default True
         True trains a pre-score model on approved rows with an observed target and scores all rows into ``score_col``.
-        False reuses the supplied ``score_col``; if that column is absent the pre-score is trained anyway.
+        False reuses the supplied ``score_col``; if that column is absent the pre-score is trained anyway. The rows held
+        out as random OOT (see ``oot_frac``) are left out of the pre-score's training data. A trained pre-score is the
+        probability of bad, so it requires ``ri_score_direction='high_bad'``.
     prescore_model_type : str, default "lgb"
         Pre-score model: ``"lgb"``, ``"xgb"``, ``"cat"`` or ``"lr"`` (aliases ``lightgbm``, ``xgboost``, ``catboost``,
         ``logistic``, ``logistic_regression``; case-insensitive). Anything else raises ``ValueError``.
@@ -121,7 +123,9 @@ class RejectInferencePipelineConfig:
     ri_score_direction : {"high_bad", "high_good"}, default "high_bad"
         Meaning of ``score_col``. ``"high_bad"`` means a higher score is a higher bad probability, ``"high_good"`` the
         opposite. It is passed to the inference methods and sets the default hard cutoff and the sign of
-        ``prescore_AUC``. Any other value raises ``ValueError``.
+        ``prescore_AUC``. Any other value raises ``ValueError``, and so does ``"high_good"`` whenever the pipeline trains
+        the pre-score (``train_prescore=True`` or ``score_col`` absent), because that pre-score is the probability of
+        bad: use ``"high_good"`` only with your own score and ``train_prescore=False``.
     train_ri_models : bool, default True
         Whether to train a model on every RI dataset (and the benchmark) and compare their train, validation and OOT
         performance in ``ri_model_perf``.
@@ -162,7 +166,10 @@ class RejectInferencePipelineConfig:
         none remains.
     oot_frac : float, default 0.2
         Share of the approved rows with an observed target (at least one row) randomly held out as OOT when neither
-        ``oot_data`` nor OOT rows from ``split_col`` exist. Must lie in [0, 1).
+        ``oot_data`` nor OOT rows from ``split_col`` exist. Must lie in [0, 1). The OOT is drawn before the pre-score is
+        trained and is left out of its training data. With ``ri_approved_scope="output_subset"`` it is drawn from all
+        approved rows and only the drawn rows inside the output subset are used, so the subset's share is about
+        ``oot_frac``; ``ValueError`` is raised when none falls inside.
     perf_pct_bins : int, default 10
         Number of percentile bins of ``PerformanceEvaluator`` for the model reports.
     min_bin_prop : float, default 0.03
@@ -170,8 +177,10 @@ class RejectInferencePipelineConfig:
     ri_approved_data : pandas.DataFrame or None, default None
         External approved sample used only as the reference that fits the inference rules; the approved rows of the main
         data are still the approved part of the output. It needs ``target_col`` and the feature columns (and ``score_col``
-        unless the pre-score is trained); a missing ``score_col`` is filled with the pre-score model and only
-        ``approved_col == 1`` rows are kept when that column exists. It cannot be combined with ``ri_approved_query``,
+        unless the pre-score is trained). When the pre-score is trained in the run, the reference is scored with it (an
+        existing ``score_col`` is replaced, with a ``UserWarning``), so that the rules fitted on the reference and the
+        rejected rows use the same score; otherwise its own ``score_col`` is used. Only ``approved_col == 1`` rows are
+        kept when that column exists. It cannot be combined with ``ri_approved_query``,
         ``ri_approved_func`` or ``ri_approved_scope="output_subset"``.
     ri_approved_query : str or None, default None
         pandas ``query`` expression selecting the reference rows among the approved rows of the main data.
@@ -603,16 +612,18 @@ class RejectInferencePipeline:
         KeyError
             If a required column is missing from ``data``, ``oot_data`` or ``ri_approved_data``.
         ValueError
-            If the configuration is inconsistent (unknown model type, method or direction, invalid fractions, conflicting
+            If the configuration is inconsistent (unknown model type, method or direction,
+            ``ri_score_direction="high_good"`` with a pre-score trained by the pipeline, invalid fractions, conflicting
             ``ri_approved_*`` settings, invalid ``split_col`` labels), if no approved row has an observed target for the
             pre-score or (with ``train_ri_models``) for the models, or if a training, validation, OOT or reference sample
             is empty.
 
         Notes
         -----
-        Warnings are issued when ``train_prescore=True`` overwrites an existing ``score_col``, when rows with a missing
-        target are dropped from an external OOT or left out of model training, and when non-finite values are imputed
-        or predicted. With ``save_models=True`` the models are pickled even if ``write_outputs`` is False.
+        Warnings are issued when ``train_prescore=True`` overwrites an existing ``score_col`` (of ``data`` or of
+        ``ri_approved_data``), when rows with a missing target are dropped from an external OOT or left out of model
+        training, and when non-finite values are imputed or predicted. With ``save_models=True`` the models are pickled
+        even if ``write_outputs`` is False.
         """
         cfg = self.config
         feature_cols = self._resolve_feature_cols(data)
@@ -635,6 +646,8 @@ class RejectInferencePipeline:
         split_oot_data = None
         if cfg.split_col:
             work, split_oot_data = self._prepare_split_col_data(work)
+        # Drawn before the pre-score so that the OOT rows stay out of its training data
+        random_oot_ids = self._draw_random_oot_ids(work, split_oot_data)
         prescore_model = None
         model_paths: dict[str, str] = {}
         if cfg.train_prescore or cfg.score_col not in work.columns:
@@ -647,7 +660,7 @@ class RejectInferencePipeline:
                     UserWarning,
                     stacklevel=2,
                 )
-            work, prescore_model = self._fit_prescore(work, feature_cols)
+            work, prescore_model = self._fit_prescore(work, feature_cols, exclude_ids=random_oot_ids)
             if cfg.save_models:
                 model_paths["prescore"] = self._save_pipeline_model(
                     model=prescore_model,
@@ -710,6 +723,7 @@ class RejectInferencePipeline:
                 report_dir=report_dir,
                 model_dir=model_dir,
                 split_oot_data=split_oot_data,
+                random_oot_ids=random_oot_ids,
             )
             model_paths.update(ri_model_paths)
             if ri_model_perf is not None and len(ri_model_perf):
@@ -776,6 +790,16 @@ class RejectInferencePipeline:
                 f"Missing target column {cfg.target_col!r} for pre-score training "
                 f"(train_prescore={cfg.train_prescore}, score_col {cfg.score_col!r} "
                 f"{'present' if cfg.score_col in data.columns else 'absent'})"
+            )
+        # The pre-score the pipeline trains is the probability of bad, so reading it as
+        # a high-good score would invert hard_cutoff and fuzzy_augment
+        if will_train_prescore and cfg.ri_score_direction == "high_good":
+            raise ValueError(
+                f"ri_score_direction='high_good' cannot be used with a pre-score trained by the pipeline "
+                f"(train_prescore={cfg.train_prescore}, score_col {cfg.score_col!r} "
+                f"{'present' if cfg.score_col in data.columns else 'absent'}): that pre-score is the "
+                f"probability of bad. Use ri_score_direction='high_bad', or supply your own high-good score in "
+                f"score_col with train_prescore=False."
             )
 
     def _validate_ri_approved_config(self) -> None:
@@ -875,7 +899,17 @@ class RejectInferencePipeline:
             else:
                 ri_ref[cfg.approved_col] = 1
             self._validate_ri_approved_frame(ri_ref, feature_cols, prescore_model)
-            if cfg.score_col not in ri_ref.columns:
+            if prescore_model is not None:
+                # The rules fitted on the reference are applied to the rejects' new pre-score,
+                # so the reference must be scored by the same model
+                if cfg.score_col in ri_ref.columns:
+                    warnings.warn(
+                        f"External ri_approved_data has its own {cfg.score_col!r} column; it is replaced by the "
+                        f"pre-score trained in this run so that the reference and the rejected rows share one "
+                        f"score. Set train_prescore=False to use the supplied scores everywhere.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
                 ri_ref[cfg.score_col] = predict_positive(prescore_model, ri_ref, feature_cols)
             ri_ref = self._sample_ri_approved_reference(ri_ref.reset_index(drop=True))
             approved_output = approved_full.copy()
@@ -959,11 +993,40 @@ class RejectInferencePipeline:
         ]
         return pd.DataFrame(rows, columns=["metric", "value"])
 
-    def _fit_prescore(self, data: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.DataFrame, Any]:
+    def _draw_random_oot_ids(
+        self,
+        work: pd.DataFrame,
+        split_oot_data: pd.DataFrame | None,
+    ) -> set[Any] | None:
+        """Row ids of the random OOT; None when the OOT comes from ``oot_data`` / ``split_col`` or no model is trained."""
+        cfg = self.config
+        if not cfg.train_ri_models or cfg.oot_data is not None:
+            return None
+        if split_oot_data is not None and len(split_oot_data):
+            return None
+        if cfg.target_col not in work.columns:
+            return None
+        labelled = work[(work[cfg.approved_col] == 1) & work[cfg.target_col].notna()]
+        if labelled.empty:
+            return None
+        rng = np.random.default_rng(cfg.random_state)
+        n_oot = max(1, int(len(labelled) * cfg.oot_frac))
+        return set(rng.choice(labelled["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
+
+    def _fit_prescore(
+        self,
+        data: pd.DataFrame,
+        feature_cols: list[str],
+        exclude_ids: set[Any] | None = None,
+    ) -> tuple[pd.DataFrame, Any]:
         from Modeling_Tool import SampleSplitter
 
         cfg = self.config
-        approved = data[(data[cfg.approved_col] == 1) & data[cfg.target_col].notna()].copy()
+        trainable = (data[cfg.approved_col] == 1) & data[cfg.target_col].notna()
+        if exclude_ids:
+            # The random OOT rows evaluate the RI models, so the pre-score must not learn their labels
+            trainable &= ~data["_smf_ri_row_id"].isin(exclude_ids)
+        approved = data[trainable].copy()
         if len(approved) == 0:
             n_approved = int((data[cfg.approved_col] == 1).sum())
             n_target_obs = int(data[cfg.target_col].notna().sum())
@@ -1145,6 +1208,7 @@ class RejectInferencePipeline:
         report_dir: Path,
         model_dir: Path,
         split_oot_data: pd.DataFrame | None = None,
+        random_oot_ids: set[Any] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, str], pd.DataFrame]:
         from Modeling_Tool import PerformanceEvaluator
 
@@ -1178,8 +1242,20 @@ class RejectInferencePipeline:
                 exclude_train_ids.update(val_ids)
                 val = approved[approved["_smf_ri_row_id"].isin(val_ids)].copy()
         else:
-            n_oot = max(1, int(len(labelled_approved) * cfg.oot_frac))
-            oot_ids = set(rng.choice(labelled_approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
+            if random_oot_ids is None:
+                n_oot = max(1, int(len(labelled_approved) * cfg.oot_frac))
+                oot_ids = set(rng.choice(labelled_approved["_smf_ri_row_id"].to_numpy(), size=n_oot, replace=False))
+            else:
+                # Drawn from all labelled approved rows before the pre-score; with
+                # ri_approved_scope='output_subset' only those in the output subset remain
+                in_output = labelled_approved["_smf_ri_row_id"].isin(random_oot_ids)
+                oot_ids = set(labelled_approved.loc[in_output, "_smf_ri_row_id"])
+                if not oot_ids:
+                    raise ValueError(
+                        "None of the rows held out as random OOT is among the approved output rows "
+                        "(ri_approved_scope='output_subset' with a small reference sample); raise oot_frac, "
+                        "or pass oot_data or split_col"
+                    )
             oot = approved[approved["_smf_ri_row_id"].isin(oot_ids)].copy()
             exclude_train_ids.update(oot_ids)
             val_ids = self._sample_validation_ids(approved, rng, exclude_ids=oot_ids)
