@@ -240,9 +240,9 @@ class MonotoneWOEBinner:
     n_init_bins : int, default 20
         Number of initial equal-frequency bins.
     min_bin_size : float, default 0.03
-        Minimum share of the samples per bin (3% by default). It is used only when ``small_bin_policy`` is set
-        (together with ``min_bad_count`` and ``min_good_count``); with the default ``small_bin_policy=None`` the greedy
-        binning does not enforce it. ``refine_cate`` has its own ``min_bin_size`` argument.
+        Minimum share of the samples per bin (3% by default). It is enforced by ``small_bin_policy`` together with
+        ``min_bad_count`` and ``min_good_count`` (with the default ``'merge'`` a smaller bin is merged into a neighbor);
+        with ``small_bin_policy=None`` it is not enforced. ``refine_cate`` has its own ``min_bin_size`` argument.
     min_n_bins : int, default 2
         Lower limit on the final number of bins (special-value bins excluded).
     eps : float, default 1e-06
@@ -273,19 +273,25 @@ class MonotoneWOEBinner:
         are always shown with N decimals (:.Nf), e.g. with N=2, 1234.5678 → 1234.57.
         Note: lower precision makes the load_woe_bins(get_final_bins())
         round trip slightly inexact at the boundaries, which is usually negligible.
-    min_bad_count : int or None, default None
+    min_bad_count : int or None, default 1
         Minimum number of bad samples that a bin must hold. A bin with fewer bads violates the limit and is handled
-        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None.
-    min_good_count : int or None, default None
-        Minimum number of good samples that a bin must hold. A bin with fewer goods violates the limit and is handled
-        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None.
-    small_bin_policy : {'merge', 'warn', 'raise'} or None, default None
+        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None. The default 1
+        rejects bins without any bad (class-pure bins), whose WOE would otherwise come from ``eps`` alone (about
+        -9.9 for a bin with 2% of the goods).
+    min_good_count : int or None, default 1
+        Minimum number of good samples that a bin must hold, as ``min_bad_count`` for goods (the default 1 rejects bins
+        without any good, whose WOE would be about +9.9).
+    small_bin_policy : {'merge', 'warn', 'raise'} or None, default 'merge'
         How a bin that violates ``min_bad_count``, ``min_good_count`` or ``min_bin_size`` is handled at the end of
         ``fit``, of ``refine_dtree`` and of ``refine_chi2`` (the last one only with ``n_jobs=1``). ``'merge'`` merges
         the violating bin into its WOE-closest neighbor until no bin violates the limits or ``min_n_bins`` is
-        reached (a categorical feature is merged with the bad-rate clustering of ``refine_cate``). ``'warn'`` emits a
+        reached (a categorical feature is merged with the bad-rate clustering of ``refine_cate``); a bin without bads or
+        without goods that cannot be merged because ``min_n_bins`` is reached gets a ``UserWarning``. ``'warn'`` emits a
         ``UserWarning`` and keeps the bins. ``'raise'`` raises ``BinningPolicyViolation`` (a ``ValueError``).
-        None (default) switches the check off, so the three limits are ignored.
+        None switches the check off, so the three limits are ignored: the behavior up to 0.9.0, where a class-pure bin
+        keeps a WOE of about +/-9.9 from ``eps`` and can dominate the IV and a logistic regression. Every bin holding
+        both goods and bads is standard scorecard practice. A pickled binner keeps the settings it was created with
+        (``None`` for every binner from 0.9.0 or earlier).
     monotone_direction : {'auto', 'increasing', 'decreasing'} or dict, default 'auto'
         Expected direction of the WOE across the ordinary bins of the numeric features. ``'auto'`` lets each feature
         take the direction that needs fewer merges; ``'increasing'`` / ``'decreasing'`` force that direction for every
@@ -382,6 +388,13 @@ class MonotoneWOEBinner:
       chi-square values on large datasets.
     """
 
+    # A binner pickled before these settings existed was fitted without the small-bin check: keep it that way when it
+    # is refitted (the instance values set in __init__ take precedence)
+    min_bad_count = None
+    min_good_count = None
+    small_bin_policy = None
+
+
     def __init__(
         self,
         feature_cols: List[str],
@@ -394,9 +407,9 @@ class MonotoneWOEBinner:
         special_values: Optional[List] = None,
         cate_feats: Optional[List[str]] = None,
         bin_label_decimals: Optional[int] = None,
-        min_bad_count: Optional[int] = None,
-        min_good_count: Optional[int] = None,
-        small_bin_policy: Optional[str] = None,
+        min_bad_count: Optional[int] = 1,
+        min_good_count: Optional[int] = 1,
+        small_bin_policy: Optional[str] = "merge",
         monotone_direction: Any = "auto",
         reference_target: Optional[str] = None,
         direction_conflict_policy: Optional[str] = None,
@@ -1253,6 +1266,21 @@ class MonotoneWOEBinner:
                 "reason": reason, "action": "merge",
                 "n_merges": len([t for t in (merge_trace or []) if str(t.get("reason", "")).startswith("small_bin")]),
             }
+        if policy == "merge" and len(wt):
+            # min_n_bins can stop the merging while a bin still has no bad or no good: its WOE then comes from eps
+            pure = [
+                row for _, row in wt.sort_values("bin").iterrows()
+                if (min_bad is not None and row["bad"] < min_bad) or (min_good is not None and row["good"] < min_good)
+            ]
+            if pure:
+                row = pure[0]
+                warnings.warn(
+                    f"{feat}: bin {int(row['bin'])} still has bad={int(row['bad'])}, good={int(row['good'])} after "
+                    f"merging, because min_n_bins={self.min_n_bins} stops further merges; its WOE "
+                    f"({float(row['woe']):.2f}) comes from eps.",
+                    UserWarning,
+                    stacklevel=3,
+                )
         return edges, wt
 
     def _check_direction_conflict(self, feat: str, woes: np.ndarray):
@@ -1783,9 +1811,17 @@ class MonotoneWOEBinner:
         if update is not None:
             result.update(update)
         stats["n_merges"] = max(0, before - int(result["n_bins"]))
-        stats["remaining_violation"] = (
-            self._categorical_small_bin_violation(result["woe_table"]) is not None
-        )
+        remaining = self._categorical_small_bin_violation(result["woe_table"])
+        stats["remaining_violation"] = remaining is not None
+        if remaining is not None and remaining[1] in {"small_bin_min_bad", "small_bin_min_good"}:
+            row = remaining[0]
+            label = str(row.get("bin_label", row.get("cat_value", row.get("bin", "?"))))
+            warnings.warn(
+                f"{feat}: categorical bin {label!r} still has bad={int(row['bad'])}, good={int(row['good'])} after "
+                f"merging; its WOE comes from eps.",
+                UserWarning,
+                stacklevel=3,
+            )
         result["_small_bin_stats_payload"] = stats
         return result
 

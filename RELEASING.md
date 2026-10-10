@@ -46,6 +46,14 @@ and PyPI creates its directory from the artifact's version.
   - 0.4.2 → a future 0.5.0: the default of `PSI_Tool.missing_policy` will flip from `"drop"` to `"include"`
 - **Major** (`X.0.0`): a major architectural change. None is planned.
 
+Documented exceptions:
+
+- **0.9.1** is a patch release that changes numbers: the class-pure WOE bin merge default (`small_bin_policy="merge"`),
+  equal-frequency binning with missing values in their own bin, and the reject-inference and score-comparison fixes. Each
+  is listed with its legacy setting (or "bug fix, no legacy switch") in the "Behavior-changing fixes" box of
+  `docs/changelog/v0.9.1.md` in the doc repository. 0.9.0 was prepared (commit `e1ef627`) but never tagged or published,
+  so 0.9.1 is the release after 0.8.2 on PyPI.
+
 ## Coordinating the repositories
 
 A code change is a coordinated change across the main, doc, and pytest repositories (and the agent repository when needed):

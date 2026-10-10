@@ -40,8 +40,8 @@ class ScoreConsistencyUATPipelineConfig:
     sqlrunner : object or None, default None
         SQL runner whose ``run_sql(sql, n_process=...)`` returns a DataFrame (SQL mode). ``None`` creates
         ``Modeling_Tool.Core.ODPSRunner()``, which reads its credentials from environment variables
-        (``ALIBABA_CLOUD_ACCESS_KEY_ID``, ``ALIBABA_CLOUD_ACCESS_KEY_SECRET``; optional ``ODPS_PROJECT`` and
-        ``ODPS_ENDPOINT``). In DataFrame mode the runner is never called.
+        (``ALIBABA_CLOUD_ACCESS_KEY_ID``, ``ALIBABA_CLOUD_ACCESS_KEY_SECRET``, ``ODPS_PROJECT`` and ``ODPS_ENDPOINT``, all
+        required). In DataFrame mode the runner is never called.
     env_path : str or None, default None
         Path of a ``.env`` file loaded with python-dotenv at the start of ``run`` without overriding variables that are
         already set (``~`` and environment variables in the path are expanded). ``ImportError`` if python-dotenv is not

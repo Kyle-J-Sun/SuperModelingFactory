@@ -33,6 +33,7 @@ from .Weighted_Screen import (
     _weighted_bin_distribution,
     _weighted_corr_for_screen,
     _weighted_iv_detail,
+    _weighted_iv_for_var,
     _weighted_screen_impl,
 )
 
@@ -95,7 +96,9 @@ class FeatureScreenConfig:
         Upper IV limit (gate G02, a leakage guard): features whose IV is above it are dropped and recorded in
         ``dropped_detail`` with the reason ``"iv_above_upper"``. The test uses an IV whose zero-count cells are floored
         at ``content`` where that can be computed, so that near-perfect separators are caught, while ``iv_table`` keeps
-        the regular IV. ``None`` disables the limit.
+        the regular IV. For numeric features the floored IV is computed on equal-frequency bins (weighted on weighted
+        runs) on every path, so it does not depend on how the WOE engine merged its bins. ``None`` disables the
+        limit.
     iv_bins : int, default 10
         Maximum number of bins of the default IV binning: decision-tree leaves on unweighted runs, weighted
         equal-frequency bins on weighted runs (which also derive their PSI bins from it).
@@ -960,6 +963,16 @@ def _weighted_woe_bins_screen(
                 engine_eps=1e-6,
             )
             if floor_content is not None:
+                if pd.api.types.is_numeric_dtype(x_series):
+                    # The leakage gate must not depend on how the WOE engine merged its bins (class-pure bins are
+                    # merged by default since 0.9.1, which can fold a near-perfect separator into one ordinary bin):
+                    # test it on weighted equal-frequency bins, as the unweighted screening on WOE bins does
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        _, _, _, iv_floored = _weighted_iv_for_var(
+                            x_ins, y_ins, w_ins, config.iv_bins, config.min_bin_prop, config.precision,
+                            var_name=var, on_null_edges="silent", content=floor_content,
+                        )
                 iv_floored_map[var] = iv_floored
             iv_records.append({
                 "var": var,

@@ -79,16 +79,28 @@ class ODPSRunner(object):
     _wide_schema_patch_active = False
 
     """ODPS execution class.
+
+    The connection is configured entirely from environment variables, all four required:
+    ``ALIBABA_CLOUD_ACCESS_KEY_ID``, ``ALIBABA_CLOUD_ACCESS_KEY_SECRET``, ``ODPS_PROJECT`` (the project that unqualified
+    table names refer to) and ``ODPS_ENDPOINT`` (the MaxCompute endpoint of your region, from Alibaba Cloud's endpoint
+    list). A missing or empty variable raises ``KeyError`` naming it; there are no built-in defaults.
     """
     def __init__(self):
+        missing = [
+            name
+            for name in ("ALIBABA_CLOUD_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_SECRET", "ODPS_PROJECT", "ODPS_ENDPOINT")
+            if not os.environ.get(name)
+        ]
+        if missing:
+            raise KeyError(
+                f"ODPSRunner needs the environment variables {missing}; set them before creating the runner "
+                "(ODPS_PROJECT is your MaxCompute project and ODPS_ENDPOINT the endpoint of its region)."
+            )
         self.o = ODPS(
             os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
             os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
-            os.environ.get("ODPS_PROJECT", "mex_anls"),
-            endpoint=os.environ.get(
-                "ODPS_ENDPOINT",
-                "https://service.ap-southeast-1-vpc.maxcompute.aliyun-inc.com/api",
-            ),
+            os.environ["ODPS_PROJECT"],
+            endpoint=os.environ["ODPS_ENDPOINT"],
         )
         
         options.retry_times = 6         # number of request retries
