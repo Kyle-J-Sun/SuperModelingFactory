@@ -11,6 +11,23 @@ from . import weighted_eval_utils as _weighted_eval
 
 ###################################################### Private Functions #############################################################
 
+def _with_missing_bin(values, include_missing, fillna, spec_values):
+    """``spec_values`` plus ``fillna`` when missing scores must get a bin of their own.
+
+    With ``include_missing=True`` the binning fills missing scores with ``fillna``. The equal-frequency quantiles would
+    then count the filled rows as the lowest scores and put them in the lowest bin together with real values; declaring
+    ``fillna`` as a special value makes it a bin edge, so the missing rows form their own bin, as with equal-width bins.
+    Nothing is added when no row is missing (or holds ``fillna``), so complete data keeps its bins.
+    """
+    spec = list(spec_values or [])
+    if not include_missing or fillna is None or fillna in spec:
+        return spec
+    numeric = pd.to_numeric(values, errors="coerce")
+    if bool(pd.isna(values).any()) or bool((numeric == fillna).any()):
+        spec.append(fillna)
+    return spec
+
+
 def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5, 
                          min_bin_prop = 0.05, include_missing = True, equal_freq = True, 
                          chi2_method = False, chi2_p = 0.95, init_equi_bins = 2000, 
@@ -82,7 +99,7 @@ def _get_gains_table_scr(data, score, dep, nbins = 10, precision = 5,
                                chi2_p = chi2_p, 
                                init_equi_bins = init_equi_bins, 
                                fillna = fillna, 
-                               spec_values = spec_values, 
+                               spec_values = _with_missing_bin(data[score], include_missing, fillna, spec_values),
                                tree_binning = tree_binning, 
                                random_state = random_state, 
                                return_edges = True, 
@@ -601,7 +618,7 @@ def _get_gains_by_custom_metrics_scr(data, score, dep, nbins = 10, precision = 5
                                chi2_p = chi2_p, 
                                init_equi_bins = init_equi_bins, 
                                fillna = fillna, 
-                               spec_values = spec_values, 
+                               spec_values = _with_missing_bin(data[score], include_missing, fillna, spec_values),
                                tree_binning = tree_binning, 
                                random_state = random_state, 
                                return_edges = True, 
@@ -766,7 +783,9 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     min_bin_prop : float, default 0.05
         Minimum proportion of samples per bin.
     include_missing : bool, default True
-        Whether to include missing values.
+        Whether missing scores are binned. True fills them with ``fillna`` and gives them a bin of their own, ``(-inf,
+        fillna]`` (a score already equal to ``fillna`` joins it); the other bins are computed from the real scores.
+        False leaves the rows with a missing score out.
     score : str, optional
         Name of the score column.
     model : sklearn-like model, optional
@@ -918,6 +937,10 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
         return fnl_df
     
     withSummary = False
+    # Decide the missing bin once from all groups: a group-level decision would number the bins of a group with
+    # missing scores differently from the others
+    if score is not None and score in data.columns:
+        spec_values = _with_missing_bin(data[score], include_missing, fillna, spec_values)
     grp_list = data[grp_name].sort_values(ascending = True).unique().tolist()
     valid_grp_list = [x for x in grp_list if data[data[grp_name].isin([x])].shape[0] >= min_data_size]
     
@@ -1356,7 +1379,9 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     min_bin_prop : float or list, default 0.05
         Minimum proportion of samples per bin.
     include_missing : bool, default False
-        Whether to include missing values.
+        Whether missing scores are binned. True fills them with ``fillna`` and gives them a bin of their own, ``(-inf,
+        fillna]`` (a score already equal to ``fillna`` joins it); the other bins are computed from the real scores.
+        False leaves the rows with a missing score out.
     equal_freq : bool, default True
         True for equal-frequency binning.
     binning_numeric : list, default [True, True]
@@ -1557,7 +1582,7 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
                                      chi2_p = chi2_p, 
                                      init_equi_bins = init_equi_bins, 
                                      fillna = fillna, 
-                                     spec_values = spec_values, 
+                                     spec_values = _with_missing_bin(data[score_list[0]], include_missing, fillna, spec_values),
                                      tree_binning = tree_binning, 
                                      random_state = random_state, 
                                      return_edges = True, 
@@ -1582,7 +1607,7 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
                                      chi2_p = chi2_p, 
                                      init_equi_bins = init_equi_bins, 
                                      fillna = fillna, 
-                                     spec_values = spec_values, 
+                                     spec_values = _with_missing_bin(data[score_list[1]], include_missing, fillna, spec_values),
                                      tree_binning = tree_binning, 
                                      random_state = random_state, 
                                      return_edges = True, 
@@ -1757,7 +1782,9 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
     min_bin_prop : float, default 0.05
         Minimum proportion of samples per bin.
     include_missing : bool, default True
-        Whether to include missing values.
+        Whether missing scores are binned. True fills them with ``fillna`` and gives them a bin of their own, ``(-inf,
+        fillna]`` (a score already equal to ``fillna`` joins it); the other bins are computed from the real scores.
+        False leaves the rows with a missing score out.
     score : str, optional
         Name of the score column.
     model : sklearn-like model, optional
@@ -1837,6 +1864,10 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
                                              withSummary = withSummary)
         return fnl_df
     
+    # Decide the missing bin once from all groups: a group-level decision would number the bins of a group with
+    # missing scores differently from the others
+    if score is not None and score in data.columns:
+        spec_values = _with_missing_bin(data[score], include_missing, fillna, spec_values)
     grp_list = data[grp_name].sort_values(ascending = True).unique().tolist()
     valid_grp_list = [x for x in grp_list if data[data[grp_name].isin([x])].shape[0] >= min_data_size]
     
@@ -1869,7 +1900,9 @@ def get_gains_table_by_cust_metrics(data, dep, nbins = 10, precision = 5, min_bi
 
         fnl_df[grp_colname] = first_grp
 
-        nbins = get_bin_range_list(fnl_df.reset_index())
+        # The first group's table lists only the bins it fills, so its edges need not reach -inf/inf (the empty
+        # missing bin of a group without missing scores is not listed): close them as get_gains_table does
+        nbins = sorted(set(get_bin_range_list(fnl_df.reset_index()) + [-np.inf, np.inf]))
         equal_freq = False
         chi2_method = False
         
@@ -2011,7 +2044,9 @@ class GainsTableCalculator:
     min_bin_prop : float, default 0.05
         Minimum proportion of samples per bin.
     include_missing : bool, default True
-        Whether to include missing values.
+        Whether missing scores are binned. True fills them with ``fillna`` and gives them a bin of their own, ``(-inf,
+        fillna]`` (a score already equal to ``fillna`` joins it); the other bins are computed from the real scores.
+        False leaves the rows with a missing score out.
     score : str, optional
         Name of the score column.
     model : sklearn-like model, optional
@@ -2072,7 +2107,9 @@ class GainsTableCalculator:
         min_bin_prop : float, default 0.05
             Minimum proportion of samples per bin.
         include_missing : bool, default True
-            Whether to include missing values.
+            Whether missing scores are binned. True fills them with ``fillna`` and gives them a bin of their own,
+            ``(-inf, fillna]`` (a score already equal to ``fillna`` joins it); the other bins are computed from the real
+            scores. False leaves the rows with a missing score out.
         score : str, optional
             Name of the score column.
         model : sklearn-like model, optional
