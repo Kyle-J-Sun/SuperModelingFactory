@@ -14,10 +14,10 @@ from . import weighted_eval_utils as _weighted_eval
 def _with_missing_bin(values, include_missing, fillna, spec_values):
     """``spec_values`` plus ``fillna`` when missing scores must get a bin of their own.
 
-    With ``include_missing=True`` the binning fills missing scores with ``fillna``. The equal-frequency quantiles would
-    then count the filled rows as the lowest scores and put them in the lowest bin together with real values; declaring
-    ``fillna`` as a special value makes it a bin edge, so the missing rows form their own bin, as with equal-width bins.
-    Nothing is added when no row is missing (or holds ``fillna``), so complete data keeps its bins.
+    With ``include_missing=True`` the binning fills missing scores with ``fillna`` and gives them a bin of their own when
+    it computes the edges itself. Edges passed in (the synced edges of grouped tables) do not get that bin, so the
+    evaluation tables declare ``fillna`` as a special value, decided once for all groups. Nothing is added when no row
+    is missing (or holds ``fillna``), so complete data keeps its bins.
     """
     spec = list(spec_values or [])
     if not include_missing or fillna is None or fillna in spec:

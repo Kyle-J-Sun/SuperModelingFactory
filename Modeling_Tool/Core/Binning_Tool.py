@@ -7,6 +7,36 @@ from scipy.stats import chi2_contingency, chi2
 from Modeling_Tool._utils.frames import as_binning_numeric
 
 
+def _round_edge(value, precision):
+    """Round a bin edge to ``precision`` decimals, keeping an edge that the rounding would overflow to infinity.
+
+    Python's ``round`` turns a finite value near the float limits (such as the ``-1.797e308`` missing sentinel of
+    ``WOE_Master``) into ``-inf``; that edge then merges with the ``-inf`` edge and the bin it closes disappears.
+    """
+    rounded = round(value, precision)
+    if not np.isfinite(rounded) and np.isfinite(value):
+        return value
+    return rounded
+
+
+def _overflow_merges_edges(edges):
+    """Whether rounding or pandas' interval labels would turn two distinct edges into the same infinity.
+
+    A finite edge near the float limits overflows to ``-inf`` (``inf``) when it is rounded or formatted; that only loses a
+    bin when the same infinity, or a second such edge of the same sign, is among the edges as well.
+    """
+    arr = np.asarray(edges, dtype=float)
+    huge = np.isfinite(arr) & (np.abs(arr) > 1e300)
+    if not bool(huge.any()):
+        return False
+    for sign in (-1.0, 1.0):
+        n_huge = int((np.sign(arr[huge]) == sign).sum())
+        has_inf = bool((np.isinf(arr) & (np.sign(arr) == sign)).any())
+        if n_huge + int(has_inf) > 1:
+            return True
+    return False
+
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def get_max_nbins(data, nbins, min_bin_prop = 0.05):
@@ -304,14 +334,22 @@ class NumVarBinning:
 #             print("Modify Spec Cut Points: ", spec_cut_points)
             
             ## Added
-            spec_values_upper = [x + 0.1**spec_digit for x in self.spec_values]
+            # Near the float limits (the -1.797e308 missing sentinel) adding the step changes nothing: take the next
+            # representable value so that the special value still ends a bin of its own
+            spec_values_upper = [
+                x + 0.1**spec_digit if x + 0.1**spec_digit != x else np.nextafter(x, np.inf) for x in self.spec_values
+            ]
             
             cut_points.extend(spec_cut_points)
             
             ## Added
             cut_points.extend(spec_values_upper)
 
-        cut_points = np.unique(np.array(cut_points).astype("float").round(spec_digit))
+        cut_points = np.array(cut_points).astype("float")
+        with np.errstate(over="ignore"):
+            rounded_points = cut_points.round(spec_digit)
+        # A point the rounding overflows to infinity (the -1.797e308 sentinel) is kept as it is
+        cut_points = np.unique(np.where(np.isfinite(rounded_points) | ~np.isfinite(cut_points), rounded_points, cut_points))
         cut_points = np.insert(cut_points, 0, -np.inf)
         cut_points = np.append(cut_points, np.inf)
         
@@ -690,9 +728,11 @@ def get_bin_range(edges, precision = 5, ascending = False, left_sign = '(', righ
     
     i = 0
     reverse = not ascending
-    # Very large edges (such as the float maximum) overflow to inf when rounded to the given precision; this has always been the case, so no warning is issued
+    # Very large edges (such as the float maximum) overflow to inf when rounded to the given precision, as they always did;
+    # an edge whose overflow would merge it with another one (the -1.797e308 missing sentinel next to -inf) is kept
+    round_edge = _round_edge if _overflow_merges_edges(edges) else round
     with np.errstate(over="ignore"):
-        edges = sorted([round(x, precision) for x in edges], reverse = reverse)
+        edges = sorted([round_edge(x, precision) for x in edges], reverse = reverse)
     res = []
     while i < len(edges) - 1:
         left = edges[i]
@@ -957,8 +997,19 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
         
         if equal_freq:
             nbins = int(get_max_nbins(data, nbins, min_bin_prop))
-            breakpoints = np.percentile(value_no_spec_value, [100 / nbins * i for i in range(1, nbins)])
-            breakpoints = list(breakpoints) + spec_values
+            # The missing rows (filled with `fillna`) get a bin of their own, as in the equal-width branch: they must not
+            # take part in the quantiles, or they join the lowest bin together with real values
+            real_values = value_no_spec_value
+            missing_edge = []
+            if include_missing:
+                is_missing = value_no_spec_value == fillna
+                if bool(is_missing.any()):
+                    real_values = value_no_spec_value[~is_missing]
+                    missing_edge = [fillna]
+            breakpoints = (
+                np.percentile(real_values, [100 / nbins * i for i in range(1, nbins)]) if len(real_values) else []
+            )
+            breakpoints = list(breakpoints) + missing_edge + spec_values
         else:
             nbins = int(get_max_nbins(data, nbins, min_bin_prop))
             min_value = binning_series.replace(fillna, np.nan).min() if include_missing else value_no_spec_value.min()
@@ -979,7 +1030,7 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
                             )
             breakpoints = list(breakpoints)
 #         print("Tree Output: ", breakpoints)
-        breakpoints = [round(x, precision) for x in breakpoints]
+        breakpoints = [_round_edge(x, precision) for x in breakpoints]
         fnl_breakpoints = np.sort(np.unique([-np.inf, *breakpoints, np.inf]))
 #         print("Final Tree Output: ", fnl_breakpoints)
         
@@ -991,6 +1042,10 @@ def quick_binning(data, column, labels = None, nbins = 10, precision = 5, equal_
         
     # pandas rounds the edges to format interval labels; float-max edges overflow
     # to inf there as they always did, so the numpy notice is not useful
+    if labels is None and _overflow_merges_edges(fnl_breakpoints):
+        # Edges near the float limits (the -1.797e308 missing sentinel) would collapse into the same interval label and
+        # merge their bins: number the bins instead (the callers label them from the exact edges)
+        labels = list(range(len(fnl_breakpoints) - 1))
     with np.errstate(over="ignore"):
         binned, bin_edges = pd.cut(
             binning_series, 
@@ -1405,6 +1460,10 @@ def chi2_binning(data, column, nbins = 10, precision = 5, min_bin_prop = 0.05, t
     bin_range_col = bin_colnames[1]
     
     bin_edges = cat_2_list(binning_series)
+    if len(bin_edges) < len(binning_series.cat.categories) + 1 and nvb.cut_points is not None:
+        # pandas rounds the interval ends of the categories; near the float limits (the -1.797e308 missing sentinel)
+        # that overflows to inf and two edges merge, so take the exact cut points instead
+        bin_edges = [float(x) for x in nvb.cut_points]
     
     left_sign='['
     right_sign=')'

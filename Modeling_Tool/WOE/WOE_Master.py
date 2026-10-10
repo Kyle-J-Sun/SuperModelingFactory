@@ -444,9 +444,11 @@ class WOE_Master(object):
             size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
         include_missing : bool, default True
             Include missing values in the binning. They are replaced with ``fillna`` (default ``missing_ref_value``) and
-            share the lowest bin, unless ``equal_freq`` is False or ``spec_values`` contains that value, which gives
-            them a bin of their own (``NaN`` in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
-            sends missing values to the lowest bin.
+            get a bin of their own (``NaN`` in ``MIN`` and ``MAX``) on every binning path; the other bins are fitted on
+            the real values. Up to 0.9.0 the equal-frequency bins counted the filled values in their quantiles, and with
+            the default ``missing_ref_value`` (which the edge rounding overflowed to ``-inf``) the missing rows shared
+            the lowest bin on every path. If False, rows with a missing value are dropped from the fit; ``transform``
+            then sends missing values to the lowest bin.
         fillna : int, float or None, default None
             Value that stands in for missing data while the bins are fitted. ``None`` uses ``missing_ref_value``, which
             is also what ``transform`` fills with, so that a missing value is scored by the bin it was fitted in. Before
@@ -479,8 +481,7 @@ class WOE_Master(object):
         TypeError
             If a variable of ``varlist`` is not numeric (for example a string column).
         ValueError
-            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid, or if
-            ``chi2_config`` is used with the default ``include_missing=True`` and ``missing_ref_value`` (see Notes).
+            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid.
 
         Notes
         -----
@@ -489,8 +490,8 @@ class WOE_Master(object):
           ``N_GOOD``, ``AVG_BAD``, ``AVG_GOOD``, ``BAD_PCT_PER_BIN``, ``GOOD_PCT_PER_BIN``, ``LIFT``, ``WOE``, ``IV`` and
           ``VAR``. A bin without bads (or without goods) gets a finite WOE: ``eps`` (1e-06) is added to its two shares, as in
           ``MonotoneWOEBinner``; the WOE of every other bin is not smoothed.
-        - With the default ``include_missing=True`` and ``missing_ref_value``, ``chi2_config`` raises ``ValueError: Bin
-          edges must be unique``. Pass ``include_missing=False``, or create the object with ``missing_ref_value=-999999``.
+        - Up to 0.9.0, ``chi2_config`` with the default ``include_missing=True`` and ``missing_ref_value`` raised
+          ``ValueError: Bin edges must be unique``; it works now.
         """
         if fillna is None:
             fillna = self.missing_ref_value
@@ -591,8 +592,9 @@ class WOE_Master(object):
 
         Notes
         -----
-        Missing values are replaced by ``missing_ref_value`` before they are binned, so they fall in the lowest bin
-        (or in the missing bin when the mapping table has one). A value that falls in no bin of the mapping table gets
+        Missing values are replaced by ``missing_ref_value`` before they are binned, so they fall in the missing bin of
+        the mapping table, or in the lowest bin when it has none (fitted with ``include_missing=False`` or on data
+        without missing values). A value that falls in no bin of the mapping table gets
         a ``NaN`` WOE, and a warning ``Failed to Map WOE values for N Records`` is logged.
         """
         if data is None:
@@ -641,9 +643,11 @@ class WOE_Master(object):
             size of chi-square merging. It does not enforce a minimum size on quantile, equal width or tree bins.
         include_missing : bool, default True
             Include missing values in the binning. They are replaced with ``fillna`` (default ``missing_ref_value``) and
-            share the lowest bin, unless ``equal_freq`` is False or ``spec_values`` contains that value, which gives
-            them a bin of their own (``NaN`` in ``MIN`` and ``MAX``). If False, rows with a missing value are dropped from the fit; ``transform`` still
-            sends missing values to the lowest bin.
+            get a bin of their own (``NaN`` in ``MIN`` and ``MAX``) on every binning path; the other bins are fitted on
+            the real values. Up to 0.9.0 the equal-frequency bins counted the filled values in their quantiles, and with
+            the default ``missing_ref_value`` (which the edge rounding overflowed to ``-inf``) the missing rows shared
+            the lowest bin on every path. If False, rows with a missing value are dropped from the fit; ``transform``
+            then sends missing values to the lowest bin.
         fillna : int, float or None, default None
             Value that stands in for missing data while the bins are fitted. ``None`` uses ``missing_ref_value``, which
             is also what ``transform`` fills with, so that a missing value is scored by the bin it was fitted in. Before
@@ -676,8 +680,7 @@ class WOE_Master(object):
         TypeError
             If a variable of ``varlist`` is not numeric (for example a string column).
         ValueError
-            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid, or if
-            ``chi2_config`` is used with the default ``include_missing=True`` and ``missing_ref_value`` (see ``fit``).
+            If ``sv_small_policy``, ``sv_woe_smoothing``, ``sv_min_bin_size`` or ``sv_smoothing_alpha`` is invalid.
 
         Notes
         -----
