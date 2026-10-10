@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -69,9 +70,15 @@ class ScoreComparisonPipelineConfig:
     fillna : any, default -999999
         Value used to fill missing scores before binning the gains tables and the ``cross_vars`` cross-risk tables.
     positive_score_only : bool, default True
-        Evaluate the performance tables only on rows where the score is greater than 0, so zero, negative and missing
-        scores are dropped. It does not change the gains tables, and the pairwise cross always requires both scores to
-        be greater than 0.
+        In the performance tables a score counts as valid only where it is greater than 0, so zero, negative and missing
+        scores are dropped (missing and infinite scores are never valid). It does not change the gains tables, and the
+        pairwise cross always requires both scores to be greater than 0.
+    perf_common_rows : bool, default True
+        True evaluates every score of ``global_perf`` and ``group_perf``, the base score included, on the same rows: the
+        rows with an observed target where all the scores are valid, so that the scores are compared on one population.
+        A score without any valid row is left out with a ``UserWarning``. False evaluates each score on its own valid
+        rows (the metrics then describe different populations). The column ``N_OWN`` gives each score's own number of
+        valid rows.
     group_missing_values : list, default ['', ' ', 'NA', 'NULL', 'nan']
         Text values (compared after stripping whitespace) treated as missing in the grouping columns (``split_col``,
         ``time_dims``, ``population_dims`` and the columns of ``group_specs``). Only text columns are inspected, and all
@@ -148,6 +155,7 @@ class ScoreComparisonPipelineConfig:
     include_missing: bool = False
     fillna: Any = -999999
     positive_score_only: bool = True
+    perf_common_rows: bool = True
     group_missing_values: list[Any] = field(default_factory=lambda: ["", " ", "NA", "NULL", "nan"])
     drop_missing_group_values: bool = True
 
@@ -197,7 +205,8 @@ class ScoreComparisonPipelineResult:
     ----------
     global_perf : pandas.DataFrame
         Performance (``N``, ``KS``, ``AUC``, top/bottom decile lift and so on) of the base and comparison scores on the
-        whole sample. One row per score (``score_name``); ``sample_scope`` is ``"global"``.
+        whole sample, on common rows unless ``perf_common_rows`` is False. One row per score (``score_name``) with
+        ``N_OWN``, the score's own number of valid rows; ``sample_scope`` is ``"global"``.
     group_perf : dict of str to pandas.DataFrame
         Same performance metrics per group value, keyed by group name: ``split_col``, each time and population
         column, ``<population>_x_<time>`` crosses, or the ``group_specs`` names. Empty when no group is evaluated.
@@ -306,7 +315,10 @@ class ScoreComparisonPipeline:
 
         global_perf = self._normalize_global_perf(
             met.model_perf_compare(
-                pct_bins=cfg.nbins, min_data_size=cfg.min_data_size, sample_name="global"
+                pct_bins=cfg.nbins,
+                min_data_size=cfg.min_data_size,
+                sample_name="global",
+                sync_data_size=cfg.perf_common_rows,
             )
         )
         gains = met.get_gains_summary(
@@ -568,28 +580,62 @@ class ScoreComparisonPipeline:
     def _run_group_perf(self, met: Any, evaluation_pipeline_cls: Any, data: pd.DataFrame) -> dict[str, pd.DataFrame]:
         cfg = self.config
         results: dict[str, pd.DataFrame] = {}
+        groups_with_dropped_scores: list[str] = []
+
+        def perf_compare(**kwargs: Any) -> pd.DataFrame:
+            # A score missing from one group, or groups whose scores do not overlap, would repeat the same
+            # model_perf_compare warning for every group value: gather them into one warning instead
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                output = met.model_perf_compare(**kwargs)
+            for record in caught:
+                if str(record.message).startswith("model_perf_compare:"):
+                    dropped_in.add(current_spec[0])
+                else:
+                    warnings.warn_explicit(record.message, record.category, record.filename, record.lineno)
+            return output
+
+        dropped_in: set[str] = set()
+        current_spec = [""]
         for spec in self._resolve_group_specs(data):
             name = str(spec.get("name") or "_".join(spec.get("columns", [])))
             columns = list(spec.get("columns", []))
             min_size = int(spec.get("min_size", cfg.min_data_size))
             if not columns or any(col not in data.columns for col in columns):
                 continue
+            current_spec[0] = name
             if len(columns) == 1:
                 results[name] = met.multi_group_wrapper(
                     group_name=columns[0],
                     group_var_name=columns[0],
-                    group_eval_func=met.model_perf_compare,
+                    group_eval_func=perf_compare,
                     min_subset_size=min_size,
                     pct_bins=cfg.nbins,
                     sample_name="global",
+                    sync_data_size=cfg.perf_common_rows,
                 )
             else:
                 pipeline = evaluation_pipeline_cls(met)
                 for col in columns:
                     pipeline = pipeline.group_by(col, min_size=min_size, group_var_name=col)
-                output = pipeline.apply(met.model_perf_compare, pct_bins=cfg.nbins, sample_name="global")
+                output = pipeline.apply(
+                    perf_compare,
+                    pct_bins=cfg.nbins,
+                    sample_name="global",
+                    sync_data_size=cfg.perf_common_rows,
+                )
                 if isinstance(output, pd.DataFrame):
                     results[name] = output
+            if name in dropped_in:
+                groups_with_dropped_scores.append(name)
+        if groups_with_dropped_scores:
+            warnings.warn(
+                f"ScoreComparisonPipeline: in some values of {groups_with_dropped_scores} a score has no valid row, or "
+                f"the scores have no row in common; that score (or that group value) is missing from those group_perf "
+                f"tables.",
+                UserWarning,
+                stacklevel=3,
+            )
         return results
 
     def _resolve_group_specs(self, data: pd.DataFrame) -> list[dict[str, Any]]:

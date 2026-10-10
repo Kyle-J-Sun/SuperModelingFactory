@@ -8,6 +8,8 @@ cross-risk summaries.
 Author: Matrix Agent
 """
 
+import warnings
+
 import pandas as pd
 import numpy as np
 import inspect
@@ -569,14 +571,13 @@ class Model_Evaluation_Tool:
         scores.extend(self.comp_scrlist or [])
         return scores
 
-    def _filter_positive_scores(self, data: pd.DataFrame, scores: List[str]) -> pd.DataFrame:
-        if not self.positive_score_only or not scores:
-            return data
-        mask = pd.Series(True, index=data.index)
-        for score in scores:
-            if score in data.columns:
-                mask &= data[score] > 0
-        return data.loc[mask]
+    def _valid_score_mask(self, values: pd.Series) -> pd.Series:
+        """Rows where the score is a finite number (and above 0 with ``positive_score_only``)."""
+        numeric = pd.to_numeric(values, errors="coerce").astype(float)
+        mask = pd.Series(np.isfinite(numeric.to_numpy()), index=values.index)
+        if self.positive_score_only:
+            mask &= numeric.gt(0).to_numpy()
+        return mask
 
     def _build_performance_evaluator(
         self,
@@ -791,9 +792,8 @@ class Model_Evaluation_Tool:
             Minimum number of rows of a group for it to be evaluated; it only matters when ``grp_name`` is given. Default
             is 50 (the ``min_data_size`` of the instance is not used here).
         sync_data_size : bool, optional
-            Whether all comparison scores are evaluated on the same rows: rows in which any comparison score is not
-            positive are dropped for every comparison score (only effective when ``positive_score_only`` is True; the base
-            score keeps its own rows). Default is True.
+            Whether every score, the base score included, is evaluated on the same rows: the rows with an observed target
+            where every score is valid (see Notes). False evaluates each score on its own valid rows. Default is True.
         min_bin_prop : float, optional
             Minimum bin proportion. Defaults to the instance setting.
         include_missing : bool, optional
@@ -811,14 +811,18 @@ class Model_Evaluation_Tool:
         -------
         pandas.DataFrame
             Performance comparison results sorted by score order: the ``PerformanceEvaluator`` summary of every score
-            (``AUC_Shift`` and ``KS_Shift`` are dropped) with an extra ``score_name`` column. An empty DataFrame is
-            returned when ``base_score`` is not set or no valid row is left.
+            (``AUC_Shift`` and ``KS_Shift`` are dropped) with the extra columns ``score_name`` and ``N_OWN``. An empty
+            DataFrame is returned when ``base_score`` is not set or no valid row is left.
 
         Notes
         -----
-        Rows whose target or base score is missing or infinite are dropped first; with ``positive_score_only=True`` the
-        rows whose score is not positive are dropped per score. With ``weight_col`` set on the instance (and no
-        ``grp_name``) the weighted, narrower summary is returned.
+        A score is valid in a row when it is a finite number and, with ``positive_score_only=True``, greater than 0; rows
+        whose target is missing are never used. The column ``N_OWN`` gives the number of rows (not weights) in which the
+        score alone is valid, so with ``sync_data_size=True`` it shows how much each score's coverage was narrowed to the
+        common rows. A score without any valid row is left out of the result with a ``UserWarning`` instead of emptying
+        the common rows of the others; when the scores have valid rows but none in common, a ``UserWarning`` is issued
+        and an empty DataFrame returned. With ``weight_col`` set on the instance (and no ``grp_name``) the weighted,
+        narrower summary is returned.
         """
         data = self.data.copy() if data is None else data.copy()
         score_list = self.comp_scrlist
@@ -832,29 +836,41 @@ class Model_Evaluation_Tool:
         if base_score is None:
             return pd.DataFrame()
 
-        valid_mask = (
-            data[dep].notna()
-            & data[base_score].notna()
-            & np.isfinite(data[base_score])
-        )
-        clean_data = data.loc[valid_mask]
-        if clean_data.empty:
+        score_order = [score for score in self._score_order() if score in data.columns]
+        target_ok = data[dep].notna()
+        valid = {score: target_ok & self._valid_score_mask(data[score]) for score in score_order}
+        own_n = {score: int(mask.sum()) for score, mask in valid.items()}
+        without_rows = [score for score in score_order if own_n[score] == 0]
+        if without_rows:
+            rule = "a finite value above 0" if self.positive_score_only else "a finite value"
+            warnings.warn(
+                f"model_perf_compare: {without_rows} have no row with an observed target and {rule}; "
+                f"they are left out of the comparison.",
+                UserWarning,
+                stacklevel=2,
+            )
+        active = [score for score in score_order if own_n[score] > 0]
+        if not active:
             return pd.DataFrame()
-
-        shared_data = clean_data.copy()
-        if sync_data_size and score_list:
-            shared_data = self._filter_positive_scores(shared_data, score_list)
+        if sync_data_size:
+            common = target_ok.copy()
+            for score in active:
+                common &= valid[score]
+            if not bool(common.any()):
+                warnings.warn(
+                    f"model_perf_compare: the scores {active} have valid rows but none in common, so they cannot be "
+                    f"compared on the same rows; pass sync_data_size=False to evaluate each score on its own rows.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return pd.DataFrame()
+            rows_for = {score: common for score in active}
+        else:
+            rows_for = {score: valid[score] for score in active}
 
         perf_comp_dict = {}
-        score_order = self._score_order()
-
-        for score in score_order:
-            if score not in clean_data.columns:
-                continue
-            score_data = shared_data if sync_data_size and score in (score_list or []) else clean_data
-            score_data = score_data.loc[score_data[score] > 0] if self.positive_score_only else score_data
-            if score_data.empty:
-                continue
+        for score in active:
+            score_data = data.loc[rows_for[score]]
 
             evaluator = self._build_performance_evaluator(
                 score=score,
@@ -872,6 +888,9 @@ class Model_Evaluation_Tool:
             )
             if isinstance(perf, pd.DataFrame) and not perf.empty and 'index' in perf.columns:
                 perf = perf.query(f"index == '{sample_name}'")
+            if isinstance(perf, pd.DataFrame):
+                perf = perf.copy()
+                perf['N_OWN'] = own_n[score]
             perf_comp_dict[score] = perf
 
         if not perf_comp_dict:
@@ -890,7 +909,7 @@ class Model_Evaluation_Tool:
             if col in perf_comp_res.columns:
                 perf_comp_res = perf_comp_res.drop(columns=[col])
 
-        order_map = {val: i for i, val in enumerate(score_order) if val in perf_comp_dict}
+        order_map = {val: i for i, val in enumerate(active) if val in perf_comp_dict}
         perf_comp_res['sort_key'] = perf_comp_res['score_name'].map(order_map)
         perf_comp_res_sorted = perf_comp_res.sort_values('sort_key').drop('sort_key', axis=1)
 
@@ -1435,8 +1454,8 @@ class Model_Evaluation_Tool:
 
         Notes
         -----
-        The group values are matched as strings (``group_name == 'value'`` in ``DataFrame.query``), so a numeric group
-        column matches no row and gives an empty result. ``self.data`` is replaced by the group while
+        The groups are the distinct non-missing values of ``group_name`` in order of appearance, and the rows are selected
+        by value, so numeric group columns and values containing quotes work. ``self.data`` is replaced by the group while
         ``group_eval_func`` runs and restored afterwards (it is not restored if the function raises an exception).
         """
         original_data = self.data.copy()
@@ -1444,7 +1463,10 @@ class Model_Evaluation_Tool:
         if group_name is None:
             return group_eval_func(**kwargs) if group_eval_func else pd.DataFrame()
         
-        group_value_list = list(set(original_data[group_name].unique().tolist()))
+        group_column = original_data[group_name]
+        # Missing values form no group; the values are matched as values, not through a query string,
+        # so numeric groups and values with quotes work
+        group_value_list = pd.unique(group_column.dropna())
         
         if group_eval_func is None:
             group_eval_func = self.model_perf_compare
@@ -1453,7 +1475,8 @@ class Model_Evaluation_Tool:
         for group_value in group_value_list:
             logger.info(f"INFO:: Multi_Group_Eval: Running Group {group_value}")
             
-            input_data = original_data.query(f"{group_name} == '{group_value}'").copy()
+            in_group = group_column.eq(group_value).fillna(False).astype(bool)
+            input_data = original_data.loc[in_group].copy()
             subset_data_size = input_data.shape[0]
             
             if subset_data_size > min_subset_size:

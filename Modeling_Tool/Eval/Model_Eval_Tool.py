@@ -829,10 +829,12 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     Notes
     -----
     With ``weight_col`` and without ``grp_name`` the call is delegated to the weighted implementation, which only uses
-    ``nbins``, the score (``score``, or ``model`` with ``varlist``), ``ascending`` and ``retSummary``: ``precision``,
-    ``min_bin_prop``, ``include_missing``, ``equal_freq``, ``chi2_method``, ``chi2_p``, ``init_equi_bins``, ``fillna``,
+    ``nbins``, the score (``score``, or ``model`` with ``varlist``), ``ascending``, ``include_missing`` and ``retSummary``:
+    ``precision``, ``min_bin_prop``, ``equal_freq``, ``chi2_method``, ``chi2_p``, ``init_equi_bins``, ``fillna``,
     ``spec_values``, ``tree_binning``, ``random_state``, ``withSummary`` and ``add_func`` are ignored. The weighted table has
-    the bins 1 to ``nbins``, each holding about ``1 / nbins`` of the total weight. With ``grp_name`` the weights are ignored
+    the bins 1 to ``nbins``, each holding about ``1 / nbins`` of the total weight of the rows with a score; rows with a
+    missing score are left out, or reported in a ``Missing`` row with ``include_missing=True``, and rows with a missing
+    target count in ``N`` but not in ``PERF_CNT`` or the bad and good counts. With ``grp_name`` the weights are ignored
     and ``withSummary`` is forced to False.
     """
     
@@ -874,6 +876,7 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
             weight_col=weight_col,
             weighted_binning=weighted_binning,
             ascending=ascending,
+            include_missing=include_missing,
         )
         if retSummary:
             return pd.DataFrame({

@@ -281,7 +281,7 @@ def _split_special_scores(df, score, spec_values):
 
 
 def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binning=None,
-                    ascending=False, spec_values=None, **kwargs):
+                    ascending=False, spec_values=None, include_missing=False, **kwargs):
     """Sample-weight-aware Gains table: equal-weight score bins with their target statistics.
 
     The rows are ranked by score (see ``rank_bins``) and cut into ``nbins`` bins that each hold about ``1 / nbins`` of the
@@ -306,6 +306,9 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     spec_values : list or None, default None
         Special score values (business sentinels such as ``-1``). The rows holding one of them are taken out before the
         binning and reported in rows of their own (see Notes). None or an empty list means no special values.
+    include_missing : bool, default False
+        Rows whose score is missing never enter the bins. False leaves them out of the table; True reports them in a
+        row of their own (see Notes).
     **kwargs
         Accepted and ignored.
 
@@ -316,24 +319,27 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         1 to ``nbins``), with the columns:
 
         - ``MIN``, ``MAX``: lowest and highest score in the bin.
-        - ``N``: sum of the weights in the bin; ``N_RAW``: number of rows; ``PERF_CNT``: same as ``N``.
-        - ``N_BAD``, ``N_GOOD``: weighted counts of bad (``weight * target``) and good (``weight * (1 - target)``) rows.
+        - ``N``: sum of the weights in the bin; ``N_RAW``: number of rows; ``PERF_CNT``: sum of the weights of the rows
+          whose target is observed (rows with a missing target count in ``N`` only, as in the unweighted table).
+        - ``N_BAD``, ``N_GOOD``: weighted counts of bad (``weight * target``) and good (``weight * (1 - target)``) rows
+          among the rows with an observed target.
         - ``AVG_SCORE``: weighted mean score of the bin (NaN when the bin has NaN scores); ``UNIQUE_SCORE``: number of
           distinct scores.
-        - ``PROP``: ``N`` divided by the total weight of all rows, special scores included, so ``PROP`` adds up to 1;
-          ``AVG_BAD`` and ``AVG_GOOD``: ``N_BAD`` and ``N_GOOD`` divided by ``N``.
+        - ``PROP``: ``N`` divided by the total weight of the rows in the table, special (and reported missing) scores
+          included, so ``PROP`` adds up to 1; ``AVG_BAD`` and ``AVG_GOOD``: ``N_BAD`` and ``N_GOOD`` divided by
+          ``PERF_CNT``.
         - ``BAD_PCT_IN_EACH_BIN``, ``GOOD_PCT_IN_EACH_BIN``: share of all bad and all good weight that falls in the bin.
         - ``N_CUM_BAD``, ``N_CUM_GOOD``, ``CUM_BAD_PCT``, ``CUM_GOOD_PCT``: cumulative sums, from bin 1 down, of ``N_BAD``,
           ``N_GOOD``, ``BAD_PCT_IN_EACH_BIN`` and ``GOOD_PCT_IN_EACH_BIN``.
         - ``KS_PER_BIN``: ``abs(CUM_BAD_PCT - CUM_GOOD_PCT)``; ``KS`` is a copy of it.
-        - ``LIFT``: ``AVG_BAD`` divided by the overall bad rate.
+        - ``LIFT``: ``AVG_BAD`` divided by the overall bad rate (``N_BAD`` over ``PERF_CNT`` of all bins).
         - ``TRUE_BAD_SHIFT``: relative change of ``AVG_BAD`` from the previous bin, ``previous / current - 1`` when
           ``ascending`` is False and ``current / previous - 1`` when it is True (NaN in bin 1).
         - ``RANK_ORDER_BUMP``: 1 when ``TRUE_BAD_SHIFT`` is negative (the bad rate is not monotonic), else 0.
         - ``WOE``: ``ln(BAD_PCT_IN_EACH_BIN / GOOD_PCT_IN_EACH_BIN)``, with 0 where it is infinite or undefined; ``IV``:
           ``(BAD_PCT_IN_EACH_BIN - GOOD_PCT_IN_EACH_BIN) * WOE``.
-        - ``AUC``: weighted AUC of the score on the non-special rows (the same value on every row), NaN when it cannot be
-          computed.
+        - ``AUC``: weighted AUC of the score on the non-special rows with an observed target (the same value on every
+          row), NaN when it cannot be computed.
 
     Raises
     ------
@@ -352,25 +358,35 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     column adds up to 1. The other shares (``BAD_PCT_IN_EACH_BIN`` and ``GOOD_PCT_IN_EACH_BIN``), ``LIFT`` and the overall
     bad rate still refer to the rows without a special score.
 
-    Rows with a NaN score are not dropped: they are ranked last (highest bin numbers), the ``AVG_SCORE`` of their bin is NaN
-    and the ``AUC`` is NaN. Rows with the same score can be split across two adjacent bins.
+    Rows with a missing score carry no ranking information and never enter the bins. With ``include_missing=True`` they
+    get one row after the bins (and after the special rows), indexed by ``"Missing"`` in both index levels, with ``N``,
+    ``N_RAW``, ``PERF_CNT``, ``N_BAD``, ``N_GOOD``, ``UNIQUE_SCORE`` (0), ``PROP``, ``AVG_BAD``, ``AVG_GOOD`` and ``AUC``;
+    every other column is NaN. Rows with the same score can be split across two adjacent bins.
     """
     cols = [dep, score]
     if weight_col is not None and weight_col in data.columns:
         cols.append(weight_col)
     df = data[cols].copy()
+    # A missing score has no rank: it would be sorted to the end of the ranking and fill the last bins
+    score_missing = df[score].isna()
+    missing_df = df[score_missing] if bool(score_missing.any()) else None
+    df = df[~score_missing]
     df, special_df = _split_special_scores(df, score, spec_values)
     weight = resolve_weights(df, weight_col=weight_col, expected_len=len(df))
     if weight is None:
         weight = np.ones(len(df), dtype=float)
 
     y = df[dep].astype(float).to_numpy()
+    labelled = ~np.isnan(y)
+    y_obs = np.where(labelled, y, 0.0)
     s = df[score].astype(float).to_numpy()
     df["_bin_num"] = rank_bins(s, weight, nbins, ascending=ascending)
     df["_bin_range"] = df["_bin_num"]
     df["_w"] = weight
-    df["_bad_w"] = weight * y
-    df["_good_w"] = weight * (1.0 - y)
+    # Rows with a missing target are in N but in neither the bad nor the good counts
+    df["_perf_w"] = weight * labelled
+    df["_bad_w"] = weight * y_obs
+    df["_good_w"] = weight * labelled * (1.0 - y_obs)
     df["_score_w"] = weight * s
     grouped = df.groupby(["_bin_num", "_bin_range"], sort=True, dropna=False)
     out = grouped.agg(
@@ -378,7 +394,7 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         MAX=(score, "max"),
         N=("_w", "sum"),
         N_RAW=(dep, "size"),
-        PERF_CNT=("_w", "sum"),
+        PERF_CNT=("_perf_w", "sum"),
         N_BAD=("_bad_w", "sum"),
         N_GOOD=("_good_w", "sum"),
         SCORE_W=("_score_w", "sum"),
@@ -395,21 +411,28 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         ]
     ]
 
-    total_weight = float(out["N"].sum()) or 1.0
+    total_perf = float(out["PERF_CNT"].sum())
     total_bad = float(out["N_BAD"].sum()) or 1.0
     total_good = float(out["N_GOOD"].sum()) or 1.0
-    overall_bad_rate = float(out["N_BAD"].sum()) / total_weight if total_weight else np.nan
+    overall_bad_rate = float(out["N_BAD"].sum()) / total_perf if total_perf else np.nan
 
-    # PROP is the share of the weight of ALL rows, special ones included, so the bins and the special rows add up to 1.
+    # PROP is the share of the weight of ALL rows in the table, special (and reported missing) ones included,
+    # so the bins and the extra rows add up to 1.
     grand_total = float(out["N"].sum())
     if special_df is not None and len(special_df):
         spec_weight = resolve_weights(special_df, weight_col=weight_col, expected_len=len(special_df))
         if spec_weight is None:
             spec_weight = np.ones(len(special_df), dtype=float)
         grand_total += float(np.sum(spec_weight))
+    report_missing = include_missing and missing_df is not None
+    if report_missing:
+        miss_weight = resolve_weights(missing_df, weight_col=weight_col, expected_len=len(missing_df))
+        if miss_weight is None:
+            miss_weight = np.ones(len(missing_df), dtype=float)
+        grand_total += float(np.sum(miss_weight))
     out["PROP"] = out["N"] / grand_total if grand_total else np.nan
-    out["AVG_BAD"] = out["N_BAD"] / out["N"].replace(0, np.nan)
-    out["AVG_GOOD"] = out["N_GOOD"] / out["N"].replace(0, np.nan)
+    out["AVG_BAD"] = out["N_BAD"] / out["PERF_CNT"].replace(0, np.nan)
+    out["AVG_GOOD"] = out["N_GOOD"] / out["PERF_CNT"].replace(0, np.nan)
     out["BAD_PCT_IN_EACH_BIN"] = out["N_BAD"] / total_bad
     out["GOOD_PCT_IN_EACH_BIN"] = out["N_GOOD"] / total_good
     out["N_CUM_BAD"] = out["N_BAD"].cumsum()
@@ -429,41 +452,46 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
         out["WOE"] = np.log(out["BAD_PCT_IN_EACH_BIN"] / out["GOOD_PCT_IN_EACH_BIN"])
     out["WOE"] = out["WOE"].replace([np.inf, -np.inf], 0).fillna(0)
     out["IV"] = (out["BAD_PCT_IN_EACH_BIN"] - out["GOOD_PCT_IN_EACH_BIN"]) * out["WOE"]
-    out["AUC"] = safe_auc(y, s, sample_weight=weight)
+    out["AUC"] = safe_auc(y[labelled], s[labelled], sample_weight=weight[labelled])
 
+    def _extra_row(label, part, part_w, value):
+        part_y = part[dep].astype(float).to_numpy()
+        part_obs = ~np.isnan(part_y)
+        n_w = float(np.sum(part_w))
+        perf_w = float(np.sum(part_w[part_obs]))
+        n_bad = float(np.sum(part_w[part_obs] * part_y[part_obs]))
+        return pd.DataFrame(
+            {
+                "MIN": [value],
+                "MAX": [value],
+                "N": [n_w],
+                "N_RAW": [int(len(part))],
+                "PERF_CNT": [perf_w],
+                "N_BAD": [n_bad],
+                "N_GOOD": [perf_w - n_bad],
+                "AVG_SCORE": [float(value)],
+                "UNIQUE_SCORE": [1 if pd.notna(value) else 0],
+                "PROP": [n_w / grand_total if grand_total else np.nan],
+                "AVG_BAD": [n_bad / perf_w if perf_w else np.nan],
+                "AVG_GOOD": [(perf_w - n_bad) / perf_w if perf_w else np.nan],
+            },
+            index=pd.MultiIndex.from_tuples([(label, label)], names=out.index.names),
+        )
+
+    extra_rows = []
     if special_df is not None and len(special_df):
         # Special sentinel scores (e.g. -1 for all-missing rows) get their own
         # descriptive rows: never part of quantile edges, cumulative columns,
         # or ranking metrics (those stay NaN by construction).
-        spec_rows = []
         for value, part in special_df.groupby(score, sort=True):
             part_w = resolve_weights(part, weight_col=weight_col, expected_len=len(part))
             if part_w is None:
                 part_w = np.ones(len(part), dtype=float)
-            part_y = part[dep].astype(float).to_numpy()
-            n_w = float(np.sum(part_w))
-            n_bad = float(np.sum(part_w * part_y))
-            label = f"special:{value}"
-            spec_rows.append(
-                pd.DataFrame(
-                    {
-                        "MIN": [value],
-                        "MAX": [value],
-                        "N": [n_w],
-                        "N_RAW": [int(len(part))],
-                        "PERF_CNT": [n_w],
-                        "N_BAD": [n_bad],
-                        "N_GOOD": [n_w - n_bad],
-                        "AVG_SCORE": [float(value)],
-                        "UNIQUE_SCORE": [1],
-                        "PROP": [n_w / grand_total if grand_total else np.nan],
-                        "AVG_BAD": [n_bad / n_w if n_w else np.nan],
-                        "AVG_GOOD": [(n_w - n_bad) / n_w if n_w else np.nan],
-                    },
-                    index=pd.MultiIndex.from_tuples([(label, label)], names=out.index.names),
-                )
-            )
-        out = pd.concat([out] + spec_rows)
+            extra_rows.append(_extra_row(f"special:{value}", part, part_w, value))
+    if report_missing:
+        extra_rows.append(_extra_row("Missing", missing_df, miss_weight, np.nan))
+    if extra_rows:
+        out = pd.concat([out] + extra_rows)
         out["AUC"] = out["AUC"].iloc[0]
     return out
 
@@ -533,7 +561,7 @@ def calc_equid_dist(y_true, y_score, bins=10, sample_weight=None, **kwargs):
         Per-sample weights aligned with ``y_true``; None gives every row the weight 1. They are validated like the weights
         of ``get_gains_table``.
     **kwargs
-        Forwarded to ``get_gains_table``: ``ascending`` and ``spec_values`` take effect, other names are ignored.
+        Forwarded to ``get_gains_table``: ``ascending``, ``spec_values`` and ``include_missing`` take effect, other names are ignored.
         ``nbins`` and ``weight_col`` must not be passed (``TypeError``: they are already set).
 
     Returns
@@ -574,8 +602,8 @@ def calc_equid_pct(y_true, y_score, bins=10, sample_weight=None, **kwargs):
     sample_weight : array-like or None, default None
         Per-sample weights aligned with ``y_true``; None gives every row the weight 1.
     **kwargs
-        Forwarded to ``calc_equid_dist`` and then to ``get_gains_table``: ``ascending`` and ``spec_values`` take effect,
-        other names are ignored.
+        Forwarded to ``calc_equid_dist`` and then to ``get_gains_table``: ``ascending``, ``spec_values`` and
+        ``include_missing`` take effect, other names are ignored.
 
     Returns
     -------
