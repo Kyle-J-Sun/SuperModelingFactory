@@ -275,12 +275,14 @@ class MonotoneWOEBinner:
         round trip slightly inexact at the boundaries, which is usually negligible.
     min_bad_count : int or None, default 1
         Minimum number of bad samples that a bin must hold. A bin with fewer bads violates the limit and is handled
-        by ``small_bin_policy``. None means no limit. It has no effect while ``small_bin_policy`` is None. The default 1
+        by ``small_bin_policy``. None means no limit. For ordinary bins it has no effect while ``small_bin_policy`` is
+        None; special-value bins are checked through ``sv_small_policy`` whatever ``small_bin_policy`` is. The default 1
         rejects bins without any bad (class-pure bins), whose WOE would otherwise come from ``eps`` alone (about
         -9.9 for a bin with 2% of the goods).
     min_good_count : int or None, default 1
         Minimum number of good samples that a bin must hold, as ``min_bad_count`` for goods (the default 1 rejects bins
-        without any good, whose WOE would be about +9.9).
+        without any good, whose WOE would be about +9.9). Both limits also apply to special-value bins through
+        ``sv_small_policy`` (reported by default, see there); None for both switches that check off.
     small_bin_policy : {'merge', 'warn', 'raise'} or None, default 'merge'
         How a bin that violates ``min_bad_count``, ``min_good_count`` or ``min_bin_size`` is handled at the end of
         ``fit``, of ``refine_dtree`` and of ``refine_chi2`` (the last one only with ``n_jobs=1``). ``'merge'`` merges
@@ -325,14 +327,22 @@ class MonotoneWOEBinner:
         Threshold for the low-share special-value (SV) fallback (an SV bin's share of the **full**
         sample); 0.0 = off. It must be in [0.0, 1.0).
     sv_small_policy : {'keep', 'neutral', 'merge_missing'}, default 'keep'
-        How an SV bin with a share < sv_min_bin_size is handled:
-        'keep' (default; empirical WOE, no behavior change) /
+        How an SV bin that violates a limit is handled: a share < sv_min_bin_size, or (since 0.9.1) fewer bads than
+        ``min_bad_count`` or fewer goods than ``min_good_count`` (with the defaults of 1: a bin that holds only bads or
+        only goods, whose WOE comes from ``eps``):
+        'keep' (default; empirical WOE, no number changes; a bin below the count limits is flagged in the
+        ``sv_class_pure`` column of the SV table, listed in ``_sv_pure_stats`` and reported by ``fit`` with a
+        ``UserWarning``) /
         'neutral' (woe=iv=0) /
         'merge_missing' (bad/good counts are merged into the [Missing] bin and WOE is recomputed;
         the stored WOE of each merged row is overwritten with the WOE of [Missing];
         without a [Missing] bin it falls back to 'neutral' and warns).
+        Missing values form an SV bin only when NaN is listed in ``special_values``; otherwise they score
+        ``missing_woe`` and are not checked.
     sv_woe_smoothing : {'none', 'laplace'}, default 'none'
-        Whether SV-bin WOE is shrunk toward the global bad rate, 'none' (default) / 'laplace'.
+        Whether SV-bin WOE is shrunk toward the global bad rate, 'none' (default) / 'laplace': the bin's bad rate is
+        shrunk toward the global bad rate with ``sv_smoothing_alpha`` as a pseudo-count on the whole bin, so the effect
+        fades as the bin grows and a large class-pure SV bin keeps an extreme WOE.
     sv_smoothing_alpha : float, default 0.0
         Smoothing strength alpha (pseudo-count); 0.0 is numerically equivalent to the old WOE. It must be >= 0.
         Approach 1 takes precedence: a low-share bin handled by the fallback is **not** smoothed
@@ -579,6 +589,8 @@ class MonotoneWOEBinner:
         # G08: populated when small_bin_policy is active; {feat: {bin_label,
         # bad, good, thresholds, action}}.
         self._small_bin_stats: Dict[str, dict] = {}
+        # Special-value bins below min_bad_count / min_good_count, per feature (see _warn_class_pure_bins)
+        self._sv_pure_stats: Dict[str, list] = {}
         # G09: populated when direction machinery is active; {feat: {expected,
         # final, basis, action}}.
         self._direction_stats: Dict[str, dict] = {}
@@ -1049,15 +1061,26 @@ class MonotoneWOEBinner:
                 ):
                     unseen_values.append(sv)
                 continue
+            # An SV bin below min_bad_count / min_good_count (a class-pure bin with the defaults of 1) is a violation of
+            # sv_small_policy like a low-share bin: 'keep' (default) only flags it (a warning is emitted by fit),
+            # 'neutral' and 'merge_missing' neutralize or merge it
+            sv_bad = float(sv_df[self.target_col].sum())
+            sv_good = float((sv_df[self.target_col] == 0).sum())
+            violates_counts = self._sv_violates_counts(sv_bad, sv_good)
             if not governance_on:
                 stats = self._compute_woe_single_bin(sv_df, total_bad, total_good)
             else:
                 label = _sv_label(sv)
                 is_small = (
                     self.sv_small_policy != "keep"
-                    and self.sv_min_bin_size > 0.0
-                    and n_total > 0
-                    and len(sv_df) / n_total < self.sv_min_bin_size
+                    and (
+                        violates_counts
+                        or (
+                            self.sv_min_bin_size > 0.0
+                            and n_total > 0
+                            and len(sv_df) / n_total < self.sv_min_bin_size
+                        )
+                    )
                     # [Missing] is the merge *target*, never a merge source.
                     and not (self.sv_small_policy == "merge_missing"
                              and label == "[Missing]")
@@ -1080,6 +1103,8 @@ class MonotoneWOEBinner:
                     missing_row_idx = len(records)
             stats["bin_label"] = _sv_label(sv)
             stats["sv"] = sv
+            if self._sv_count_check_active():
+                stats["sv_class_pure"] = violates_counts
             records.append(stats)
         sv_table = pd.DataFrame(records) if records else pd.DataFrame()
         if (
@@ -1090,6 +1115,13 @@ class MonotoneWOEBinner:
             sv_table = self._merge_small_into_missing(
                 sv_table, missing_row_idx, total_bad, total_good
             )
+            # the merge target now holds the merged rows: judge it on its final counts
+            target = sv_table["sv_policy_applied"] == "merge_target"
+            if target.any() and "sv_class_pure" in sv_table.columns:
+                sv_table.loc[target, "sv_class_pure"] = [
+                    self._sv_violates_counts(float(b), float(g))
+                    for b, g in zip(sv_table.loc[target, "bad"], sv_table.loc[target, "good"])
+                ]
         # De-duplicate placeholder bins by value: no overlap with real rows or other placeholder bins (-1 and -1.0 count as the same value)
         taken = {key for _, key, _ in self._sv_table_entries(sv_table) if isinstance(key, float)}
         placeholder_svs = []
@@ -1101,7 +1133,8 @@ class MonotoneWOEBinner:
             placeholders = pd.DataFrame([
                 dict(n=0, bad=0, good=0, bad_rate=0.0, pct_bad=0.0, pct_good=0.0,
                      woe=float(self.missing_woe), iv=0.0, bin_label=_sv_label(sv), sv=sv,
-                     sv_policy_applied="unseen_at_fit")
+                     sv_policy_applied="unseen_at_fit",
+                     **({"sv_class_pure": False} if self._sv_count_check_active() else {}))
                 for sv in placeholder_svs
             ])
             if len(sv_table) == 0:
@@ -1111,6 +1144,92 @@ class MonotoneWOEBinner:
                     sv_table = sv_table.assign(sv_policy_applied="keep")
                 sv_table = pd.concat([sv_table, placeholders], ignore_index=True)
         return sv_table
+
+    def _sv_count_check_active(self) -> bool:
+        """The SV count check needs a limit: binners without one (min_bad_count=min_good_count=None, every binner pickled
+        with 0.9.0 or earlier) keep their sv_table exactly as before, without the ``sv_class_pure`` column."""
+        return getattr(self, "min_bad_count", None) is not None or getattr(self, "min_good_count", None) is not None
+
+    def _sv_violates_counts(self, bad: float, good: float) -> bool:
+        """Whether an SV bin is below ``min_bad_count`` or ``min_good_count`` (a class-pure bin with the defaults)."""
+        min_bad = getattr(self, "min_bad_count", None)
+        min_good = getattr(self, "min_good_count", None)
+        return bool(
+            (min_bad is not None and bad < min_bad) or (min_good is not None and good < min_good)
+        )
+
+    def _warn_class_pure_bins(self, feats: List[str], special: bool = True) -> None:
+        """Warn, in the calling process, about the bins of ``feats`` that hold too few bads or goods.
+
+        Ordinary bins: with ``small_bin_policy='merge'``, a violating bin that ``min_n_bins`` kept. Special-value
+        bins (``special=True``): every SV bin flagged ``sv_class_pure``, recorded in ``_sv_pure_stats``. Emitting the
+        warnings here, from the fitted results, makes them reach the caller also when ``n_jobs > 1`` fits in worker
+        processes.
+        """
+        if getattr(self, "_sv_pure_stats", None) is None:
+            self._sv_pure_stats = {}
+        min_bad = getattr(self, "min_bad_count", None)
+        min_good = getattr(self, "min_good_count", None)
+        for feat in feats:
+            vr = self._results.get(feat)
+            if not vr:
+                continue
+            wt = vr.get("woe_table")
+            if (
+                getattr(self, "small_bin_policy", None) == "merge"
+                and wt is not None and len(wt)
+                and {"bad", "good"} <= set(wt.columns)
+            ):
+                for _, row in wt.iterrows():
+                    if not ((min_bad is not None and row["bad"] < min_bad)
+                            or (min_good is not None and row["good"] < min_good)):
+                        continue
+                    pure = row["bad"] == 0 or row["good"] == 0
+                    what = (f"its WOE ({float(row['woe']):.2f}) comes from eps" if pure
+                            else f"min_bad_count={min_bad}, min_good_count={min_good}")
+                    if vr.get("is_categorical"):
+                        label = str(row.get("bin_label", row.get("cat_value", row.get("bin", "?"))))
+                        warnings.warn(
+                            f"{feat}: categorical bin {label!r} still has bad={int(row['bad'])}, "
+                            f"good={int(row['good'])} after merging; {what}.",
+                            UserWarning, stacklevel=3,
+                        )
+                    else:
+                        warnings.warn(
+                            f"{feat}: bin {int(row['bin'])} still has bad={int(row['bad'])}, good={int(row['good'])} "
+                            f"after merging, because min_n_bins={self.min_n_bins} stops further merges; {what}.",
+                            UserWarning, stacklevel=3,
+                        )
+                    break
+            if not special:
+                continue
+            sv_table = vr.get("sv_table")
+            if sv_table is None or len(sv_table) == 0 or "sv_class_pure" not in sv_table.columns:
+                self._sv_pure_stats.pop(feat, None)
+                continue
+            flagged = sv_table[sv_table["sv_class_pure"].astype(bool)]
+            if flagged.empty:
+                self._sv_pure_stats.pop(feat, None)
+                continue
+            records = []
+            for _, row in flagged.iterrows():
+                action = str(row["sv_policy_applied"]) if "sv_policy_applied" in sv_table.columns else "keep"
+                records.append({
+                    "feature": feat, "special_value": row["sv"], "bin_label": row["bin_label"],
+                    "n": int(row["n"]), "bad": int(row["bad"]), "good": int(row["good"]),
+                    "woe": float(row["woe"]), "action": action,
+                })
+            self._sv_pure_stats[feat] = records
+            listed = "; ".join(
+                f"{r['bin_label']} n={r['n']}, bad={r['bad']}, good={r['good']}, WOE {r['woe']:.2f} ({r['action']})"
+                for r in records
+            )
+            warnings.warn(
+                f"{feat}: special-value bin(s) below min_bad_count={min_bad} / min_good_count={min_good}: {listed}. "
+                f"A class-pure SV bin's WOE comes from eps; sv_small_policy='neutral' or 'merge_missing' neutralizes "
+                f"or merges such bins, the default 'keep' keeps them.",
+                UserWarning, stacklevel=3,
+            )
 
     def _merge_small_into_missing(
         self, sv_table: pd.DataFrame, missing_row_idx: Optional[int],
@@ -1266,21 +1385,7 @@ class MonotoneWOEBinner:
                 "reason": reason, "action": "merge",
                 "n_merges": len([t for t in (merge_trace or []) if str(t.get("reason", "")).startswith("small_bin")]),
             }
-        if policy == "merge" and len(wt):
-            # min_n_bins can stop the merging while a bin still has no bad or no good: its WOE then comes from eps
-            pure = [
-                row for _, row in wt.sort_values("bin").iterrows()
-                if (min_bad is not None and row["bad"] < min_bad) or (min_good is not None and row["good"] < min_good)
-            ]
-            if pure:
-                row = pure[0]
-                warnings.warn(
-                    f"{feat}: bin {int(row['bin'])} still has bad={int(row['bad'])}, good={int(row['good'])} after "
-                    f"merging, because min_n_bins={self.min_n_bins} stops further merges; its WOE "
-                    f"({float(row['woe']):.2f}) comes from eps.",
-                    UserWarning,
-                    stacklevel=3,
-                )
+        # A violating bin that min_n_bins kept is reported by _warn_class_pure_bins from the fitted results
         return edges, wt
 
     def _check_direction_conflict(self, feat: str, woes: np.ndarray):
@@ -1811,17 +1916,9 @@ class MonotoneWOEBinner:
         if update is not None:
             result.update(update)
         stats["n_merges"] = max(0, before - int(result["n_bins"]))
-        remaining = self._categorical_small_bin_violation(result["woe_table"])
-        stats["remaining_violation"] = remaining is not None
-        if remaining is not None and remaining[1] in {"small_bin_min_bad", "small_bin_min_good"}:
-            row = remaining[0]
-            label = str(row.get("bin_label", row.get("cat_value", row.get("bin", "?"))))
-            warnings.warn(
-                f"{feat}: categorical bin {label!r} still has bad={int(row['bad'])}, good={int(row['good'])} after "
-                f"merging; its WOE comes from eps.",
-                UserWarning,
-                stacklevel=3,
-            )
+        stats["remaining_violation"] = (
+            self._categorical_small_bin_violation(result["woe_table"]) is not None
+        )
         result["_small_bin_stats_payload"] = stats
         return result
 
@@ -1941,6 +2038,7 @@ class MonotoneWOEBinner:
                 self._direction_basis[feat] = f"reference_target:{self.reference_target}"
         self._small_bin_stats = {}
         self._direction_stats = {}
+        self._sv_pure_stats = {}
 
         sv_hint   = f", special_values={self.special_values}" if self.special_values else ""
         cate_hint = f", cate_feats={len(self.cate_feats)} features" if self.cate_feats else ""
@@ -2036,6 +2134,7 @@ class MonotoneWOEBinner:
         self._is_fitted = True
         # Placed after _is_fitted: when warnings are turned into errors fit raises, but the binning result stays in the fitted state
         self._record_unseen_special_values()
+        self._warn_class_pure_bins([f for f in all_fit_feats if f in self._results])
         n_mono = sum(1 for v in self._results.values() if v["is_monotonic"])
         method = "greedy+chi2" if chi2_binning else "greedy"
         logger.info(f"[MonotoneWOEBinner] Fit finished ({method}): "
@@ -2241,6 +2340,7 @@ class MonotoneWOEBinner:
             f"[refine_chi2] Done, {len(target_feats) - n_skipped}/{len(target_feats)} "
             f"features took part in the merging"
         )
+        self._warn_class_pure_bins([f for f in target_feats if f in self._results], special=False)
         return self
 
     # ── refine_dtree ─────────────────────────────────────────────────────────
@@ -2522,6 +2622,7 @@ class MonotoneWOEBinner:
                     )
 
         logger.info(f"[refine_dtree] Done, {len(target_feats)} features processed")
+        self._warn_class_pure_bins([f for f in target_feats if f in self._results], special=False)
         return self
 
     # ── refine_cate ──────────────────────────────────────────────────────────

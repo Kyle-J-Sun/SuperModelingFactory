@@ -19,6 +19,7 @@ from typing import Union, Optional, List, Dict, Any, Tuple
 from sklearn.model_selection import train_test_split
 from Modeling_Tool.Eval.Model_Eval_Tool import PerformanceEvaluator
 from Modeling_Tool.Core.utils import get_feature_names
+def _build_imblearn_sampler(sampler_cls, random_state = None, **kwargs): ...
 def select_sample_seed(master_df, oot_split_col, model, tgt_name, seed_range = (3000, 3050), ins_prop = 0.7): ...
 
 class SampleSplitter:
