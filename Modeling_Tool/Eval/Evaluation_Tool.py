@@ -954,10 +954,10 @@ class Model_Evaluation_Tool:
         grp_nbins : int, optional
             Number of bins for grouped analysis. Default is 5.
         withSummary : bool, optional
-            Include summary row. Default is True. It is not applied with ``grp_name`` or on the weighted path.
+            Include summary row. Default is True. It is not applied with ``grp_name``.
         add_func : callable, optional
             Custom metric function merged into each gains table. When it is given, all the columns of the Gains table are
-            returned instead of only ``gains_display_metric_list``. It is ignored on the weighted path.
+            returned instead of only ``gains_display_metric_list``. It is applied on the weighted path too.
         sync_range : bool, optional
             Synchronize bin ranges across the groups (used with ``grp_name`` only). Default is True.
         spec_values : list, optional
@@ -978,7 +978,8 @@ class Model_Evaluation_Tool:
         Notes
         -----
         When the instance has a ``weight_col`` and ``grp_name`` is None, the weighted Gains table is returned (``N`` is the
-        sum of the weights and ``N_RAW`` the number of rows) and ``add_func`` and ``withSummary`` are ignored.
+        sum of the weights and ``N_RAW`` the number of rows), with the ``add_func`` columns and the summary row when they
+        are asked for.
         """
         if grp_disp_metric is None:
             grp_disp_metric = ['N', 'PROP', 'AVG_BAD', 'LIFT']

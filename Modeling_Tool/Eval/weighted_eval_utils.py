@@ -281,7 +281,8 @@ def _split_special_scores(df, score, spec_values):
 
 
 def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binning=None,
-                    ascending=False, spec_values=None, include_missing=False, **kwargs):
+                    ascending=False, spec_values=None, include_missing=False, add_func=None, withSummary=False,
+                    **kwargs):
     """Sample-weight-aware Gains table: equal-weight score bins with their target statistics.
 
     The rows are ranked by score (see ``rank_bins``) and cut into ``nbins`` bins that each hold about ``1 / nbins`` of the
@@ -309,6 +310,19 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     include_missing : bool, default False
         Rows whose score is missing never enter the bins. False leaves them out of the table; True reports them in a
         row of their own (see Notes).
+    add_func : callable or None, default None
+        Custom statistics function, as in the unweighted table. It receives the rows of one row of the table as a
+        DataFrame (all the columns of ``data`` plus ``_bin_num`` and ``_bin_range``) and returns a Series whose values
+        become extra columns; the special and ``Missing`` rows get their values too. It sees the weight column like any
+        other column, so a weighted statistic is up to the function.
+    withSummary : bool, default False
+        Whether to add a ``Grand Summary`` row (indexed by ``("Grand Summary", "")``) after all the other rows. Its ``N``,
+        ``N_RAW``, ``PERF_CNT``, ``N_BAD``, ``N_GOOD``, ``AVG_BAD``, ``AVG_GOOD`` and ``PROP`` cover every row of the table,
+        special and ``Missing`` rows included; ``MIN``, ``MAX``, ``AVG_SCORE`` (weighted) and ``UNIQUE_SCORE`` cover the
+        rows with a score. ``BAD_PCT_IN_EACH_BIN``, ``GOOD_PCT_IN_EACH_BIN``, ``RANK_ORDER_BUMP`` and ``IV`` are the sums
+        and ``KS_PER_BIN`` and ``KS`` the maximum over the bins, ``WOE`` is the mean of the bins' WOE, ``AUC`` is the AUC,
+        and ``N_CUM_BAD``, ``N_CUM_GOOD``, ``CUM_BAD_PCT``, ``CUM_GOOD_PCT``, ``LIFT`` and ``TRUE_BAD_SHIFT`` take the
+        values of the unweighted summary row (the totals, 1, 1, 1 and 1). The ``add_func`` columns are NaN in it.
     **kwargs
         Accepted and ignored.
 
@@ -367,6 +381,9 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
     if weight_col is not None and weight_col in data.columns:
         cols.append(weight_col)
     df = data[cols].copy()
+    if add_func is not None:
+        # Remember each row's position so that add_func can see all the columns of data for the rows of each table row
+        df["_smf_row_pos"] = np.arange(len(df))
     # A missing score has no rank: it would be sorted to the end of the ranking and fill the last bins
     score_missing = df[score].isna()
     missing_df = df[score_missing] if bool(score_missing.any()) else None
@@ -478,7 +495,10 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
             index=pd.MultiIndex.from_tuples([(label, label)], names=out.index.names),
         )
 
+    bins = out
     extra_rows = []
+    # The rows behind each row of the table, labelled like it, for add_func
+    row_parts = [(df, df["_bin_num"].to_numpy())]
     if special_df is not None and len(special_df):
         # Special sentinel scores (e.g. -1 for all-missing rows) get their own
         # descriptive rows: never part of quantile edges, cumulative columns,
@@ -488,11 +508,67 @@ def get_gains_table(data, dep, score, nbins=10, weight_col=None, weighted_binnin
             if part_w is None:
                 part_w = np.ones(len(part), dtype=float)
             extra_rows.append(_extra_row(f"special:{value}", part, part_w, value))
+            row_parts.append((part, [f"special:{value}"] * len(part)))
     if report_missing:
         extra_rows.append(_extra_row("Missing", missing_df, miss_weight, np.nan))
+        row_parts.append((missing_df, ["Missing"] * len(missing_df)))
     if extra_rows:
         out = pd.concat([out] + extra_rows)
         out["AUC"] = out["AUC"].iloc[0]
+
+    if add_func is not None:
+        pieces = []
+        for part, labels in row_parts:
+            piece = data.iloc[part["_smf_row_pos"].to_numpy()].copy()
+            piece["_bin_num"] = list(labels)
+            piece["_bin_range"] = list(labels)
+            pieces.append(piece)
+        rows = pd.concat(pieces)
+        # Explicitly select all columns (including the grouping columns), as in the unweighted table
+        added = rows.groupby(["_bin_num", "_bin_range"], sort=False, dropna=False)[
+            rows.columns.unique().tolist()
+        ].apply(add_func)
+        out = out.merge(added, left_index=True, right_index=True, how="left")
+
+    if withSummary:
+        scored = df if special_df is None else pd.concat([df, special_df])
+        scored_w = resolve_weights(scored, weight_col=weight_col, expected_len=len(scored))
+        if scored_w is None:
+            scored_w = np.ones(len(scored), dtype=float)
+        scored_s = scored[score].astype(float).to_numpy()
+        n_bad, n_good, perf = float(out["N_BAD"].sum()), float(out["N_GOOD"].sum()), float(out["PERF_CNT"].sum())
+        summary = {
+            "MIN": float(np.min(scored_s)) if len(scored_s) else np.nan,
+            "MAX": float(np.max(scored_s)) if len(scored_s) else np.nan,
+            "N": float(out["N"].sum()),
+            "N_RAW": int(out["N_RAW"].sum()),
+            "PERF_CNT": perf,
+            "N_BAD": n_bad,
+            "N_GOOD": n_good,
+            "AVG_SCORE": float(np.sum(scored_w * scored_s) / np.sum(scored_w)) if np.sum(scored_w) else np.nan,
+            "UNIQUE_SCORE": int(scored[score].nunique()),
+            "PROP": float(out["PROP"].sum()),
+            "AVG_BAD": n_bad / perf if perf else np.nan,
+            "AVG_GOOD": n_good / perf if perf else np.nan,
+            "BAD_PCT_IN_EACH_BIN": float(bins["BAD_PCT_IN_EACH_BIN"].sum()),
+            "GOOD_PCT_IN_EACH_BIN": float(bins["GOOD_PCT_IN_EACH_BIN"].sum()),
+            "N_CUM_BAD": n_bad,
+            "N_CUM_GOOD": n_good,
+            "CUM_BAD_PCT": 1.0,
+            "CUM_GOOD_PCT": 1.0,
+            "KS_PER_BIN": float(bins["KS_PER_BIN"].max()),
+            "KS": float(bins["KS"].max()),
+            "LIFT": 1.0,
+            "TRUE_BAD_SHIFT": 1.0,
+            "RANK_ORDER_BUMP": int(bins["RANK_ORDER_BUMP"].sum()),
+            "WOE": float(bins["WOE"].mean()),
+            "IV": float(bins["IV"].sum()),
+            "AUC": float(bins["AUC"].iloc[0]) if len(bins) else np.nan,
+        }
+        summary_row = pd.DataFrame(
+            summary, index=pd.MultiIndex.from_tuples([("Grand Summary", "")], names=out.index.names)
+        )
+        out = pd.concat([out, summary_row])
     return out
 
 

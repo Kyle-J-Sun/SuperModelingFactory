@@ -827,7 +827,8 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     add_func : callable, optional
         Custom statistics function. It receives the rows of one bin as a DataFrame (all the columns of ``data`` plus the bin
         columns ``_bin_num`` and ``_bin_range``) and returns a Series whose values become extra columns of the table.
-        It is ignored on the weighted path.
+        On the weighted path it is applied to the rows of every row of the table the same way; the weight column is one
+        of the columns it sees.
     weight_col : str, optional
         Name of the sample weight column; when provided and ``grp_name`` is not given, the Gains table is
         aggregated by weight (``N`` in the output is the sum of the weights and ``N_RAW`` is the number of rows).
@@ -848,13 +849,14 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
     Notes
     -----
     With ``weight_col`` and without ``grp_name`` the call is delegated to the weighted implementation, which only uses
-    ``nbins``, the score (``score``, or ``model`` with ``varlist``), ``ascending``, ``include_missing`` and ``retSummary``:
-    ``precision``, ``min_bin_prop``, ``equal_freq``, ``chi2_method``, ``chi2_p``, ``init_equi_bins``, ``fillna``,
-    ``spec_values``, ``tree_binning``, ``random_state``, ``withSummary`` and ``add_func`` are ignored. The weighted table has
+    ``nbins``, the score (``score``, or ``model`` with ``varlist``), ``ascending``, ``include_missing``, ``add_func``,
+    ``withSummary`` and ``retSummary``: ``precision``, ``min_bin_prop``, ``equal_freq``, ``chi2_method``, ``chi2_p``,
+    ``init_equi_bins``, ``fillna``, ``spec_values``, ``tree_binning`` and ``random_state`` are ignored. The weighted table has
     the bins 1 to ``nbins``, each holding about ``1 / nbins`` of the total weight of the rows with a score; rows with a
     missing score are left out, or reported in a ``Missing`` row with ``include_missing=True``, and rows with a missing
-    target count in ``N`` but not in ``PERF_CNT`` or the bad and good counts. With ``grp_name`` the weights are ignored
-    and ``withSummary`` is forced to False.
+    target count in ``N`` but not in ``PERF_CNT`` or the bad and good counts. Its ``Grand Summary`` row
+    (``withSummary=True``) covers all the rows of the table (see ``weighted_eval_utils.get_gains_table``). With
+    ``grp_name`` the weights are ignored and ``withSummary`` is forced to False.
     """
     
     if weight_col is not None and grp_name is None:
@@ -896,6 +898,8 @@ def get_gains_table(data, dep, nbins = 10, precision = 5, min_bin_prop = 0.05, i
             weighted_binning=weighted_binning,
             ascending=ascending,
             include_missing=include_missing,
+            add_func=None if retSummary else add_func,
+            withSummary=withSummary and not retSummary,
         )
         if retSummary:
             return pd.DataFrame({
@@ -1384,8 +1388,9 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
         False leaves the rows with a missing score out.
     equal_freq : bool, default True
         True for equal-frequency binning.
-    binning_numeric : list, default [True, True]
-        Whether to bin numeric columns.
+    binning_numeric : list, tuple or bool, default [True, True]
+        Whether to bin each of the two columns when it is numeric (``[first, second]``); a single bool applies to both
+        and None means ``[True, True]``.
     agg_func : str, callable, tuple or dict, default 'mean'
         Aggregation function.
         
@@ -1447,8 +1452,11 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     ------
     ValueError
         If the ratio syntax is used without a numerator and a denominator (for ``agg_func='ratio'``, ``agg_col`` must be a
-        two-element list or tuple), if a ratio column is not in ``data``, or if weights are combined with anything other
-        than the plain ``agg_func='mean'``.
+        two-element list or tuple), if a ratio column is not in ``data``, if weights are combined with anything other
+        than the plain ``agg_func='mean'``, or if ``binning_numeric`` is a list, tuple or array that does not have two
+        elements.
+    TypeError
+        If ``binning_numeric`` is not None, a bool, a list, a tuple or a numpy array.
 
     Notes
     -----
@@ -1465,6 +1473,21 @@ def cross_risk(data, score_list, dep, nbins, agg_col = None, precision = 5, min_
     
     if agg_col is None:
         agg_col = dep
+
+    # A single bool applies to both columns (it used to be indexed and raised TypeError)
+    if binning_numeric is None:
+        binning_numeric = [True, True]
+    elif isinstance(binning_numeric, (bool, np.bool_)):
+        binning_numeric = [bool(binning_numeric), bool(binning_numeric)]
+    elif isinstance(binning_numeric, (list, tuple, np.ndarray)):
+        if len(binning_numeric) != 2:
+            raise ValueError(
+                "binning_numeric must be a bool or a two-element list, tuple or array; "
+                f"got {len(binning_numeric)} elements."
+            )
+        binning_numeric = [bool(binning_numeric[0]), bool(binning_numeric[1])]
+    else:
+        raise TypeError("binning_numeric must be None, a bool, or a two-element list, tuple or array.")
 
     resolved_weight = None
     if weight_col is not None or sample_weight is not None or wgt_col is not None:
@@ -2187,8 +2210,8 @@ class GainsTableCalculator:
             Whether to use all the data for binning.
         add_func : callable, optional
             Custom statistics function. It receives the rows of one bin as a DataFrame (all the columns of ``data`` plus
-            the bin columns ``_bin_num`` and ``_bin_range``) and returns a Series whose values become extra columns. It is
-            ignored on the weighted path.
+            the bin columns ``_bin_num`` and ``_bin_range``) and returns a Series whose values become extra columns, on
+            the weighted path too.
         weight_col : str, optional
             Sample weight column for this call; it overrides the ``weight_col`` of the calculator. Default is None, i.e.
             the calculator's ``weight_col``.
@@ -2202,7 +2225,8 @@ class GainsTableCalculator:
         -----
         The call is delegated to ``get_gains_table`` with the settings of the calculator. When a weight column applies and
         ``grp_name`` is None, the weighted Gains table (bins 1 to ``nbins``, each with about ``1 / nbins`` of the total
-        weight) is returned and ``add_func`` and ``withSummary`` are ignored; with ``grp_name`` the weights are ignored.
+        weight) is returned, with the ``add_func`` columns and the ``Grand Summary`` row when they are asked for; with
+        ``grp_name`` the weights are ignored.
         Like ``get_gains_table``, it returns the integer -1, -2 or -3 (instead of raising) when neither ``score`` nor a
         ``model`` with ``varlist`` was given to the calculator.
         """

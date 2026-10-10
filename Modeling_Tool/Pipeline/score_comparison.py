@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from ._common import (
@@ -48,7 +50,11 @@ class ScoreComparisonPipelineConfig:
         Not used by this pipeline; kept so that all high-level Pipeline configs share the same interface.
     write_outputs : bool, default True
         Whether to write CSV files to ``<output_dir>/report``: ``step1_global_perf.csv``, ``step2_by_<group>.csv``,
-        ``step3_gains_with_metrics.csv``, ``step4_<score>__<cross_var>__<metric>.csv`` and ``step4_pairwise.csv``.
+        ``step3_gains_with_metrics.csv``, ``step4_<score>__<cross_var>__<metric>.csv`` and ``step4_pairwise.csv``. In the
+        file names, characters that a file name cannot hold (``/ \\ : * ? " < > |`` and control characters) become
+        ``_``, and a name that would repeat another one (ignoring case) gets a ``_2``, ``_3`` ... suffix, so every
+        table is written to its own file in ``report``. The keys of ``group_perf`` and ``cross_results`` are not
+        changed.
     write_excel : bool, default True
         Whether to write ``<output_dir>/report/Score_Comparison_Report.xlsx`` (its path is returned in
         ``report_path``).
@@ -59,8 +65,9 @@ class ScoreComparisonPipelineConfig:
     equal_freq : bool, default True
         Whether to use equal-frequency binning.
     min_data_size : int, default 50
-        Minimum number of rows a group value needs to be evaluated (smaller groups are skipped). It is also the
-        default for ``group_min_size``.
+        Minimum number of rows a group value needs to be evaluated (smaller groups are skipped; a group with exactly
+        this many rows is evaluated, for single columns and crossed groups alike). It is also the default for
+        ``group_min_size``.
     precision : int, default 5
         Decimal precision of bin boundaries and of the score ranges (not applied to the ``cross_vars`` tables).
     include_missing : bool, default False
@@ -106,8 +113,10 @@ class ScoreComparisonPipelineConfig:
         ``cols``) and optional ``name`` and ``min_size``. Specs with a column missing from the data are skipped
         silently; invalid specs raise ``ValueError``.
     gains_add_func : callable or None, default None
-        Function ``f(df) -> pandas.Series`` applied to every gains bin to add extra metric columns. ``None`` adds the
-        mean of every ``custom_metric_cols`` column present in the data as ``<col>_mean``.
+        Function ``f(df) -> pandas.Series`` applied to every gains bin to add extra metric columns, with and without
+        ``weight_col`` (the function sees the weight column among the columns of the bin). ``None`` adds the mean of
+        every ``custom_metric_cols`` column present in the data as ``<col>_mean``, weighted by ``weight_col`` when it is
+        set.
     custom_metric_cols : list of str, default ['credit_limit', 'age', 'apr']
         Business columns averaged in the default gains metrics and used in the default ``cross_metrics`` (mean) and
         ``pairwise_cross_agg_dict`` (count and mean). Columns absent from the data are skipped silently.
@@ -124,9 +133,8 @@ class ScoreComparisonPipelineConfig:
         ``custom_metric_cols`` column present in the data. Invalid items raise ``TypeError``, ``ValueError`` or
         ``KeyError``.
     cross_binning_numeric : list of bool or bool, default [True, False]
-        ``[bin the score, bin the cross variable]`` for numeric columns in ``cross_results``. Give a two-element list: a
-        single ``bool`` passes the annotation but ``cross_risk`` indexes the value and raises ``TypeError``. It does not
-        affect ``pairwise_cross``.
+        ``[bin the score, bin the cross variable]`` for numeric columns in ``cross_results``; a single ``bool`` applies to
+        both. A list or tuple of another length raises ``ValueError``. It does not affect ``pairwise_cross``.
     pairwise_cross_enabled : bool, default True
         Whether to compute ``pairwise_cross``, the cross of the base score with each comparison score.
     pairwise_cross_agg_dict : dict or None, default None
@@ -211,8 +219,9 @@ class ScoreComparisonPipelineResult:
         Same performance metrics per group value, keyed by group name: ``split_col``, each time and population
         column, ``<population>_x_<time>`` crosses, or the ``group_specs`` names. Empty when no group is evaluated.
     gains : pandas.DataFrame
-        Gains table of every score on the whole sample (one block of bins per ``score_name``), with the metrics of
-        ``gains_add_func`` or the ``custom_metric_cols`` means.
+        Gains table of every score on the whole sample (one block of bins per ``score_name``, each ending with its
+        ``Grand Summary`` row), with the metrics of ``gains_add_func`` or the ``custom_metric_cols`` means. With
+        ``weight_col`` it is the weighted table, with the same extra columns and summary row.
     cross_results : dict of str to pandas.DataFrame
         Cross-risk tables keyed ``<score>__<cross_var>__<metric_name>``. Empty when ``cross_vars`` is empty.
     pairwise_cross : pandas.DataFrame or None, default None
@@ -367,12 +376,17 @@ class ScoreComparisonPipeline:
             )
 
         if cfg.write_outputs:
+            # Group names, scores, cross variables and metric names come from the user: a "/" in one of them would
+            # write into a subfolder, so they are made safe (and unique) as file names
+            used_names = {"step1_global_perf", "step3_gains_with_metrics", "step4_pairwise"}
             safe_to_csv(global_perf, report_dir / "step1_global_perf.csv", index=False)
             for name, df in group_perf.items():
-                safe_to_csv(df, report_dir / f"step2_by_{name}.csv", index=False)
+                stem = self._safe_file_stem(f"step2_by_{name}", used_names)
+                safe_to_csv(df, report_dir / f"{stem}.csv", index=False)
             safe_to_csv(gains, report_dir / "step3_gains_with_metrics.csv", index=False)
             for key, df in cross_results.items():
-                safe_to_csv(df, report_dir / f"step4_{key}.csv", index=True)
+                stem = self._safe_file_stem(f"step4_{key}", used_names)
+                safe_to_csv(df, report_dir / f"{stem}.csv", index=True)
             safe_to_csv(pairwise_cross, report_dir / "step4_pairwise.csv", index=False)
 
         report_path = None
@@ -506,15 +520,38 @@ class ScoreComparisonPipeline:
             if values.empty:
                 raise ValueError(f"split_col {cfg.split_col!r} must contain at least one non-empty value")
 
+    @staticmethod
+    def _safe_file_stem(stem: str, used: set[str]) -> str:
+        clean = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", str(stem)).rstrip(" .") or "_"
+        candidate, i = clean, 2
+        while candidate.lower() in used:
+            candidate = f"{clean}_{i}"
+            i += 1
+        used.add(candidate.lower())
+        return candidate
+
     def _custom_metrics_func(self, sub_df: pd.DataFrame) -> pd.Series:
         cfg = self.config
-        return pd.Series(
-            {
-                f"{col}_mean": round(sub_df[col].mean(), 4)
-                for col in cfg.custom_metric_cols
-                if col in sub_df.columns
-            }
-        )
+        weights = None
+        if cfg.weight_col and cfg.weight_col in sub_df.columns:
+            # The weighted gains table: the means are weighted like the rest of the table
+            weights = sub_df[cfg.weight_col].astype(float)
+        metrics = {}
+        for col in cfg.custom_metric_cols:
+            if col not in sub_df.columns:
+                continue
+            if weights is None:
+                metrics[f"{col}_mean"] = round(sub_df[col].mean(), 4)
+                continue
+            values = sub_df[col]
+            observed = values.notna().to_numpy()
+            total = float(weights[observed].sum())
+            metrics[f"{col}_mean"] = (
+                round(float(np.sum(values[observed].astype(float) * weights[observed]) / total), 4)
+                if total > 0
+                else np.nan
+            )
+        return pd.Series(metrics)
 
     def _default_cross_metrics(self, data: pd.DataFrame | None = None) -> dict[str, tuple[str, Any]]:
         cfg = self.config
@@ -605,11 +642,13 @@ class ScoreComparisonPipeline:
                 continue
             current_spec[0] = name
             if len(columns) == 1:
+                # multi_group_wrapper keeps the groups with MORE than min_subset_size rows, while min_size is the
+                # minimum a group needs (as in the crossed groups below)
                 results[name] = met.multi_group_wrapper(
                     group_name=columns[0],
                     group_var_name=columns[0],
                     group_eval_func=perf_compare,
-                    min_subset_size=min_size,
+                    min_subset_size=min_size - 1,
                     pct_bins=cfg.nbins,
                     sample_name="global",
                     sync_data_size=cfg.perf_common_rows,
