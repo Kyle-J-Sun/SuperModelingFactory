@@ -32,7 +32,12 @@ from .Weighted_Screen import (
     _fallback_weighted_iv,
     _corr_filter_dropped_audit,
     _gate_ranking_iv_map,
+    DEFAULT_IV_GAP_ABS_WARN,
+    DEFAULT_IV_GAP_RATIO_WARN,
+    DEFAULT_IV_UPPER_THRESHOLD,
+    _check_iv_gap_thresholds,
     _empty_iv_table,
+    _flag_iv_gaps,
     _gate_iv_without_sv_pure,
     _IV_TABLE_COLS,
     _iv_band_keep,
@@ -103,15 +108,18 @@ class FeatureScreenConfig:
         Whether to run the IV stage.
     iv_threshold : float, default 0.02
         Lower IV limit: a feature is kept when its IV is at least this value.
-    iv_upper_threshold : float or None, default None
-        Upper IV limit (gate G02, a leakage guard): features whose IV is above it are dropped and recorded in
-        ``dropped_detail`` with the reason ``"iv_above_upper"``. The test uses an IV whose zero-count cells are floored
-        at ``content`` where that can be computed, so that near-perfect separators are caught, while ``iv_table`` keeps
-        the regular IV. For numeric features the floored IV is computed on equal-frequency bins (weighted on weighted
-        runs) on every path, so it does not depend on how the WOE engine merged its bins or on
-        ``screen_iv_convention``. A feature that would not exceed the limit without its class-pure special-value bins
-        (a special value that holds only bads can be a label leak) is dropped as well, with the reason
-        ``"iv_above_upper_sv_pure"`` so that a human can review it. ``None`` disables the limit.
+    iv_upper_threshold : float or None, default 2.0
+        Upper IV limit (gate G02, a leakage guard), on by default since 0.9.3: features whose IV is above it are dropped
+        and recorded in ``dropped_detail`` with the reason ``"iv_above_upper"``. The test never uses the guarded ``iv``,
+        which leaves class-pure bins out and so understates exactly the near-perfect separators the limit targets. It
+        uses an IV whose zero-count cells are floored at ``content``: for numeric features on equal-frequency bins
+        (weighted on weighted runs) on every path, so it does not depend on how the WOE engine merged its bins. On WOE
+        bins under ``screen_iv_convention="guarded"`` it uses the larger of that value and ``iv_raw`` (every WOE bin
+        counted), and ``iv_raw`` alone where the floored IV cannot be computed (non-numeric features); under
+        ``"raw"`` and without WOE bins the test is that of 0.9.2. A feature that would not exceed the limit without its
+        class-pure special-value bins (a special value that holds only bads can be a label leak) is dropped as well,
+        with the reason ``"iv_above_upper_sv_pure"`` so that a human can review it. ``None`` disables the limit (the
+        default up to 0.9.2).
     iv_bins : int, default 10
         Maximum number of bins of the default IV binning: decision-tree leaves on unweighted runs, weighted
         equal-frequency bins on weighted runs (which also derive their PSI bins from it).
@@ -263,6 +271,16 @@ class FeatureScreenConfig:
         which reproduces 0.9.1. ``iv_table`` reports both (``iv`` and ``iv_raw``) with ``iv_sv_pure`` and
         ``n_sv_pure``, and ``stage_tables["iv_sv_pure_bins"]`` lists the class-pure special-value bins. The paths
         without WOE bins are not affected. Any other value raises ``ValueError``.
+    iv_gap_ratio_warn : float, default 2.0
+        Leak warning (0.9.3): a feature with ``iv > 0`` and ``iv_raw / iv`` at or above this value gets
+        ``iv_gap_flag=True`` in ``iv_table`` and a ``UserWarning`` ("possible leakage or unresolved class-pure bins;
+        review before training"). An ``iv`` at or below ``1e-12`` counts as zero and only ``iv_gap_abs_warn`` applies.
+        The rule only warns and flags; it never drops a feature, and the flag is set also for a feature that the IV
+        stage drops. Under ``screen_iv_convention="raw"``, and without WOE bins, ``iv`` equals ``iv_raw`` and nothing is
+        flagged. Must be above 1 (``inf`` switches the rule off; ``ValueError`` otherwise).
+    iv_gap_abs_warn : float, default 0.5
+        Leak warning (0.9.3): flag and warn as above when ``iv_raw - iv`` is at or above this value. Must be positive
+        (``inf`` switches the rule off; ``ValueError`` otherwise).
 
     Notes
     -----
@@ -280,7 +298,7 @@ class FeatureScreenConfig:
     psi_use_woe_bins: bool = False
     iv_enabled: bool = True
     iv_threshold: float = 0.02
-    iv_upper_threshold: float | None = None
+    iv_upper_threshold: float | None = DEFAULT_IV_UPPER_THRESHOLD
     iv_bins: int = 10
     iv_min_bin_prop: float = 0.05
     iv_equal_freq: bool = True
@@ -339,11 +357,15 @@ class FeatureScreenConfig:
     vif_use_woe_bins: bool = False
     # 0.9.2: class-pure bins of the IV on WOE bins ("guarded" leaves them out of the sum; "raw" is 0.9.1)
     screen_iv_convention: Literal["guarded", "raw"] = "guarded"
+    # 0.9.3: warn about (and flag) features whose iv_raw is far above iv; never drops
+    iv_gap_ratio_warn: float = DEFAULT_IV_GAP_RATIO_WARN
+    iv_gap_abs_warn: float = DEFAULT_IV_GAP_ABS_WARN
 
     def __post_init__(self) -> None:
         _check_iv_equal_freq(self.iv_equal_freq)
         _check_tie_breaker(self.tie_breaker)
         check_screen_iv_convention(self.screen_iv_convention)
+        _check_iv_gap_thresholds(self.iv_gap_ratio_warn, self.iv_gap_abs_warn)
         self.psi_compare_splits = _normalize_psi_compare_splits(self.psi_compare_splits)
         self.corr_method = str(self.corr_method).strip().lower()
         if self.corr_method not in ("pearson", "spearman", "kendall"):
@@ -428,8 +450,10 @@ def screen_config_from_mapping(
         psi_use_woe_bins=bool(cfg.get("psi_use_woe_bins", False)),
         iv_enabled=bool(cfg.get("iv_enabled", True)),
         iv_threshold=float(cfg.get("iv_threshold", 0.02)),
+        # a missing key takes the default (2.0 since 0.9.3); an explicit None switches the limit off
         iv_upper_threshold=(
-            float(cfg["iv_upper_threshold"]) if cfg.get("iv_upper_threshold") is not None else None
+            DEFAULT_IV_UPPER_THRESHOLD if "iv_upper_threshold" not in cfg
+            else (float(cfg["iv_upper_threshold"]) if cfg["iv_upper_threshold"] is not None else None)
         ),
         iv_bins=iv_nbins,
         iv_min_bin_prop=float(cfg.get("iv_min_bin_prop", 0.05)),
@@ -479,6 +503,8 @@ def screen_config_from_mapping(
         screen_iv_convention=str(  # type: ignore[arg-type]
             screen_iv_convention if screen_iv_convention is not None else cfg.get("screen_iv_convention", "guarded")
         ),
+        iv_gap_ratio_warn=float(cfg.get("iv_gap_ratio_warn", DEFAULT_IV_GAP_RATIO_WARN)),
+        iv_gap_abs_warn=float(cfg.get("iv_gap_abs_warn", DEFAULT_IV_GAP_ABS_WARN)),
     )
 
 
@@ -715,9 +741,13 @@ def _woe_bins_unweighted_screen(
             iv_table = iv.assign(iv_weighted=iv["iv"])
             if not use_binner:  # the decision-tree IV: the convention does not apply
                 iv_table = iv_table.assign(iv_raw=iv["iv"], iv_sv_pure=np.nan, n_sv_pure=np.nan)
-            iv_table = iv_table[_IV_TABLE_COLS]
+            iv_table = _flag_iv_gaps(
+                iv_table.assign(iv_gap_flag=False), config.iv_gap_ratio_warn, config.iv_gap_abs_warn,
+            )[_IV_TABLE_COLS]
+            # under the guarded convention on WOE bins the upper limit also tests iv_raw, never the guarded iv (0.9.3)
+            gate_raw_col = "iv_raw" if use_binner and config.screen_iv_convention == "guarded" else None
             if config.iv_upper_threshold is not None:
-                gate_frame = iv[["var", "iv"]].copy()
+                gate_frame = iv_table[["var", "iv", "iv_raw"]].copy()
                 gate_frame["iv_floored"] = _unit_weight_floored_iv(
                     ins, list(gate_frame["var"]), target_col,
                     iv_bins=config.iv_bins, min_bin_prop=config.iv_min_bin_prop,
@@ -727,11 +757,11 @@ def _woe_bins_unweighted_screen(
                 gate_frame["iv_sv_free"] = _gate_iv_without_sv_pure(
                     gate_frame, sv_pure_bins, ins, target_col, None, iv_col="iv", upper_col="iv_floored",
                     iv_bins=config.iv_bins, min_bin_prop=config.iv_min_bin_prop, precision=5,
-                    content=config.content, convention=config.screen_iv_convention,
+                    content=config.content, convention=config.screen_iv_convention, raw_col=gate_raw_col,
                 )
                 keep = _iv_band_keep(
                     gate_frame, "iv", config.iv_threshold, config.iv_upper_threshold,
-                    dropped_rows, upper_col="iv_floored", sv_free_col="iv_sv_free",
+                    dropped_rows, upper_col="iv_floored", sv_free_col="iv_sv_free", raw_col=gate_raw_col,
                 )
             else:
                 keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
@@ -1050,21 +1080,25 @@ def _weighted_woe_bins_screen(
                 **iv_columns,
             })
         iv_table = pd.DataFrame(iv_records, columns=_IV_TABLE_COLS) if iv_records else _empty_iv_table()
+        iv_table = _flag_iv_gaps(iv_table, config.iv_gap_ratio_warn, config.iv_gap_abs_warn)[_IV_TABLE_COLS]
+        # under the guarded convention the upper limit also tests iv_raw, never the guarded iv (0.9.3)
+        gate_raw_col = "iv_raw" if config.screen_iv_convention == "guarded" else None
         sv_pure_bins = sv_pure_frame(sv_pure_rows)
         if not sv_pure_bins.empty:
             stage_tables["iv_sv_pure_bins"] = sv_pure_bins
         if not iv_table.empty:
             if config.iv_upper_threshold is not None:
-                gate_frame = iv_table[["var", "iv_weighted"]].copy()
+                gate_frame = iv_table[["var", "iv_weighted", "iv_raw"]].copy()
                 gate_frame["iv_floored"] = gate_frame["var"].map(iv_floored_map)
                 gate_frame["iv_sv_free"] = _gate_iv_without_sv_pure(
                     gate_frame, sv_pure_bins, ins, target_col, w_ins, iv_col="iv_weighted", upper_col="iv_floored",
                     iv_bins=config.iv_bins, min_bin_prop=config.min_bin_prop, precision=config.precision,
-                    content=config.content, convention=config.screen_iv_convention,
+                    content=config.content, convention=config.screen_iv_convention, raw_col=gate_raw_col,
                 )
                 keep = _iv_band_keep(
                     gate_frame, "iv_weighted", config.iv_threshold,
                     config.iv_upper_threshold, dropped_rows, upper_col="iv_floored", sv_free_col="iv_sv_free",
+                    raw_col=gate_raw_col,
                 )
             else:
                 keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)

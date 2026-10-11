@@ -28,7 +28,6 @@ from .PSI_Tool import _psi_distributions_from_counts, _validate_psi_bucket_polic
 from .Feature_Insights import (
     CorrelationFilter as _BaseCorrelationFilter,
     VarExtractionInsights as _BaseVarExtractionInsights,
-    var_corr_filter,
 )
 from .Distribution_Tool import proc_means_for_screening
 

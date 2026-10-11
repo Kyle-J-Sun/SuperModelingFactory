@@ -58,6 +58,11 @@ Documented exceptions:
   `FeatureValidationPipelineConfig` and `CreditModelPipelineConfig`). `screen_iv_convention="raw"` restores the 0.9.1
   numbers and selections. The WOE of the bins and the scoring do not change. See the "Behavior-changing fixes (exception
   to RELEASING.md)" section of `docs/changelog/v0.9.2.md` in the doc repository.
+- **0.9.3** is a patch release that changes which features are selected: `iv_upper_threshold` (the leakage limit of the
+  screening) defaults to 2.0 instead of `None` and, on WOE bins under the guarded convention, tests `iv_raw` rather than
+  the guarded IV, so features that 0.9.2 kept can be dropped. A new leak warning and `iv_gap_flag` column change no
+  number. `iv_upper_threshold=None` (with `screen_iv_convention="raw"` for 0.9.1 numbers) restores the 0.9.2 selections.
+  See the "Behavior changes (exception to RELEASING.md)" box of `docs/changelog/v0.9.3.md` in the doc repository.
 
 ## Coordinating the repositories
 

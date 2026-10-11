@@ -6,6 +6,7 @@ import logging
 import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Literal
 
 import numpy as np
@@ -229,7 +230,9 @@ class FeatureValidationPipelineConfig:
         target.
     selection_params : dict, default {}
         Screening settings read by the pipeline; other keys are ignored. Thresholds: ``psi_threshold`` (0.2),
-        ``psi_compare_splits`` (['oos']), ``iv_threshold`` (0.02), ``iv_upper_threshold``, ``corr_threshold`` (or
+        ``psi_compare_splits`` (['oos']), ``iv_threshold`` (0.02), ``iv_upper_threshold`` (2.0 since 0.9.3; ``None``
+        switches the leakage limit off), ``iv_gap_ratio_warn`` (2.0) and ``iv_gap_abs_warn`` (0.5) of the leak
+        warning, ``corr_threshold`` (or
         ``corr_cutpoint``), ``missing_rate_threshold``, ``max_selected_features``, ``min_selected_features``. Stability
         gates: ``monthly_iv_min``, ``monthly_iv_cv_max``, ``direction_consistency_min``, ``min_group_n``,
         ``insufficient_group_policy``, ``target_rules``, ``min_pass_count``, ``per_target_iv_range``,
@@ -2247,7 +2250,7 @@ class FeatureValidationPipeline:
             return
 
     def _build_selection_config(self) -> Any:
-        from Modeling_Tool.Feature.Feature_Screen import screen_config_from_mapping
+        from Modeling_Tool.Feature.Feature_Screen import FeatureScreenConfig, screen_config_from_mapping
 
         cfg = self.config
         params = dict(cfg.selection_params or {})
@@ -2262,7 +2265,10 @@ class FeatureValidationPipeline:
             "psi_use_woe_bins": params.get("psi_use_woe_bins", cfg.psi_use_woe_bins),
             "iv_enabled": params.get("iv_enabled", cfg.ivks_enabled),
             "iv_threshold": params.get("iv_threshold", 0.02),
-            "iv_upper_threshold": params.get("iv_upper_threshold"),
+            # 2.0 since 0.9.3 (an explicit None switches the limit off)
+            "iv_upper_threshold": params.get("iv_upper_threshold", FeatureScreenConfig().iv_upper_threshold),
+            "iv_gap_ratio_warn": params.get("iv_gap_ratio_warn", FeatureScreenConfig().iv_gap_ratio_warn),
+            "iv_gap_abs_warn": params.get("iv_gap_abs_warn", FeatureScreenConfig().iv_gap_abs_warn),
             "iv_nbins": params.get("iv_nbins", psi_params.get("buckets", 10)),
             "iv_min_bin_prop": params.get("iv_min_bin_prop", psi_params.get("min_bin_prop", 0.05)),
             "iv_equal_freq": params.get("iv_equal_freq", True),
@@ -2607,6 +2613,9 @@ class FeatureValidationPipeline:
             "corr_use_woe_bins": screen_cfg.corr_use_woe_bins,
             "n_incumbent_features": len(incumbent_features),
             "iv_upper_threshold": screen_cfg.iv_upper_threshold,
+            "iv_gap_ratio_warn": screen_cfg.iv_gap_ratio_warn,
+            "iv_gap_abs_warn": screen_cfg.iv_gap_abs_warn,
+            "screen_iv_convention": screen_cfg.screen_iv_convention,
             "monthly_iv_min": screen_cfg.monthly_iv_min,
             "monthly_iv_cv_max": screen_cfg.monthly_iv_cv_max,
             "direction_consistency_min": screen_cfg.direction_consistency_min,

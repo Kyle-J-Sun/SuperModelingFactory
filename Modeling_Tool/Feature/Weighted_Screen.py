@@ -10,7 +10,7 @@ from typing import Any, Callable, Literal
 import numpy as np
 import pandas as pd
 
-from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight, weighted_rate
+from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 from Modeling_Tool._utils.robust import iv_guard
 
 _MISSING_BIN = "__MISSING__"
@@ -23,8 +23,16 @@ _DROPPED_DETAIL_COLS = ["var", "stage", "metric", "value", "threshold", "reason"
 
 
 # ``iv_weighted`` is the IV that the stage tests (kept for compatibility); ``iv`` is the same value under its 0.9.2 name,
-# ``iv_raw`` the IV with every bin counted, ``iv_sv_pure`` / ``n_sv_pure`` the IV and rows of the class-pure bins.
-_IV_TABLE_COLS = ["var", "iv_weighted", "n_bins", "missing_rate", "iv", "iv_raw", "iv_sv_pure", "n_sv_pure"]
+# ``iv_raw`` the IV with every bin counted, ``iv_sv_pure`` / ``n_sv_pure`` the IV and rows of the class-pure bins, and
+# ``iv_gap_flag`` (0.9.3) marks a feature whose ``iv_raw`` is far above ``iv`` (see ``_flag_iv_gaps``).
+_IV_TABLE_COLS = [
+    "var", "iv_weighted", "n_bins", "missing_rate", "iv", "iv_raw", "iv_sv_pure", "n_sv_pure", "iv_gap_flag",
+]
+
+# Defaults of the 0.9.3 leak checks, shared by ``FeatureScreenConfig`` and ``weighted_feature_screen``.
+DEFAULT_IV_UPPER_THRESHOLD = 2.0
+DEFAULT_IV_GAP_RATIO_WARN = 2.0
+DEFAULT_IV_GAP_ABS_WARN = 0.5
 
 
 def _empty_iv_table() -> pd.DataFrame:
@@ -43,7 +51,61 @@ def _iv_table_without_woe_bins(iv_table: pd.DataFrame) -> pd.DataFrame:
     table["iv_raw"] = table["iv_weighted"]
     table["iv_sv_pure"] = np.nan
     table["n_sv_pure"] = np.nan
+    table["iv_gap_flag"] = False  # iv_raw equals iv: the gap rule cannot fire
     return table[_IV_TABLE_COLS]
+
+
+def _check_iv_gap_thresholds(ratio: Any, absolute: Any) -> None:
+    """Raise ``ValueError`` unless ``iv_gap_ratio_warn > 1`` and ``iv_gap_abs_warn > 0`` (``inf`` switches a rule off)."""
+    def _number(value: Any) -> bool:
+        return isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_))
+
+    ratio_ok = _number(ratio) and float(ratio) > 1.0
+    absolute_ok = _number(absolute) and float(absolute) > 0.0
+    if not ratio_ok:
+        raise ValueError(f"iv_gap_ratio_warn must be a number above 1 (inf switches the rule off); got {ratio!r}")
+    if not absolute_ok:
+        raise ValueError(f"iv_gap_abs_warn must be a positive number (inf switches the rule off); got {absolute!r}")
+
+
+def _iv_gap_mask(iv: Any, iv_raw: Any, ratio: float, absolute: float) -> np.ndarray:
+    """The gap rule of 0.9.3: ``(iv > 0 and iv_raw / iv >= ratio) or (iv_raw - iv >= absolute)``.
+
+    An ``iv`` at or below ``1e-12`` counts as zero, and then only the difference rule applies. NaN never flags.
+    """
+    iv = np.asarray(iv, dtype=float)
+    iv_raw = np.asarray(iv_raw, dtype=float)
+    positive = iv > 1e-12
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio_hit = positive & (iv_raw / np.where(positive, iv, 1.0) >= float(ratio))
+        difference_hit = (iv_raw - iv) >= float(absolute)
+    return np.asarray(ratio_hit | difference_hit, dtype=bool)
+
+
+def _flag_iv_gaps(iv_table: pd.DataFrame, ratio: float, absolute: float, *, warn: bool = True) -> pd.DataFrame:
+    """Set ``iv_gap_flag`` and warn once per flagged feature (0.9.3).
+
+    Under ``screen_iv_convention="guarded"`` the reported ``iv`` leaves class-pure bins out of the sum, so a near-perfect
+    separator or a large class-pure special-value bin can look ordinary in ``iv`` while ``iv_raw`` stays high. The flag
+    is set from the gap rule alone, also for a feature that the IV stage drops; it never drops anything itself.
+    """
+    table = iv_table.copy()
+    if table.empty:
+        table["iv_gap_flag"] = pd.Series(dtype=bool)
+        return table
+    flags = _iv_gap_mask(table["iv"], table["iv_raw"], ratio, absolute)
+    table["iv_gap_flag"] = flags
+    if warn:
+        for _, row in table[flags].iterrows():
+            warnings.warn(
+                f"{row['var']}: iv={float(row['iv']):.4f}, iv_raw={float(row['iv_raw']):.4f}, "
+                f"iv_sv_pure={float(row['iv_sv_pure']):.4f}, n_sv_pure={row['n_sv_pure']} "
+                f"(iv_raw / iv >= {ratio:g} or iv_raw - iv >= {absolute:g}): possible leakage or unresolved "
+                "class-pure bins; review before training",
+                UserWarning,
+                stacklevel=3,
+            )
+    return table
 
 
 @dataclass
@@ -61,7 +123,9 @@ class WeightedScreenResult:
         ``screen_iv_convention`` (since 0.9.2 the class-pure bins are left out of the sum by default), ``iv_raw`` counts
         every bin (the IV up to 0.9.1), ``iv_sv_pure`` is the IV of the class-pure bins and ``n_sv_pure`` their rows. The
         paths without WOE bins have their own class-pure handling: there ``iv_raw`` equals ``iv`` and ``iv_sv_pure`` /
-        ``n_sv_pure`` are NaN. The frame is empty when the IV stage is off.
+        ``n_sv_pure`` are NaN. ``iv_gap_flag`` (0.9.3) is True for a feature whose ``iv_raw`` is far above ``iv``
+        (``iv_gap_ratio_warn`` / ``iv_gap_abs_warn``; possible leakage or unresolved class-pure bins), also when the
+        IV stage dropped it. The frame is empty when the IV stage is off.
     psi_table : pandas.DataFrame
         PSI of the features that entered the PSI stage, with the columns ``var``, ``psi_ins_oos``, ``psi_ins_oot`` and
         ``psi_max`` (the larger of the two). The frame is empty when the PSI stage is off.
@@ -170,6 +234,7 @@ def _iv_band_keep(
     var_col: str = "var",
     upper_col: str | None = None,
     sv_free_col: str | None = None,
+    raw_col: str | None = None,
 ) -> list[str]:
     """IV band gate (G02): keep lower <= iv, and iv <= upper when an upper
     threshold is set. Upper-bound drops (suspiciously high IV — leakage /
@@ -186,15 +251,33 @@ def _iv_band_keep(
     feature's class-pure special-value bins (NaN when it has none). A feature
     above ``upper`` whose value without them is not above it is still
     dropped, with the reason ``"iv_above_upper_sv_pure"`` instead of
-    ``"iv_above_upper"`` so that a human can review the bin."""
+    ``"iv_above_upper"`` so that a human can review the bin.
+
+    ``raw_col`` (0.9.3, the screening on WOE bins under the guarded
+    convention) names the IV with every bin counted (``iv_raw``): the upper
+    test then uses the larger of it and ``upper_col``, so a feature whose
+    guarded ``iv`` hides class-pure bins is still tested on its raw IV, and
+    the recorded ``metric`` names the column that gave the value."""
     keep_mask = iv_frame[iv_col] >= lower
     if upper is not None:
-        if upper_col is not None and upper_col in iv_frame.columns:
+        if raw_col is not None and raw_col in iv_frame.columns:
+            floored = (
+                iv_frame[upper_col] if upper_col is not None and upper_col in iv_frame.columns
+                else pd.Series(np.nan, index=iv_frame.index)
+            )
+            raw = iv_frame[raw_col].astype(float)
+            gate = pd.concat([floored.astype(float), raw], axis=1).max(axis=1, skipna=True)
+            gate = gate.where(gate.notna(), iv_frame[iv_col])
+            metric = pd.Series(
+                np.where(floored.notna() & (floored >= raw.fillna(-np.inf)), upper_col or "iv", raw_col),
+                index=iv_frame.index,
+            )
+        elif upper_col is not None and upper_col in iv_frame.columns:
             gate = iv_frame[upper_col].where(iv_frame[upper_col].notna(), iv_frame[iv_col])
-            metric = upper_col
+            metric = pd.Series(upper_col, index=iv_frame.index)
         else:
             gate = iv_frame[iv_col]
-            metric = "iv"
+            metric = pd.Series("iv", index=iv_frame.index)
         above = iv_frame[gate > upper]
         keep_mask &= gate <= upper
         if dropped_rows is not None:
@@ -205,7 +288,7 @@ def _iv_band_keep(
                     if pd.notna(without_sv) and float(without_sv) <= upper:
                         reason = "iv_above_upper_sv_pure"
                 dropped_rows.append({
-                    "var": row[var_col], "stage": "iv", "metric": metric,
+                    "var": row[var_col], "stage": "iv", "metric": metric.loc[idx],
                     "value": float(gate.loc[idx]), "threshold": upper,
                     "reason": reason,
                 })
@@ -226,12 +309,15 @@ def _gate_iv_without_sv_pure(
     precision: int,
     content: float,
     convention: str,
+    raw_col: str | None = None,
 ) -> list[float]:
     """The upper-test value of each row of ``gate_frame`` without the feature's class-pure special-value bins.
 
     Where the test uses the zero-cell-floored IV on equal-frequency bins (``upper_col``), it is recomputed on the rows
     whose value is not one of those special values; where it falls back to ``iv_col`` (the screening IV), the IV of
-    those bins is subtracted when the convention counted it (``"raw"``). NaN for a feature without such a bin.
+    those bins is subtracted when the convention counted it (``"raw"``). With ``raw_col`` (the test also uses
+    ``iv_raw``, see ``_iv_band_keep``) the value is the larger of the recomputed floored IV and ``iv_raw`` minus the IV
+    of those bins. NaN for a feature without such a bin.
     """
     from Modeling_Tool._utils.screen_iv import sv_pure_row_mask
 
@@ -246,6 +332,7 @@ def _gate_iv_without_sv_pure(
         if not entries:
             out.append(float("nan"))
             continue
+        candidates: list[float] = []
         floored = row.get(upper_col, float("nan"))
         if pd.notna(floored) and row["var"] in ins.columns and pd.api.types.is_numeric_dtype(ins[row["var"]]):
             keep = ~sv_pure_row_mask(ins[row["var"]].to_numpy(), entries)
@@ -256,10 +343,13 @@ def _gate_iv_without_sv_pure(
                     x[keep], y[keep], weights[keep], iv_bins, min_bin_prop, precision,
                     var_name=row["var"], on_null_edges="silent", content=content,
                 )
-            out.append(float(value))
-        else:
+            candidates.append(float(value))
+        if raw_col is not None:
+            candidates.append(float(row[raw_col]) - sum(float(e["iv"]) for e in entries))
+        elif not candidates:
             pure_iv = sum(float(e["iv"]) for e in entries) if convention == "raw" else 0.0
-            out.append(float(row[iv_col]) - pure_iv)
+            candidates.append(float(row[iv_col]) - pure_iv)
+        out.append(max(candidates))
     return out
 
 
@@ -1578,6 +1668,10 @@ def weighted_feature_screen(
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise",
     corr_block_size: int = 256,
     on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn",
+    screen_iv_convention: Literal["guarded", "raw"] = "guarded",
+    iv_upper_threshold: float | None = DEFAULT_IV_UPPER_THRESHOLD,
+    iv_gap_ratio_warn: float = DEFAULT_IV_GAP_RATIO_WARN,
+    iv_gap_abs_warn: float = DEFAULT_IV_GAP_ABS_WARN,
 ) -> WeightedScreenResult:
     """Run PSI -> IV -> correlation screening with optional sample weights.
 
@@ -1679,6 +1773,19 @@ def weighted_feature_screen(
     on_empty_stage : {"keep_all_warn", "raise"}, default "keep_all_warn"
         What to do when a stage would drop every feature: keep all of them, add a ``<stage>_fallback`` row to the
         summary and warn, or raise ``ValueError``.
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the IV on WOE bins treats class-pure bins: ``"guarded"`` leaves them out of the IV sum, ``"raw"`` counts
+        every bin (the numbers of 0.9.1). See ``FeatureScreenConfig.screen_iv_convention``.
+    iv_upper_threshold : float or None, default 2.0
+        Upper IV limit (gate G02, a leakage guard). The test uses the zero-cell-floored IV and, on WOE bins under the
+        guarded convention, the larger of it and ``iv_raw``, never the guarded ``iv``. ``None`` switches it off (the
+        behavior up to 0.9.2, where it was not exposed here). See ``FeatureScreenConfig.iv_upper_threshold``.
+    iv_gap_ratio_warn : float, default 2.0
+        Warn about a feature, and set its ``iv_gap_flag``, when ``iv_raw / iv`` reaches this value (with ``iv > 0``).
+        See ``FeatureScreenConfig.iv_gap_ratio_warn``.
+    iv_gap_abs_warn : float, default 0.5
+        Warn about a feature, and set its ``iv_gap_flag``, when ``iv_raw - iv`` reaches this value. See
+        ``FeatureScreenConfig.iv_gap_abs_warn``.
 
     Returns
     -------
@@ -1693,11 +1800,17 @@ def weighted_feature_screen(
         If no row has ``split_col == "ins"``, if the weights are invalid, if ``iv_equal_freq`` is False, or if
         ``on_empty_stage="raise"`` and a stage would drop every feature.
 
+    Warns
+    -----
+    UserWarning
+        For each feature whose ``iv_raw`` is far above its ``iv`` (see ``iv_gap_ratio_warn`` and ``iv_gap_abs_warn``):
+        possible leakage or unresolved class-pure bins.
+
     Notes
     -----
-    ``missing_rate_threshold``, ``iv_upper_threshold``, ``categorical_features`` and the gate settings (VIF, group
-    stability, multi-target, truncation) are not exposed here; use ``feature_screen`` with a ``FeatureScreenConfig`` for
-    them. A weighted run without WOE bins needs numeric features.
+    ``missing_rate_threshold``, ``categorical_features`` and the gate settings (VIF, group stability, multi-target,
+    truncation) are not exposed here; use ``feature_screen`` with a ``FeatureScreenConfig`` for them. A weighted run
+    without WOE bins needs numeric features.
     """
     from .Feature_Screen import FeatureScreenConfig, feature_screen_from_dataframe
 
@@ -1738,6 +1851,10 @@ def weighted_feature_screen(
         corr_nan_policy=corr_nan_policy,
         corr_block_size=corr_block_size,
         on_empty_stage=on_empty_stage,
+        screen_iv_convention=screen_iv_convention,
+        iv_upper_threshold=iv_upper_threshold,
+        iv_gap_ratio_warn=iv_gap_ratio_warn,
+        iv_gap_abs_warn=iv_gap_abs_warn,
     )
     return feature_screen_from_dataframe(
         data,

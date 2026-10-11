@@ -142,7 +142,7 @@ class CreditModelPipelineConfig:
         Settings of the random INS/OOS split, which runs only when the sample labels do not define INS and OOS:
         ``test_size`` (OOS share, default 0.3), ``stratify`` (stratify by the target, default True) and ``random_state``
         (default: the ``random_state`` field). Other keys are ignored.
-    feature_selection : dict, default {'psi_enabled': True, 'psi_threshold': 0.2, 'psi_compare_splits': ['oos'], 'iv_enabled': True, 'iv_threshold': 0.02, 'corr_enabled': True, 'corr_threshold': 0.75, 'corr_max_iterations': 10}
+    feature_selection : dict, default {'psi_enabled': True, 'psi_threshold': 0.2, 'psi_compare_splits': ['oos'], 'iv_enabled': True, 'iv_threshold': 0.02, 'iv_upper_threshold': 2.0, 'corr_enabled': True, 'corr_threshold': 0.75, 'corr_max_iterations': 10}
         Settings of the PSI, IV and correlation screening, keyed like the fields of ``FeatureScreenConfig``; they are read
         by ``screen_config_from_mapping``, which supplies the defaults of missing keys (``iv_nbins`` is an alias of
         ``iv_bins``). The WOE settings of the screening come from ``woe_engine``, ``woe_fit_query``, ``woe_params`` and
@@ -152,7 +152,10 @@ class CreditModelPipelineConfig:
         feature is kept. The one exception is ``on_empty_stage="raise"``, which still raises ``EmptyStageError`` (a
         ``ValueError``) when a stage would drop every feature. ``psi_compare_splits`` ignores case and spaces and accepts
         a bare string, ``corr_method`` and ``corr_base_metric`` set the correlation coefficient and the metric that
-        decides between two correlated features.
+        decides between two correlated features. ``iv_upper_threshold`` (the leakage limit, 2.0 since 0.9.3; also the
+        value taken when the key is missing) drops features above it, recorded in
+        ``feature_selection_summary['dropped_detail']``; pass ``None`` to switch it off. ``iv_gap_ratio_warn`` and
+        ``iv_gap_abs_warn`` set the leak warning of the screening on WOE bins (see ``FeatureScreenConfig``).
     woe_engine : str, default "equal_freq"
         WOE binning engine: ``"monotone"`` (case-insensitive) uses ``MonotoneWOEBinner`` with ``monotone_woe_params``,
         any other value uses ``WOE_Master`` with ``woe_params``. It is also the engine that the screening fits when
@@ -413,6 +416,7 @@ class CreditModelPipelineConfig:
             "psi_compare_splits": ["oos"],
             "iv_enabled": True,
             "iv_threshold": 0.02,
+            "iv_upper_threshold": 2.0,
             "corr_enabled": True,
             "corr_threshold": 0.75,
             "corr_max_iterations": 10,
@@ -1473,6 +1477,10 @@ class CreditModelPipeline:
         sv_pure_bins = (getattr(result, "stage_tables", None) or {}).get("iv_sv_pure_bins")
         if isinstance(sv_pure_bins, pd.DataFrame) and not sv_pure_bins.empty:
             summary["iv_sv_pure_bins"] = sv_pure_bins
+        # the reasons of the IV upper limit (on by default since 0.9.3) and of the gates; iv_gap_flag is in "iv"
+        dropped_detail = getattr(result, "dropped_detail", None)
+        if isinstance(dropped_detail, pd.DataFrame) and not dropped_detail.empty:
+            summary["dropped_detail"] = dropped_detail
         if not result.corr_dropped.empty:
             summary["corr_dropped"] = result.corr_dropped
         summary["corr_features"] = list(result.selected_features)
@@ -2651,6 +2659,8 @@ class CreditModelPipeline:
             safe_to_csv(fs_summary["iv"], output_dir / "iv_report.csv", index=False)
         if isinstance(fs_summary.get("iv_sv_pure_bins"), pd.DataFrame):
             safe_to_csv(fs_summary["iv_sv_pure_bins"], output_dir / "iv_sv_pure_bins.csv", index=False)
+        if isinstance(fs_summary.get("dropped_detail"), pd.DataFrame):
+            safe_to_csv(fs_summary["dropped_detail"], output_dir / "feature_selection_dropped.csv", index=False)
         if isinstance(fs_summary.get("lr_elimination"), pd.DataFrame):
             safe_to_csv(fs_summary["lr_elimination"], output_dir / "lr_pvalue_elimination.csv", index=False)
         safe_to_csv(woe_artifacts.get("woe_table"), output_dir / "woe_table_ins.csv", index=False)
