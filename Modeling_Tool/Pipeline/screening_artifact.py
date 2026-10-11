@@ -11,6 +11,22 @@ import pandas as pd
 from Modeling_Tool.Feature.Weighted_Screen import WeightedScreenResult
 
 
+def iv_table_for_summary(iv_table: pd.DataFrame) -> pd.DataFrame:
+    """The ``iv`` table of a ``feature_selection_summary``: ``iv_table`` with ``iv_weighted`` named ``iv``.
+
+    Since 0.9.2 ``iv_table`` carries ``iv`` itself (equal to ``iv_weighted``), so ``iv_weighted`` is dropped instead of
+    renamed and the summary keeps one ``iv`` column, followed by ``iv_raw``, ``iv_sv_pure`` and ``n_sv_pure``.
+    """
+    iv = iv_table.copy()
+    if "iv_weighted" in iv.columns:
+        if "iv" in iv.columns:
+            iv = iv.drop(columns=["iv_weighted"])
+        else:
+            iv = iv.rename(columns={"iv_weighted": "iv"})
+    leading = [c for c in ("var", "iv") if c in iv.columns]
+    return iv[leading + [c for c in iv.columns if c not in leading]]
+
+
 def screen_result_to_summary(
     result: WeightedScreenResult,
     initial_features: list[str],
@@ -29,8 +45,9 @@ def screen_result_to_summary(
     dict
         Always ``initial_features``, ``corr_features``, ``screen_summary`` and ``final_features`` (the last two lists are
         the selected features). Present only when not empty: ``psi`` (with a ``psi`` column taken from ``psi_ins_oos`` or
-        ``psi_max``), ``iv`` (``iv_weighted`` renamed to ``iv``), ``corr_dropped``, ``missing_rate``,
-        ``missing_rate_dropped``, ``dropped_detail`` and ``stage_tables``.
+        ``psi_max``), ``iv`` (the ``iv_table`` with ``iv_weighted`` as ``iv``, see ``iv_table_for_summary``),
+        ``corr_dropped``, ``missing_rate``, ``missing_rate_dropped``, ``dropped_detail`` and ``stage_tables`` (which
+        holds ``iv_sv_pure_bins`` when the IV stage found class-pure special-value bins).
     """
     summary: dict[str, Any] = {"initial_features": list(initial_features)}
     if not result.psi_table.empty:
@@ -41,10 +58,7 @@ def screen_result_to_summary(
             psi["psi"] = psi["psi_max"]
         summary["psi"] = psi
     if not result.iv_table.empty:
-        iv = result.iv_table.copy()
-        if "iv_weighted" in iv.columns:
-            iv = iv.rename(columns={"iv_weighted": "iv"})
-        summary["iv"] = iv
+        summary["iv"] = iv_table_for_summary(result.iv_table)
     if not result.corr_dropped.empty:
         summary["corr_dropped"] = result.corr_dropped
     if not result.missing_rate_table.empty:

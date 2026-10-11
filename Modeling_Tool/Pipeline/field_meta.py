@@ -393,6 +393,7 @@ _FIELD_LABELS = {
     "missing_rate_threshold": "Missing rate threshold",
     "woe_fit_scope": "Top-level WOE fit scope",
     "iv_upper_threshold": "IV upper threshold",
+    "screen_iv_convention": "Screening IV convention for class-pure bins",
     "selection_enabled": "Enable automatic feature screening",
     "selection_params": "Automatic screening parameters",
     "selection_group_dims": "Screening gate grouping dimensions",
@@ -474,6 +475,7 @@ _FIELD_DESCRIPTIONS = {
     "batch_corr_mode": "Correlation report in batch mode: within_batch computes correlations inside each batch only; block_pairwise additionally re-reads the CSV to compute cross-batch correlations; off skips them. The selection compares the candidates of all batches unless this is off (an explicit selection_params corr_enabled wins).",
     "comparison_block_size": "Number of columns in each vectorized column block when the UAT compares wide tables flow by flow; smaller values lower peak memory.",
     "applied_sample": "1 outputs all applications; 0 outputs approved samples only.",
+    "screen_iv_convention": "How the screening IV on WOE bins treats a bin without bads or without goods, whose WOE comes from eps=1e-6 alone: guarded (default since 0.9.2) leaves it out of the IV sum but keeps its rows in the totals; raw counts every bin, as in 0.9.1. The binning WOE and the scoring do not change.",
 }
 
 _FIELD_OPTIONS = {
@@ -502,6 +504,7 @@ _FIELD_OPTIONS = {
     "psi_reference_dataset": ["ins", "oos", "oot", "external"],
     "numeric_coercion_mode": ["safe", "aggressive", "off"],
     "woe_fit_scope": ["all", "post_missing_gate"],
+    "screen_iv_convention": ["guarded", "raw"],
     "insufficient_group_policy": ["keep_warn", "drop", "raise"],
     "target_rules": ["all", "any", "min_pass_count"],
     "applied_sample": [1, 0],
@@ -785,7 +788,7 @@ def _infer_group(name: str) -> str:
         return SPLIT_GROUP
     if name.startswith("woe") or "woe" in name or name.startswith("monotone"):
         return WOE_GROUP
-    if name.startswith("psi") or name.startswith("ivks") or name.startswith("corr") or name.startswith("distribution") or name.startswith("selection"):
+    if name.startswith("psi") or name.startswith("ivks") or name.startswith("corr") or name.startswith("distribution") or name.startswith("selection") or name.startswith("screen"):
         return ANALYSIS_GROUP
     if "model" in name or name.startswith("lr_") or name.startswith("warm_start") or name.startswith("backward") or name.startswith("optuna") or name.startswith("explain") or name == "owen_enabled":
         return MODEL_GROUP

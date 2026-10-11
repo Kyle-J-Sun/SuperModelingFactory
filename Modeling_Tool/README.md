@@ -4,7 +4,7 @@ The modeling engine of [SuperModelingFactory](../README.md): binning and WOE enc
 evaluation, explainability, sample management, deployment consistency checks, and one-click pipelines for credit-risk
 scorecard development.
 
-- **Version**: 0.9.1
+- **Version**: 0.9.2
 - **Author**: Jingkai Sun
 
 Full documentation: <https://kyle-j-sun.github.io/SuperModelingFactory_doc/>
@@ -13,7 +13,7 @@ Full documentation: <https://kyle-j-sun.github.io/SuperModelingFactory_doc/>
 
 ```python
 import Modeling_Tool as smf
-print(smf.__version__)          # 0.9.1
+print(smf.__version__)          # 0.9.2
 print(len(smf.__all__))         # curated top-level API
 ```
 
@@ -247,7 +247,8 @@ Seven pipelines, each with `<Name>Config` and `<Name>Result`: `CreditModelPipeli
 
 Runtime requirements are declared in `pyproject.toml` (installed automatically): `pandas`, `numpy`, `scipy`,
 `scikit-learn`, `joblib`, `lightgbm`, `xgboost`, `catboost`, `matplotlib`, `seaborn`, `xlsxwriter`, `openpyxl`, `Pillow`,
-`tqdm`, `python-dateutil`. Optional extras: `pyodps`, `shap` / `lime`, `statsmodels`, `imbalanced-learn`, `optuna`, `minepy`.
+`tqdm`, `python-dateutil`. Optional extras: `pyodps` (`pip install 'supermodelingfactory[odps]'`), `shap` / `lime`,
+`statsmodels`, `imbalanced-learn`, `optuna`, `minepy`.
 
 ## Architecture principles
 

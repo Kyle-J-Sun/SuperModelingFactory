@@ -22,6 +22,30 @@ _MISSING_RATE_COLS = ["var", "missing_rate"]
 _DROPPED_DETAIL_COLS = ["var", "stage", "metric", "value", "threshold", "reason"]
 
 
+# ``iv_weighted`` is the IV that the stage tests (kept for compatibility); ``iv`` is the same value under its 0.9.2 name,
+# ``iv_raw`` the IV with every bin counted, ``iv_sv_pure`` / ``n_sv_pure`` the IV and rows of the class-pure bins.
+_IV_TABLE_COLS = ["var", "iv_weighted", "n_bins", "missing_rate", "iv", "iv_raw", "iv_sv_pure", "n_sv_pure"]
+
+
+def _empty_iv_table() -> pd.DataFrame:
+    return pd.DataFrame(columns=_IV_TABLE_COLS)
+
+
+def _iv_table_without_woe_bins(iv_table: pd.DataFrame) -> pd.DataFrame:
+    """The 0.9.2 IV columns of a path that does not bin with a WOE engine.
+
+    Those paths have their own class-pure handling (the decision-tree IV zeroes such bins, the weighted equal-frequency
+    IV leaves them out through ``iv_guard``) and ``screen_iv_convention`` does not apply: ``iv`` and ``iv_raw`` are the
+    reported IV, ``iv_sv_pure`` and ``n_sv_pure`` are NaN (not computed).
+    """
+    table = iv_table.copy()
+    table["iv"] = table["iv_weighted"]
+    table["iv_raw"] = table["iv_weighted"]
+    table["iv_sv_pure"] = np.nan
+    table["n_sv_pure"] = np.nan
+    return table[_IV_TABLE_COLS]
+
+
 @dataclass
 class WeightedScreenResult:
     """Result of :func:`weighted_feature_screen` and of ``feature_screen`` (also exported as ``FeatureScreenResult``).
@@ -31,9 +55,13 @@ class WeightedScreenResult:
     selected_features : list of str
         The features that passed every stage.
     iv_table : pandas.DataFrame
-        IV of the features that entered the IV stage, with the columns ``var``, ``iv_weighted``, ``n_bins`` and
-        ``missing_rate``. Unweighted runs store the plain IV in ``iv_weighted``. The frame is empty when the IV stage is
-        off.
+        IV of the features that entered the IV stage, with the columns ``var``, ``iv_weighted``, ``n_bins``,
+        ``missing_rate``, ``iv``, ``iv_raw``, ``iv_sv_pure`` and ``n_sv_pure``. ``iv_weighted`` and ``iv`` hold the IV
+        that the stage tests (unweighted runs store the plain IV). On WOE bins, ``iv`` follows
+        ``screen_iv_convention`` (since 0.9.2 the class-pure bins are left out of the sum by default), ``iv_raw`` counts
+        every bin (the IV up to 0.9.1), ``iv_sv_pure`` is the IV of the class-pure bins and ``n_sv_pure`` their rows. The
+        paths without WOE bins have their own class-pure handling: there ``iv_raw`` equals ``iv`` and ``iv_sv_pure`` /
+        ``n_sv_pure`` are NaN. The frame is empty when the IV stage is off.
     psi_table : pandas.DataFrame
         PSI of the features that entered the PSI stage, with the columns ``var``, ``psi_ins_oos``, ``psi_ins_oot`` and
         ``psi_max`` (the larger of the two). The frame is empty when the PSI stage is off.
@@ -61,10 +89,16 @@ class WeightedScreenResult:
         used.
     dropped_detail : pandas.DataFrame, default empty frame
         Per-feature drop evidence of the IV upper limit and of the gates, with the columns ``var``, ``stage``,
-        ``metric``, ``value``, ``threshold`` and ``reason``. Empty when no such drop occurred.
+        ``metric``, ``value``, ``threshold`` and ``reason``. The IV upper limit records ``"iv_above_upper"``, or
+        ``"iv_above_upper_sv_pure"`` when the feature would not exceed the limit without its class-pure special-value
+        bins (it is dropped all the same). Empty when no such drop occurred.
     stage_tables : dict of str to pandas.DataFrame, default {}
         Evidence frames of the gates that ran, keyed ``vif``, ``group_stability``, ``group_stability_violations``,
-        ``multi_target`` and ``truncation``.
+        ``multi_target`` and ``truncation``. When the IV stage on WOE bins finds class-pure special-value bins, the key
+        ``iv_sv_pure_bins`` lists them: ``var``, ``special_value``, ``bin_label``, ``n`` (rows), ``bad``, ``good``
+        (weighted sums on a weighted run), ``bad_rate``, ``woe`` (the WOE the binning gives the bin), ``iv`` (its
+        contribution to ``iv_raw``) and ``low_count`` (``n < 30``). The list is for review (for example as candidate
+        rules); nothing acts on it.
     """
 
     selected_features: list[str]
@@ -135,6 +169,7 @@ def _iv_band_keep(
     dropped_rows: list | None = None,
     var_col: str = "var",
     upper_col: str | None = None,
+    sv_free_col: str | None = None,
 ) -> list[str]:
     """IV band gate (G02): keep lower <= iv, and iv <= upper when an upper
     threshold is set. Upper-bound drops (suspiciously high IV — leakage /
@@ -145,7 +180,13 @@ def _iv_band_keep(
     separators — the exact features the upper band targets — understate it;
     callers pass a zero-cell-floored IV here while the lower band and the
     reported table keep the legacy column. Rows with NaN in ``upper_col``
-    fall back to ``iv_col``."""
+    fall back to ``iv_col``.
+
+    ``sv_free_col`` holds the same upper-test value computed without the
+    feature's class-pure special-value bins (NaN when it has none). A feature
+    above ``upper`` whose value without them is not above it is still
+    dropped, with the reason ``"iv_above_upper_sv_pure"`` instead of
+    ``"iv_above_upper"`` so that a human can review the bin."""
     keep_mask = iv_frame[iv_col] >= lower
     if upper is not None:
         if upper_col is not None and upper_col in iv_frame.columns:
@@ -158,12 +199,68 @@ def _iv_band_keep(
         keep_mask &= gate <= upper
         if dropped_rows is not None:
             for idx, row in above.iterrows():
+                reason = "iv_above_upper"
+                if sv_free_col is not None and sv_free_col in iv_frame.columns:
+                    without_sv = iv_frame.at[idx, sv_free_col]
+                    if pd.notna(without_sv) and float(without_sv) <= upper:
+                        reason = "iv_above_upper_sv_pure"
                 dropped_rows.append({
                     "var": row[var_col], "stage": "iv", "metric": metric,
                     "value": float(gate.loc[idx]), "threshold": upper,
-                    "reason": "iv_above_upper",
+                    "reason": reason,
                 })
     return iv_frame.loc[keep_mask, var_col].tolist()
+
+
+def _gate_iv_without_sv_pure(
+    gate_frame: pd.DataFrame,
+    sv_pure_bins: pd.DataFrame,
+    ins: pd.DataFrame,
+    target_col: str,
+    w: np.ndarray | None,
+    *,
+    iv_col: str,
+    upper_col: str,
+    iv_bins: int,
+    min_bin_prop: float,
+    precision: int,
+    content: float,
+    convention: str,
+) -> list[float]:
+    """The upper-test value of each row of ``gate_frame`` without the feature's class-pure special-value bins.
+
+    Where the test uses the zero-cell-floored IV on equal-frequency bins (``upper_col``), it is recomputed on the rows
+    whose value is not one of those special values; where it falls back to ``iv_col`` (the screening IV), the IV of
+    those bins is subtracted when the convention counted it (``"raw"``). NaN for a feature without such a bin.
+    """
+    from Modeling_Tool._utils.screen_iv import sv_pure_row_mask
+
+    out: list[float] = []
+    if sv_pure_bins is None or sv_pure_bins.empty:
+        return [float("nan")] * len(gate_frame)
+    by_var = {var: rows.to_dict("records") for var, rows in sv_pure_bins.groupby("var", sort=False)}
+    y = ins[target_col].astype(float).to_numpy()
+    weights = np.ones(len(ins), dtype=float) if w is None else np.asarray(w, dtype=float)
+    for _, row in gate_frame.iterrows():
+        entries = by_var.get(row["var"])
+        if not entries:
+            out.append(float("nan"))
+            continue
+        floored = row.get(upper_col, float("nan"))
+        if pd.notna(floored) and row["var"] in ins.columns and pd.api.types.is_numeric_dtype(ins[row["var"]]):
+            keep = ~sv_pure_row_mask(ins[row["var"]].to_numpy(), entries)
+            x = ins[row["var"]].to_numpy(dtype=float)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                _, _, _, value = _weighted_iv_for_var(
+                    x[keep], y[keep], weights[keep], iv_bins, min_bin_prop, precision,
+                    var_name=row["var"], on_null_edges="silent", content=content,
+                )
+            out.append(float(value))
+        else:
+            pure_iv = sum(float(e["iv"]) for e in entries) if convention == "raw" else 0.0
+            out.append(float(row[iv_col]) - pure_iv)
+    return out
 
 
 def _unit_weight_floored_iv(
@@ -203,6 +300,7 @@ def _gate_ranking_iv_map(
     iv_table: pd.DataFrame,
     iv_floored_map: dict[str, float] | None,
     iv_upper_threshold: float | None,
+    substitute_floored: bool = True,
 ) -> dict[str, float]:
     """Ranking metric for the post-corr gates (G05 truncation, G06 VIF
     tie-break). Legacy basis is the degenerate-GUARDED reported IV. When the
@@ -211,11 +309,15 @@ def _gate_ranking_iv_map(
     class-pure bins; substitute the zero-cell-floored IV where finite (NaN
     floored values — e.g. non-numeric columns on the unit-weight diagnostic —
     keep the guarded value, matching _iv_band_keep's fallback). upper=None
-    returns the legacy map verbatim."""
+    returns the legacy map verbatim.
+
+    ``substitute_floored=False`` (the screening on WOE bins under
+    ``screen_iv_convention='guarded'``, since 0.9.2) ranks on the reported IV
+    whatever the upper band: that IV already leaves the class-pure bins out."""
     gate_iv_map = (
         dict(zip(iv_table["var"], iv_table["iv_weighted"])) if not iv_table.empty else {}
     )
-    if iv_upper_threshold is not None:
+    if iv_upper_threshold is not None and substitute_floored:
         for var, floored in (iv_floored_map or {}).items():
             if var in gate_iv_map and np.isfinite(floored):
                 gate_iv_map[var] = float(floored)
@@ -351,13 +453,17 @@ def _weighted_iv_detail(
     include_missing_bin: bool = True,
     content: float | None = None,
     engine_eps: float | None = None,
+    bin_detail: list | None = None,
 ) -> tuple[float, int, float, float]:
     """Weighted IV plus an optional zero-cell-floored variant.
 
     With ``engine_eps`` the reported IV follows the WOE-engine convention instead: every bin counts, with
     ``woe = ln((bad_share + eps) / (good_share + eps))``. That is the formula of the unweighted screening on WOE bins
     and of the selection evidence, so a feature with a class-pure bin gets the same IV with unit weights as without
-    weights (the guarded IV dropped the pure bins: 0.09 against 3.08 in a test).
+    weights (the guarded IV dropped the pure bins: 0.09 against 3.08 in a test). With ``engine_eps``, a list passed as
+    ``bin_detail`` receives one dict per bin (``label``, ``n`` rows, weighted ``bad`` and ``good``, their shares
+    ``bad_share`` and ``good_share``, ``woe`` and its contribution ``iv``), from which the screening applies
+    ``screen_iv_convention``.
 
     The reported IV (first element) excludes class-degenerate bins via
     iv_guard. That is right for the *lower* informativeness bound, but it
@@ -394,8 +500,15 @@ def _weighted_iv_detail(
         bad_share = bad_w / total_bad
         good_share = good_w / total_good
         if engine_eps is not None:
-            iv += float((bad_share - good_share) * np.log((bad_share + engine_eps) / (good_share + engine_eps)))
+            woe = float(np.log((bad_share + engine_eps) / (good_share + engine_eps)))
+            contribution = float((bad_share - good_share) * woe)
+            iv += contribution
             n_contributing_bins += 1
+            if bin_detail is not None:
+                bin_detail.append({
+                    "label": b, "n": int(np.count_nonzero(m)), "bad": bad_w, "good": good_w,
+                    "bad_share": bad_share, "good_share": good_share, "woe": woe, "iv": contribution,
+                })
             if content is not None:
                 floor_bad = max(bad_share, content)
                 floor_good = max(good_share, content)
@@ -1200,7 +1313,7 @@ def _legacy_unweighted_screen(
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, None))
     return WeightedScreenResult(
         selected_features=list(current),
-        iv_table=iv_table,
+        iv_table=_iv_table_without_woe_bins(iv_table),
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),
@@ -1415,7 +1528,7 @@ def _weighted_screen_impl(
     summary_rows.append(_summary_row("final", len(feature_cols), len(current), None, weight_col))
     return WeightedScreenResult(
         selected_features=list(current),
-        iv_table=iv_table,
+        iv_table=_iv_table_without_woe_bins(iv_table),
         psi_table=psi_table,
         corr_dropped=corr_dropped,
         summary=pd.DataFrame(summary_rows),

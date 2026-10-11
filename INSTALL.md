@@ -43,9 +43,12 @@ print('OK')
 Some sub-modules pull in heavyweight dependencies that we keep behind extras:
 
 ```bash
-# Alibaba Cloud ODPS / MaxCompute integration
+# Alibaba Cloud ODPS / MaxCompute integration (ODPSRunner, ParallelODPSManager, proc_means_odps): installs pyodps
 pip install 'supermodelingfactory[odps]'
 ```
+
+`pyodps` is not a runtime dependency. Without it, importing `ODPSRunner` raises an `ImportError` that names the extra
+(since 0.9.2; earlier versions raised `ModuleNotFoundError: No module named 'odps'`).
 
 ## Upgrading
 
@@ -59,7 +62,7 @@ pip install --upgrade supermodelingfactory
 |---|---|
 | `OSError: Library not loaded: @rpath/libomp.dylib` (macOS) | `brew install libomp` |
 | `Bad CPU type in executable` on Apple Silicon | You have an Intel Python at `/usr/local/bin/python3.x`. Use Homebrew or conda Python (arm64). Verify with `python -c "import platform; print(platform.machine())"` — expect `arm64`. |
-| `ModuleNotFoundError: No module named 'odps'` | Install with the odps extra: `pip install 'supermodelingfactory[odps]'` |
+| `ImportError: ... needs the optional pyodps package` (`ModuleNotFoundError: No module named 'odps'` up to 0.9.1) | Install with the odps extra: `pip install 'supermodelingfactory[odps]'` |
 | `ImportError` on an unsupported Python or platform | Verify with `pip debug --verbose` and check the supported environments table above. |
 
 ## For Maintainers

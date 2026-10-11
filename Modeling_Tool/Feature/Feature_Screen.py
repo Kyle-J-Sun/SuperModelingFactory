@@ -11,6 +11,14 @@ import numpy as np
 import pandas as pd
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
+from Modeling_Tool._utils.screen_iv import (
+    check_screen_iv_convention,
+    class_pure_special_bins,
+    guard_screen_iv,
+    smoothed_special_woes,
+    special_bin_woes,
+    sv_pure_frame,
+)
 from Modeling_Tool._utils.sentinels import SMF_MISSING_BIN
 
 from .Weighted_Screen import (
@@ -24,6 +32,9 @@ from .Weighted_Screen import (
     _fallback_weighted_iv,
     _corr_filter_dropped_audit,
     _gate_ranking_iv_map,
+    _empty_iv_table,
+    _gate_iv_without_sv_pure,
+    _IV_TABLE_COLS,
     _iv_band_keep,
     _legacy_unweighted_screen,
     _psi_from_distributions,
@@ -97,8 +108,10 @@ class FeatureScreenConfig:
         ``dropped_detail`` with the reason ``"iv_above_upper"``. The test uses an IV whose zero-count cells are floored
         at ``content`` where that can be computed, so that near-perfect separators are caught, while ``iv_table`` keeps
         the regular IV. For numeric features the floored IV is computed on equal-frequency bins (weighted on weighted
-        runs) on every path, so it does not depend on how the WOE engine merged its bins. ``None`` disables the
-        limit.
+        runs) on every path, so it does not depend on how the WOE engine merged its bins or on
+        ``screen_iv_convention``. A feature that would not exceed the limit without its class-pure special-value bins
+        (a special value that holds only bads can be a label leak) is dropped as well, with the reason
+        ``"iv_above_upper_sv_pure"`` so that a human can review it. ``None`` disables the limit.
     iv_bins : int, default 10
         Maximum number of bins of the default IV binning: decision-tree leaves on unweighted runs, weighted
         equal-frequency bins on weighted runs (which also derive their PSI bins from it).
@@ -238,6 +251,18 @@ class FeatureScreenConfig:
         categorical features take part; this needs a screening WOE engine (fitted when none is given), and when the
         screen fits that engine, ``categorical_features`` additionally requires ``woe_engine="monotone"`` (``ValueError``
         otherwise).
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the IV on the bins of a WOE engine (``iv_use_woe_bins``, or any weighted run with an engine) treats a
+        class-pure bin, a bin without bads or without goods whose WOE ``ln((bad_share + 1e-6) / (good_share + 1e-6))``
+        comes from the ``1e-6`` alone. ``"guarded"`` leaves such bins (special-value bins, and ordinary bins that
+        ``min_n_bins`` kept) out of the IV sum, the ``iv_guard`` convention of ``MonotoneWOEBinner``'s by-group IV:
+        their rows stay in the bad and good totals, so every other bin keeps its WOE and IV; a special-value bin that
+        the binner smoothed (``sv_woe_smoothing="laplace"``) counts with its finite WOE. Purity is judged on the
+        quantities the IV uses (weighted sums on weighted runs, counts otherwise), so unit weights flag the same bins.
+        The IV threshold, the correlation stage and the ranking of the gates use that IV. ``"raw"`` counts every bin,
+        which reproduces 0.9.1. ``iv_table`` reports both (``iv`` and ``iv_raw``) with ``iv_sv_pure`` and
+        ``n_sv_pure``, and ``stage_tables["iv_sv_pure_bins"]`` lists the class-pure special-value bins. The paths
+        without WOE bins are not affected. Any other value raises ``ValueError``.
 
     Notes
     -----
@@ -312,10 +337,13 @@ class FeatureScreenConfig:
     # True computes VIF on the WOE-encoded INS view (all-numeric, matches
     # the LR design-matrix collinearity semantics).
     vif_use_woe_bins: bool = False
+    # 0.9.2: class-pure bins of the IV on WOE bins ("guarded" leaves them out of the sum; "raw" is 0.9.1)
+    screen_iv_convention: Literal["guarded", "raw"] = "guarded"
 
     def __post_init__(self) -> None:
         _check_iv_equal_freq(self.iv_equal_freq)
         _check_tie_breaker(self.tie_breaker)
+        check_screen_iv_convention(self.screen_iv_convention)
         self.psi_compare_splits = _normalize_psi_compare_splits(self.psi_compare_splits)
         self.corr_method = str(self.corr_method).strip().lower()
         if self.corr_method not in ("pearson", "spearman", "kendall"):
@@ -354,6 +382,7 @@ def screen_config_from_mapping(
     monotone_woe_params: Mapping[str, Any] | None = None,
     plot_path: str | None = None,
     plot_outputs: bool = False,
+    screen_iv_convention: str | None = None,
 ) -> FeatureScreenConfig:
     """Build ``FeatureScreenConfig`` from a CM-style ``feature_selection`` dict.
 
@@ -380,6 +409,9 @@ def screen_config_from_mapping(
         Value of ``plot_path``.
     plot_outputs : bool, default False
         Value of ``plot_outputs``.
+    screen_iv_convention : str or None, default None
+        Value of ``screen_iv_convention``. ``None`` falls back to ``mapping["screen_iv_convention"]`` and then to
+        ``"guarded"``.
 
     Returns
     -------
@@ -444,6 +476,9 @@ def screen_config_from_mapping(
         vif_min_features=int(cfg.get("vif_min_features", 2)),
         vif_tie_break_metric=str(cfg.get("vif_tie_break_metric", "iv")),
         vif_use_woe_bins=bool(cfg.get("vif_use_woe_bins", False)),
+        screen_iv_convention=str(  # type: ignore[arg-type]
+            screen_iv_convention if screen_iv_convention is not None else cfg.get("screen_iv_convention", "guarded")
+        ),
     )
 
 
@@ -644,10 +679,12 @@ def _woe_bins_unweighted_screen(
             )
             summary_rows.append(_summary_row("psi", n_before, len(current), config.psi_threshold, None))
 
-    iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
+    iv_table = _empty_iv_table()
     iv_floored_map: dict[str, float] = {}
+    iv_on_woe_bins = False
     if config.iv_enabled:
         use_binner = config.iv_use_woe_bins and binner is not None
+        iv_on_woe_bins = use_binner
         vi = VarExtractionInsights(
             data=ins,
             dep=target_col,
@@ -657,8 +694,12 @@ def _woe_bins_unweighted_screen(
             min_bin_prop=config.iv_min_bin_prop,
             woe_binner=binner if use_binner else None,
             woe_engine="monotone" if use_binner else "master",
+            screen_iv_convention=config.screen_iv_convention,
         )
         iv = vi.get_var_analysis_report(data=ins, varlist=current, dep=target_col, iv_cut=0.0)
+        sv_pure_bins = vi.iv_sv_pure_bins if use_binner else sv_pure_frame([])
+        if not sv_pure_bins.empty:
+            stage_tables["iv_sv_pure_bins"] = sv_pure_bins
         if config.plot_path and config.plot_outputs and current:
             Path(config.plot_path, "overall").mkdir(parents=True, exist_ok=True)
             plot_data = ins.copy()
@@ -671,7 +712,10 @@ def _woe_bins_unweighted_screen(
                 plot_path=config.plot_path,
             )
         if iv is not None and not iv.empty:
-            iv_table = iv.rename(columns={"iv": "iv_weighted"})[["var", "iv_weighted", "n_bins", "missing_rate"]]
+            iv_table = iv.assign(iv_weighted=iv["iv"])
+            if not use_binner:  # the decision-tree IV: the convention does not apply
+                iv_table = iv_table.assign(iv_raw=iv["iv"], iv_sv_pure=np.nan, n_sv_pure=np.nan)
+            iv_table = iv_table[_IV_TABLE_COLS]
             if config.iv_upper_threshold is not None:
                 gate_frame = iv[["var", "iv"]].copy()
                 gate_frame["iv_floored"] = _unit_weight_floored_iv(
@@ -680,9 +724,14 @@ def _woe_bins_unweighted_screen(
                     content=config.content,
                 )
                 iv_floored_map = dict(zip(gate_frame["var"], gate_frame["iv_floored"]))
+                gate_frame["iv_sv_free"] = _gate_iv_without_sv_pure(
+                    gate_frame, sv_pure_bins, ins, target_col, None, iv_col="iv", upper_col="iv_floored",
+                    iv_bins=config.iv_bins, min_bin_prop=config.iv_min_bin_prop, precision=5,
+                    content=config.content, convention=config.screen_iv_convention,
+                )
                 keep = _iv_band_keep(
                     gate_frame, "iv", config.iv_threshold, config.iv_upper_threshold,
-                    dropped_rows, upper_col="iv_floored",
+                    dropped_rows, upper_col="iv_floored", sv_free_col="iv_sv_free",
                 )
             else:
                 keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
@@ -704,6 +753,7 @@ def _woe_bins_unweighted_screen(
             base_metric=config.corr_base_metric,
             woe_binner=binner if use_binner else None,
             woe_engine="monotone" if use_binner else "master",
+            screen_iv_convention=config.screen_iv_convention,
         )
         n_before = len(current)
         current = cf.remove_highly_correlated(current, max_iterations=config.corr_max_iterations)
@@ -711,7 +761,11 @@ def _woe_bins_unweighted_screen(
 
     from .Screen_Gates import apply_post_corr_gates
 
-    gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, config.iv_upper_threshold)
+    gate_iv_map = _gate_ranking_iv_map(
+        iv_table, iv_floored_map, config.iv_upper_threshold,
+        # the guarded IV on WOE bins already leaves the class-pure bins out: rank on it (0.9.2)
+        substitute_floored=not (iv_on_woe_bins and config.screen_iv_convention == "guarded"),
+    )
     current = apply_post_corr_gates(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
@@ -940,6 +994,7 @@ def _weighted_woe_bins_screen(
 
     iv_records: list[dict] = []
     iv_floored_map: dict[str, float] = {}
+    sv_pure_rows: list[dict] = []
     if config.iv_enabled:
         floor_content = config.content if config.iv_upper_threshold is not None else None
         for var in current:
@@ -957,11 +1012,24 @@ def _weighted_woe_bins_screen(
                 # (e.g. '4.high_school'), so encode observed -> 1.0 / missing -> NaN,
                 # matching the notna semantics of _missing_rate_for_series.
                 x_ins = np.where(x_series.notna().to_numpy(), 1.0, np.nan)
+            per_bin: list[dict] = []
             iv_val, n_b, miss, iv_floored = _weighted_iv_detail(
                 y_ins, w_ins, bins_ins, x_ins, content=floor_content,
-                # same convention as the unweighted screening on WOE bins: a class-pure bin counts with the 1e-6 floor
-                engine_eps=1e-6,
+                # the WOE of the unweighted screening on WOE bins: ln((bad share + 1e-6) / (good share + 1e-6))
+                engine_eps=1e-6, bin_detail=per_bin,
             )
+            # the convention of the unweighted path, with class purity judged on the weighted sums
+            per_bin_frame = pd.DataFrame(
+                per_bin, columns=["label", "n", "bad", "good", "bad_share", "good_share", "woe", "iv"],
+            )
+            iv_columns, pure = guard_screen_iv(
+                iv_val, per_bin_frame, config.screen_iv_convention, smoothed_special_woes(adapter, var),
+            )
+            if pure.any():
+                sv_pure_rows.extend(class_pure_special_bins(
+                    var, per_bin_frame.assign(pure=pure), bins_ins, x_series.to_numpy(),
+                    special_bin_woes(adapter, var),
+                ))
             if floor_content is not None:
                 if pd.api.types.is_numeric_dtype(x_series):
                     # The leakage gate must not depend on how the WOE engine merged its bins (class-pure bins are
@@ -976,20 +1044,27 @@ def _weighted_woe_bins_screen(
                 iv_floored_map[var] = iv_floored
             iv_records.append({
                 "var": var,
-                "iv_weighted": iv_val,
+                "iv_weighted": iv_columns["iv"],
                 "n_bins": n_b,
                 "missing_rate": miss,
+                **iv_columns,
             })
-        iv_table = pd.DataFrame(iv_records) if iv_records else pd.DataFrame(
-            columns=["var", "iv_weighted", "n_bins", "missing_rate"],
-        )
+        iv_table = pd.DataFrame(iv_records, columns=_IV_TABLE_COLS) if iv_records else _empty_iv_table()
+        sv_pure_bins = sv_pure_frame(sv_pure_rows)
+        if not sv_pure_bins.empty:
+            stage_tables["iv_sv_pure_bins"] = sv_pure_bins
         if not iv_table.empty:
             if config.iv_upper_threshold is not None:
                 gate_frame = iv_table[["var", "iv_weighted"]].copy()
                 gate_frame["iv_floored"] = gate_frame["var"].map(iv_floored_map)
+                gate_frame["iv_sv_free"] = _gate_iv_without_sv_pure(
+                    gate_frame, sv_pure_bins, ins, target_col, w_ins, iv_col="iv_weighted", upper_col="iv_floored",
+                    iv_bins=config.iv_bins, min_bin_prop=config.min_bin_prop, precision=config.precision,
+                    content=config.content, convention=config.screen_iv_convention,
+                )
                 keep = _iv_band_keep(
                     gate_frame, "iv_weighted", config.iv_threshold,
-                    config.iv_upper_threshold, dropped_rows, upper_col="iv_floored",
+                    config.iv_upper_threshold, dropped_rows, upper_col="iv_floored", sv_free_col="iv_sv_free",
                 )
             else:
                 keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
@@ -1001,7 +1076,7 @@ def _weighted_woe_bins_screen(
             )
             summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, weight_col))
     else:
-        iv_table = pd.DataFrame(columns=["var", "iv_weighted", "n_bins", "missing_rate"])
+        iv_table = _empty_iv_table()
 
     corr_dropped = pd.DataFrame(columns=["var_a", "var_b", "corr", "iv_a", "iv_b", "kept", "dropped"])
     if config.corr_enabled and len(current) > 1:
@@ -1021,6 +1096,7 @@ def _weighted_woe_bins_screen(
                 base_metric=config.corr_base_metric,
                 woe_binner=binner if use_binner else None,
                 woe_engine="monotone" if use_binner else "master",
+                screen_iv_convention=config.screen_iv_convention,
             )
             current = cf.remove_highly_correlated(
                 current, max_iterations=config.corr_max_iterations
@@ -1051,7 +1127,11 @@ def _weighted_woe_bins_screen(
 
     from .Screen_Gates import apply_post_corr_gates
 
-    gate_iv_map = _gate_ranking_iv_map(iv_table, iv_floored_map, config.iv_upper_threshold)
+    gate_iv_map = _gate_ranking_iv_map(
+        iv_table, iv_floored_map, config.iv_upper_threshold,
+        # the guarded IV on WOE bins already leaves the class-pure bins out: rank on it (0.9.2)
+        substitute_floored=config.screen_iv_convention != "guarded",
+    )
     current = apply_post_corr_gates(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,

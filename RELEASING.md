@@ -53,6 +53,11 @@ Documented exceptions:
   is listed with its legacy setting (or "bug fix, no legacy switch") in the "Behavior-changing fixes" box of
   `docs/changelog/v0.9.1.md` in the doc repository. 0.9.0 was prepared (commit `e1ef627`) but never tagged or published,
   so 0.9.1 is the release after 0.8.2 on PyPI.
+- **0.9.2** is a patch release that changes which features are selected: the screening IV on WOE bins leaves class-pure
+  bins out of the IV sum by default (`screen_iv_convention="guarded"` in `FeatureScreenConfig`,
+  `FeatureValidationPipelineConfig` and `CreditModelPipelineConfig`). `screen_iv_convention="raw"` restores the 0.9.1
+  numbers and selections. The WOE of the bins and the scoring do not change. See the "Behavior-changing fixes (exception
+  to RELEASING.md)" section of `docs/changelog/v0.9.2.md` in the doc repository.
 
 ## Coordinating the repositories
 

@@ -379,6 +379,13 @@ class CreditModelPipelineConfig:
         ``woe_fit_query`` of this config do not apply to it. The artifact also records the INS/OOS split settings of the
         validation run; a ``RuntimeWarning`` reports a split that differs from this run's, because the validation fitted the
         bins and chose the features on rows that this run would then score as OOS. No effect without an artifact.
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the screening IV on the bins of a WOE engine (a ``*_use_woe_bins`` flag of ``feature_selection``, or a
+        weighted run with an engine) treats a class-pure bin, whose WOE comes from the ``1e-6`` of the formula alone:
+        ``"guarded"`` leaves it out of the IV sum, ``"raw"`` counts every bin (0.9.1). See
+        ``FeatureScreenConfig.screen_iv_convention``. ``feature_selection["screen_iv_convention"]`` is accepted as
+        well; a value there that differs from this field raises ``ValueError`` when ``run`` starts, as does any other
+        value. It does not change the WOE of the bins or the scoring.
     """
 
     output_dir: str = "output"
@@ -529,6 +536,8 @@ class CreditModelPipelineConfig:
     feature_validation_result: Any | None = None
     feature_selection_mode: Literal["run", "from_artifact", "skip"] = "run"
     reuse_screening_woe: bool = True
+    # 0.9.2: class-pure bins of the screening IV on WOE bins ("guarded" leaves them out of the sum; "raw" is 0.9.1)
+    screen_iv_convention: Literal["guarded", "raw"] = "guarded"
 
 
 @dataclass
@@ -1014,6 +1023,7 @@ class CreditModelPipeline:
             resolve_sample_weight(data=data, weight_col=cfg.weight_col, expected_len=len(data))
         if cfg.backward_enabled and self._backward_model_name() not in {"lgb", "xgb"}:
             raise ValueError(f"backward_model must be 'lgb' or 'xgb', got {cfg.backward_model!r}")
+        self._screen_iv_convention()
         if cfg.warm_start_enabled:
             if not cfg.warm_start_score_col:
                 raise ValueError("warm_start_score_col is required when warm_start_enabled=True")
@@ -1366,6 +1376,20 @@ class CreditModelPipeline:
                 stacklevel=3,
             )
 
+    def _screen_iv_convention(self) -> str:
+        """``screen_iv_convention`` of the config, checked against ``feature_selection['screen_iv_convention']``."""
+        from Modeling_Tool._utils.screen_iv import check_screen_iv_convention
+
+        cfg = self.config
+        value = check_screen_iv_convention(getattr(cfg, "screen_iv_convention", "guarded"))
+        in_mapping = (cfg.feature_selection or {}).get("screen_iv_convention")
+        if in_mapping is not None and in_mapping != value:
+            raise ValueError(
+                f"feature_selection['screen_iv_convention']={in_mapping!r} differs from "
+                f"screen_iv_convention={value!r}; set one of them, or the same value in both"
+            )
+        return value
+
     def _feature_selection(
         self,
         splits: dict[str, pd.DataFrame],
@@ -1391,6 +1415,7 @@ class CreditModelPipeline:
             monotone_woe_params=cfg.monotone_woe_params,
             plot_path=plot_path,
             plot_outputs=bool(cfg.write_outputs and cfg.plot_outputs),
+            screen_iv_convention=self._screen_iv_convention(),
         )
 
         summary: dict[str, Any] = {"initial_features": list(feature_cols)}
@@ -1442,10 +1467,12 @@ class CreditModelPipeline:
                 psi["psi"] = psi["psi_ins_oos"]
             summary["psi"] = psi
         if not result.iv_table.empty:
-            iv = result.iv_table.copy()
-            if "iv_weighted" in iv.columns:
-                iv = iv.rename(columns={"iv_weighted": "iv"})
-            summary["iv"] = iv
+            from .screening_artifact import iv_table_for_summary
+
+            summary["iv"] = iv_table_for_summary(result.iv_table)
+        sv_pure_bins = (getattr(result, "stage_tables", None) or {}).get("iv_sv_pure_bins")
+        if isinstance(sv_pure_bins, pd.DataFrame) and not sv_pure_bins.empty:
+            summary["iv_sv_pure_bins"] = sv_pure_bins
         if not result.corr_dropped.empty:
             summary["corr_dropped"] = result.corr_dropped
         summary["corr_features"] = list(result.selected_features)
@@ -2622,6 +2649,8 @@ class CreditModelPipeline:
             safe_to_csv(fs_summary["psi"], output_dir / "psi_result.csv", index=False)
         if isinstance(fs_summary.get("iv"), pd.DataFrame):
             safe_to_csv(fs_summary["iv"], output_dir / "iv_report.csv", index=False)
+        if isinstance(fs_summary.get("iv_sv_pure_bins"), pd.DataFrame):
+            safe_to_csv(fs_summary["iv_sv_pure_bins"], output_dir / "iv_sv_pure_bins.csv", index=False)
         if isinstance(fs_summary.get("lr_elimination"), pd.DataFrame):
             safe_to_csv(fs_summary["lr_elimination"], output_dir / "lr_pvalue_elimination.csv", index=False)
         safe_to_csv(woe_artifacts.get("woe_table"), output_dir / "woe_table_ins.csv", index=False)

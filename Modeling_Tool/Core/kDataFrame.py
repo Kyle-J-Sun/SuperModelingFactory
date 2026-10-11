@@ -413,7 +413,7 @@ class kDataFrame(DataFrame):
         import re
         
         data = self.copy()
-        str_col = kSeries([re.findall("\w+", str(x)) for x in data[col]])
+        str_col = kSeries([re.findall(r"\w+", str(x)) for x in data[col]])
         return str_col
     
     def to_pdDataFrame(self, inplace: bool = False):

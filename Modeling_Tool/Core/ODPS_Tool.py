@@ -5,8 +5,14 @@ import os
 import threading
 logger = logging.getLogger(__name__)
 import pandas as pd
-from odps import ODPS, options
-from odps.models import Column, Partition
+try:
+    from odps import ODPS, options
+    from odps.models import Column, Partition
+except ImportError as exc:  # pyodps is an optional dependency
+    raise ImportError(
+        "Modeling_Tool.Core.ODPS_Tool (ODPSRunner, ParallelODPSManager, proc_means_odps) needs the optional pyodps "
+        "package. Install it with: pip install 'supermodelingfactory[odps]'"
+    ) from exc
 try:
     from odps.models import TableSchema as Schema
 except ImportError:  # older pyodps only ships the Schema name

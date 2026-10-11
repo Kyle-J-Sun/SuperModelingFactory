@@ -262,6 +262,17 @@ class FeatureValidationPipelineConfig:
         Whether to write ``Feature_Validation_Report.xlsx`` with the non-empty tables.
     plot_outputs : bool, default True
         Whether to write the WOE plots to ``figs/woe``; they are written only when ``write_outputs`` is True as well.
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the IV on the WOE bins treats a class-pure bin (no bad or no good row), whose WOE comes from the ``1e-6`` of
+        ``ln((bad_share + 1e-6) / (good_share + 1e-6))`` alone: ``"guarded"`` leaves it out of the IV sum (its rows stay
+        in the totals, so the other bins keep their WOE and IV), ``"raw"`` counts every bin (0.9.1). It applies to
+        ``ivks_summary`` (per group, on the group's counts), to the selection stage (see
+        ``FeatureScreenConfig.screen_iv_convention``), to its group and per-target evidence, and to the IV that
+        ``CorrelationFilter`` ranks correlated features by. ``ivks_summary`` reports ``iv`` with ``iv_raw``,
+        ``iv_sv_pure`` and ``n_sv_pure``; ``ivks_sv_pure_bins`` of the result lists the class-pure special-value bins.
+        ``selection_params['screen_iv_convention']`` and ``corr_params['screen_iv_convention']`` are accepted as well;
+        a value there that differs from this field raises ``ValueError`` when ``run`` starts, as does any other value.
+        The WOE of the bins is not changed.
     """
 
     output_dir: str = "output/feature_validation"
@@ -386,6 +397,8 @@ class FeatureValidationPipelineConfig:
     write_outputs: bool = True
     write_excel: bool = True
     plot_outputs: bool = True
+    # 0.9.2: class-pure bins of the IV on WOE bins ("guarded" leaves them out of the sum; "raw" is 0.9.1)
+    screen_iv_convention: Literal["guarded", "raw"] = "guarded"
 
 
 @dataclass
@@ -452,6 +465,14 @@ class FeatureValidationPipelineResult:
         artifacts are those of the global pass (fitted on the candidates).
     config_snapshot : dict, default {}
         Effective settings of the run (targets, features, selection, WOE and batch-mode flags).
+    ivks_sv_pure_bins : pandas.DataFrame, default empty frame
+        The class-pure special-value bins found by the global rows of ``ivks_summary`` on WOE bins (no bad or no good
+        row; a bin whose rows are all missing counts as one): ``target``, ``var``, ``special_value``, ``bin_label``,
+        ``n``, ``bad``, ``good``, ``bad_rate``, ``woe`` (the WOE the binning gives the bin), ``iv`` (its contribution
+        to ``iv_raw``) and ``low_count`` (``n < 30``). Their WOE comes from the ``1e-6`` of the formula alone; resolve
+        them (a separate rule, ``sv_small_policy='neutral'`` or ``'merge_missing'``) before training a new model. The
+        list is for review, for example as candidate rules; nothing acts on it. Written as the ``ivks_sv_pure_bins``
+        table when not empty.
     """
 
     splits: dict[str, pd.DataFrame]
@@ -472,6 +493,13 @@ class FeatureValidationPipelineResult:
     selection_summary: dict[str, Any] = field(default_factory=dict)
     screening_artifact: Any | None = None
     config_snapshot: dict[str, Any] = field(default_factory=dict)
+    ivks_sv_pure_bins: pd.DataFrame = field(default_factory=lambda: _empty_sv_pure_bins())
+
+
+def _empty_sv_pure_bins() -> pd.DataFrame:
+    from Modeling_Tool._utils.screen_iv import SV_PURE_COLUMNS
+
+    return pd.DataFrame(columns=["target", *SV_PURE_COLUMNS])
 
 
 class FeatureValidationPipeline:
@@ -575,7 +603,23 @@ class FeatureValidationPipeline:
                 )
         return result
 
+    def _screen_iv_convention(self) -> str:
+        """``screen_iv_convention`` of the config, checked against ``selection_params['screen_iv_convention']``."""
+        from Modeling_Tool._utils.screen_iv import check_screen_iv_convention
+
+        cfg = self.config
+        value = check_screen_iv_convention(getattr(cfg, "screen_iv_convention", "guarded"))
+        for name in ("selection_params", "corr_params"):
+            in_params = (getattr(cfg, name, None) or {}).get("screen_iv_convention")
+            if in_params is not None and in_params != value:
+                raise ValueError(
+                    f"{name}['screen_iv_convention']={in_params!r} differs from "
+                    f"screen_iv_convention={value!r}; set one of them, or the same value in both"
+                )
+        return value
+
     def _run(self, data: pd.DataFrame | str | Path) -> FeatureValidationPipelineResult:
+        self._screen_iv_convention()
         input_type = self._resolve_input_type(data)
         if self.config.enable_batch and input_type != "csv":
             raise ValueError("enable_batch=True currently requires CSV input.")
@@ -699,6 +743,11 @@ class FeatureValidationPipeline:
             if cfg.ivks_enabled and target_cols
             else pd.DataFrame()
         )
+        ivks_sv_pure_bins = (
+            pd.DataFrame(self._ivks_sv_pure_rows, columns=_empty_sv_pure_bins().columns)
+            if cfg.ivks_enabled and target_cols and getattr(self, "_ivks_sv_pure_rows", None)
+            else _empty_sv_pure_bins()
+        )
         corr_matrix, high_corr_pairs, correlated_detail = (
             self._run_correlation(combined, effective_features, incumbent_features, target_cols, woe_artifacts)
             if cfg.corr_enabled
@@ -742,6 +791,7 @@ class FeatureValidationPipeline:
             validation_summary,
             selected_features=selected_features,
             selection_summary=selection_summary,
+            ivks_sv_pure_bins=ivks_sv_pure_bins,
         )
         output_paths, report_path = self._write_outputs(tables)
 
@@ -762,6 +812,7 @@ class FeatureValidationPipeline:
             selection_summary=selection_summary,
             screening_artifact=screening_artifact,
             config_snapshot=config_snapshot,
+            ivks_sv_pure_bins=ivks_sv_pure_bins,
         )
 
     def _warn_unknown_targets(self, columns: Any) -> None:
@@ -1005,6 +1056,7 @@ class FeatureValidationPipeline:
             selection_summary=dict(result.selection_summary or {}),
             screening_artifact=None,
             config_snapshot=dict(result.config_snapshot or {}),
+            ivks_sv_pure_bins=result.ivks_sv_pure_bins,
         )
 
     def _validate_batch_config(self, new_features: list[str]) -> None:
@@ -1152,6 +1204,9 @@ class FeatureValidationPipeline:
         psi_summary = self._concat_frames([res.psi_summary for res in batch_results])
         psi_details = self._merge_psi_details(batch_results, batch_ids)
         ivks_summary = self._concat_frames([res.ivks_summary for res in batch_results])
+        ivks_sv_pure_bins = self._concat_frames([res.ivks_sv_pure_bins for res in batch_results])
+        if ivks_sv_pure_bins.empty:
+            ivks_sv_pure_bins = _empty_sv_pure_bins()
         corr_matrix = self._merge_corr_matrices([res.corr_matrix for res in batch_results])
         high_corr_pairs = self._concat_frames([res.high_corr_pairs for res in batch_results])
         correlated_detail = self._concat_frames([res.correlated_detail for res in batch_results])
@@ -1217,6 +1272,7 @@ class FeatureValidationPipeline:
             validation_summary,
             selected_features=selected_features,
             selection_summary=selection_summary,
+            ivks_sv_pure_bins=ivks_sv_pure_bins,
         )
         tables["batch_metadata"] = batch_metadata
         output_paths, report_path = self._write_outputs(tables)
@@ -1246,6 +1302,7 @@ class FeatureValidationPipeline:
             selection_summary=selection_summary,
             screening_artifact=screening_artifact,
             config_snapshot=config_snapshot,
+            ivks_sv_pure_bins=ivks_sv_pure_bins,
         )
 
     def _merge_batch_selection(
@@ -1483,6 +1540,7 @@ class FeatureValidationPipeline:
             params = dict(cfg.corr_params or {})
             params.pop("max_iterations", None)
             corr_method = params.get("method", "pearson")
+            params["screen_iv_convention"] = self._screen_iv_convention()
             filt = CorrelationFilter(data=observed, dep=target, **params)
             gains = filt._metric_summary(pair_features)
             metric_cols = [
@@ -2257,6 +2315,7 @@ class FeatureValidationPipeline:
             woe_fit_query=cfg.woe_fit_query,
             woe_params=cfg.woe_params,
             monotone_woe_params=cfg.monotone_woe_params,
+            screen_iv_convention=self._screen_iv_convention(),
         )
 
     def _evidence_bins_frame(
@@ -2284,6 +2343,8 @@ class FeatureValidationPipeline:
         bins: np.ndarray,
         target_values: np.ndarray,
         sample_weight: np.ndarray | None = None,
+        screen_iv_convention: str = "guarded",
+        smoothed_woes: list[float] | tuple = (),
     ) -> float:
         """Same WOE/IV formula as _ivks_from_assigned_bins_grouped, minus the
         iv_cut/min_group_size report filters (gates need unfiltered evidence).
@@ -2294,8 +2355,16 @@ class FeatureValidationPipeline:
         expected on frequency scale (e.g. FT weights): the max(total, 1.0)
         floors are kept verbatim, so a zero-mass class or slice degrades to
         iv == 0.0 (never NaN) and sub-unit total mass is damped — both err
-        toward dropping under a lower IV floor."""
-        bin_codes, _ = pd.factorize(bins, sort=False)
+        toward dropping under a lower IV floor.
+
+        ``screen_iv_convention='guarded'`` leaves the class-pure bins (no bad
+        or no good mass in this slice) out of the sum, as the screening does
+        (a special-value bin the engine smoothed, whose WOE is in
+        ``smoothed_woes``, counts with that WOE); ``'raw'`` sums every bin
+        (0.9.1)."""
+        from Modeling_Tool._utils.screen_iv import guard_iv_arrays
+
+        bin_codes, labels = pd.factorize(bins, sort=False)
         if sample_weight is None:
             counts = np.bincount(bin_codes).astype(float)
             bad = np.bincount(bin_codes, weights=target_values)
@@ -2307,7 +2376,22 @@ class FeatureValidationPipeline:
         bad_pct = bad / max(float(bad.sum()), 1.0)
         good_pct = good / max(float(good.sum()), 1.0)
         woe = np.log((bad_pct + 1e-6) / (good_pct + 1e-6))
-        return float(np.sum((bad_pct - good_pct) * woe))
+        contributions = (bad_pct - good_pct) * woe
+        iv_raw = float(np.sum(contributions))
+        if screen_iv_convention != "guarded":
+            return iv_raw
+        columns, _ = guard_iv_arrays(
+            iv_raw, labels, counts, bad, good, bad_pct, good_pct, contributions, "guarded", smoothed_woes,
+        )
+        return columns["iv"]
+
+    @staticmethod
+    def _smoothed_woes(woe_artifacts: dict[str, Any], target: str, var: str) -> list[float]:
+        """WOE values of the special-value bins of ``var`` that the target's engine smoothed (see ``_evidence_iv``)."""
+        from Modeling_Tool._utils.screen_iv import smoothed_special_woes
+
+        engine = (woe_artifacts or {}).get("by_target", {}).get(target, {}).get("engine")
+        return smoothed_special_woes(engine, var) if engine is not None else []
 
     def _build_selection_evidence(
         self,
@@ -2390,7 +2474,10 @@ class FeatureValidationPipeline:
                         "var": var,
                         "group": label,
                         "n": int(len(positions)),
-                        "iv": self._evidence_iv(bins, y_g, sample_weight=w_g),
+                        "iv": self._evidence_iv(
+                            bins, y_g, sample_weight=w_g, screen_iv_convention=self._screen_iv_convention(),
+                            smoothed_woes=self._smoothed_woes(woe_artifacts, primary, var),
+                        ),
                         "direction": point_biserial_direction(
                             sub[var], sub[primary], sample_weight=w_g, missing_ref=missing_ref
                         ),
@@ -2428,7 +2515,10 @@ class FeatureValidationPipeline:
                     rows.append({
                         "var": var,
                         "target": target,
-                        "iv": self._evidence_iv(bins, y, sample_weight=w_t),
+                        "iv": self._evidence_iv(
+                            bins, y, sample_weight=w_t, screen_iv_convention=self._screen_iv_convention(),
+                            smoothed_woes=self._smoothed_woes(woe_artifacts, target, var),
+                        ),
                         "direction": point_biserial_direction(
                             data[var], data[target], sample_weight=w_t, missing_ref=missing_ref
                         ),
@@ -2686,6 +2776,8 @@ class FeatureValidationPipeline:
         woe_artifacts: dict[str, Any],
     ) -> pd.DataFrame:
         rows = []
+        # the class-pure special-value bins of the global rows on WOE bins (``ivks_sv_pure_bins`` of the result)
+        self._ivks_sv_pure_rows: list[dict] = []
         for target in target_cols:
             data = combined[combined[target].notna()].copy()
             if len(data) < self.config.min_group_size:
@@ -2715,11 +2807,14 @@ class FeatureValidationPipeline:
                     continue
                 if not valid_group_cols:
                     if bins_frame is not None:
+                        global_sv_pure: list[dict] = []
                         rows.append(
                             self._ivks_from_assigned_bins(
-                                data, bins_frame, features, target, "global", {}
+                                data, bins_frame, features, target, "global", {},
+                                adapter=adapter, sv_pure_rows=global_sv_pure,
                             )
                         )
+                        self._ivks_sv_pure_rows.extend({"target": target, **row} for row in global_sv_pure)
                     else:
                         rows.append(self._single_ivks(data, features, target, "global", {}, woe_artifacts))
                 elif bins_frame is not None:
@@ -2731,6 +2826,7 @@ class FeatureValidationPipeline:
                             target,
                             group_name,
                             valid_group_cols,
+                            adapter=adapter,
                         )
                     )
                 else:
@@ -2811,6 +2907,12 @@ class FeatureValidationPipeline:
         if report is None or len(report) == 0:
             return pd.DataFrame()
         report = report.copy()
+        if "iv_raw" not in report.columns and "iv" in report.columns:
+            # the default binning has its own class-pure handling: screen_iv_convention does not apply to it
+            at = report.columns.get_loc("iv") + 1
+            report.insert(at, "iv_raw", report["iv"])
+            report.insert(at + 1, "iv_sv_pure", np.nan)
+            report.insert(at + 2, "n_sv_pure", np.nan)
         report.insert(0, "target", target)
         report.insert(1, "group_spec", group_spec)
         for key, value in group_info.items():
@@ -2877,7 +2979,17 @@ class FeatureValidationPipeline:
         target: str,
         group_spec: str,
         group_info: dict[str, Any],
+        adapter: Any = None,
+        sv_pure_rows: list[dict] | None = None,
     ) -> pd.DataFrame:
+        from Modeling_Tool._utils.screen_iv import (
+            class_pure_special_bins,
+            guard_screen_iv,
+            smoothed_special_woes,
+            special_bin_woes,
+        )
+
+        convention = self._screen_iv_convention()
         target_series = data[target].astype(int)
         total_bad = max(float((target_series == 1).sum()), 1.0)
         total_good = max(float((target_series == 0).sum()), 1.0)
@@ -2909,13 +3021,27 @@ class FeatureValidationPipeline:
                 ordered = grouped.sort_values("bad_rate", ascending=False).reset_index(drop=True)
                 ks = float((ordered["bad_pct"].cumsum() - ordered["good_pct"].cumsum()).abs().max())
                 lift = float((ordered["bad_rate"] / overall_bad).replace([np.inf, -np.inf], np.nan).max())
+                per_bin = pd.DataFrame({
+                    "label": grouped["bin"], "n": grouped["n"], "bad": grouped["n_bad"], "good": grouped["n_good"],
+                    "bad_share": grouped["bad_pct"], "good_share": grouped["good_pct"], "woe": grouped["woe"],
+                    "iv": grouped["iv_component"],
+                })
+                iv_columns, pure = guard_screen_iv(
+                    float(grouped["iv_component"].sum()), per_bin, convention,
+                    smoothed_special_woes(adapter, var) if adapter is not None else [],
+                )
+                if sv_pure_rows is not None and pure.any():
+                    sv_pure_rows.extend(class_pure_special_bins(
+                        var, per_bin.assign(pure=pure), bin_arr, data[var].to_numpy(),
+                        special_bin_woes(adapter, var) if adapter is not None else {},
+                    ))
                 rows.append(
                     {
                         "var": var,
                         **self._ivks_value_stats(data[var]),
                         "ks_in_gains": ks,
                         "lift_in_gains": lift,
-                        "iv": float(grouped["iv_component"].sum()),
+                        **iv_columns,
                         "n_bump": int(grouped.shape[0]),
                         "n_bins": int(grouped.shape[0]),
                     }
@@ -2941,6 +3067,7 @@ class FeatureValidationPipeline:
         target: str,
         group_spec: str,
         group_cols: list[str],
+        adapter: Any = None,
     ) -> pd.DataFrame:
         """Aggregate group x bin x target counts once for each feature."""
         if not group_cols:
@@ -2964,8 +3091,11 @@ class FeatureValidationPipeline:
         if not eligible_groups:
             return pd.DataFrame()
 
+        from Modeling_Tool._utils.screen_iv import guard_iv_arrays, smoothed_special_woes
+
+        convention = self._screen_iv_convention()
         target_values = data[target].astype(int).to_numpy()
-        feature_counts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        feature_counts: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]] = {}
         n_groups = len(group_values)
         for var in features:
             if var not in data.columns or data[var].nunique(dropna=False) <= 1:
@@ -2984,7 +3114,8 @@ class FeatureValidationPipeline:
                 weights=target_values,
                 minlength=n_groups * n_bins,
             ).reshape(n_groups, n_bins)
-            feature_counts[var] = (counts, bad_counts)
+            smoothed = smoothed_special_woes(adapter, var) if adapter is not None else []
+            feature_counts[var] = (counts, bad_counts, np.asarray(categories, dtype=object), smoothed)
 
         rows = []
         for group_idx in eligible_groups:
@@ -2999,7 +3130,7 @@ class FeatureValidationPipeline:
             group_target = target_values[positions]
             overall_bad = max(float(group_target.mean()), 1e-6)
 
-            for var, (counts_matrix, bad_matrix) in feature_counts.items():
+            for var, (counts_matrix, bad_matrix, categories, smoothed) in feature_counts.items():
                 counts = counts_matrix[group_idx].astype(float, copy=False)
                 observed = counts > 0
                 counts = counts[observed]
@@ -3010,7 +3141,12 @@ class FeatureValidationPipeline:
                 bad_pct = bad_counts / total_bad
                 good_pct = good_counts / total_good
                 woe = np.log((bad_pct + 1e-6) / (good_pct + 1e-6))
-                iv = float(np.sum((bad_pct - good_pct) * woe))
+                contributions = (bad_pct - good_pct) * woe
+                # class purity on this group's counts
+                iv_columns, _ = guard_iv_arrays(
+                    float(np.sum(contributions)), categories[observed], counts, bad_counts, good_counts, bad_pct,
+                    good_pct, contributions, convention, smoothed,
+                )
                 bad_rate = np.divide(
                     bad_counts,
                     counts,
@@ -3034,7 +3170,7 @@ class FeatureValidationPipeline:
                     **self._ivks_value_stats(data[var].iloc[positions]),
                     "ks_in_gains": ks,
                     "lift_in_gains": lift,
-                    "iv": iv,
+                    **iv_columns,
                     "n_bump": int(observed.sum()),
                     "n_bins": int(observed.sum()),
                 }
@@ -3141,6 +3277,7 @@ class FeatureValidationPipeline:
             max_iterations = int(params.pop("max_iterations", 10))
             corr_method = params.get("method", "pearson")
             binner = woe_artifacts.get("by_target", {}).get(target, {}).get("engine") if cfg.corr_use_woe_bins else None
+            params["screen_iv_convention"] = self._screen_iv_convention()
             filt = CorrelationFilter(data=data, dep=target, woe_binner=binner, **params)
             keep = filt.remove_highly_correlated(features, max_iterations=max_iterations)
             removed = [feature for feature in features if feature not in keep]
@@ -3256,6 +3393,7 @@ class FeatureValidationPipeline:
         validation_summary: pd.DataFrame,
         selected_features: list[str] | None = None,
         selection_summary: dict[str, Any] | None = None,
+        ivks_sv_pure_bins: pd.DataFrame | None = None,
     ) -> dict[str, pd.DataFrame]:
         tables = {
             "validation_summary": validation_summary,
@@ -3279,6 +3417,11 @@ class FeatureValidationPipeline:
                 tables["selection_final_features"] = pd.DataFrame(
                     {"feature": list(selection_summary["final_features"])},
                 )
+            sv_pure_selection = (selection_summary.get("stage_tables") or {}).get("iv_sv_pure_bins")
+            if isinstance(sv_pure_selection, pd.DataFrame) and not sv_pure_selection.empty:
+                tables["selection_iv_sv_pure_bins"] = sv_pure_selection
+        if isinstance(ivks_sv_pure_bins, pd.DataFrame) and not ivks_sv_pure_bins.empty:
+            tables["ivks_sv_pure_bins"] = ivks_sv_pure_bins
         for name, df in distribution_summary.items():
             tables[f"distribution_{name}"] = df
         return tables

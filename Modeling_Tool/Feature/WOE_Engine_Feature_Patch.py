@@ -14,6 +14,14 @@ import warnings
 from tqdm import tqdm
 
 from Modeling_Tool._utils.robust import smf_logger
+from Modeling_Tool._utils.screen_iv import (
+    check_screen_iv_convention,
+    class_pure_special_bins,
+    guard_screen_iv,
+    smoothed_special_woes,
+    special_bin_woes,
+    sv_pure_frame,
+)
 from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 from .PSI_Tool import PSICalculator as _BasePSICalculator
 from .PSI_Tool import _psi_distributions_from_counts, _validate_psi_bucket_policy
@@ -79,7 +87,17 @@ def _screening_summary_from_engine(
     iv_cut: float,
     missing_rate_ref,
     failed_variables: list[tuple[str, str]] | None = None,
+    screen_iv_convention: str = "guarded",
+    sv_pure_rows: list[dict] | None = None,
 ) -> pd.DataFrame:
+    """IV, KS and lift of each variable on the bins of a fitted WOE engine (the screening on WOE bins).
+
+    The bins of each variable are scored with ``woe = ln((bad_share + 1e-6) / (good_share + 1e-6))`` over all the rows.
+    ``iv`` follows ``screen_iv_convention``: ``"guarded"`` leaves the class-pure bins (no bad or no good row) out of the
+    sum (a special-value bin that the engine smoothed counts with its WOE), ``"raw"`` counts every bin as up to 0.9.1. ``iv_raw``, ``iv_sv_pure`` and ``n_sv_pure`` give the sum over every
+    bin, the IV of the class-pure bins and their rows. The class-pure special-value bins are appended to
+    ``sv_pure_rows`` when a list is given.
+    """
     rows = []
     target = data[dep]
     total_bad = max(float((target == 1).sum()), 1.0)
@@ -115,11 +133,24 @@ def _screening_summary_from_engine(
             ks = (grouped["bad_pct"].cumsum() - grouped["good_pct"].cumsum()).abs().max()
             overall_bad = max(float((target == 1).mean()), 1e-6)
             lift = float((grouped["avg_bad"] / overall_bad).replace([np.inf, -np.inf], np.nan).max())
+            # class purity on the counts the IV uses; a class-pure bin stays in the totals above
+            per_bin = pd.DataFrame({
+                "label": grouped["bin"], "n": grouped["n"], "bad": grouped["n_bad"], "good": grouped["n_good"],
+                "bad_share": grouped["bad_pct"], "good_share": grouped["good_pct"], "woe": grouped["woe"],
+                "iv": grouped["iv"],
+            })
+            iv_columns, pure = guard_screen_iv(
+                float(grouped["iv"].sum()), per_bin, screen_iv_convention, smoothed_special_woes(adapter, var),
+            )
+            if sv_pure_rows is not None and pure.any():
+                sv_pure_rows.extend(class_pure_special_bins(
+                    var, per_bin.assign(pure=pure), bins, data[var], special_bin_woes(adapter, var),
+                ))
             rows.append({
                 "var": var,
                 "ks_in_gains": float(ks),
                 "lift_in_gains": lift,
-                "iv": float(grouped["iv"].sum()),
+                **iv_columns,
                 "n_bump": int(grouped.shape[0]),
                 "n_bins": int(grouped.shape[0]),
             })
@@ -130,7 +161,7 @@ def _screening_summary_from_engine(
             continue
 
     columns = [
-        "var", "n_all", "n", "ks_in_gains", "lift_in_gains", "iv",
+        "var", "n_all", "n", "ks_in_gains", "lift_in_gains", "iv", "iv_raw", "iv_sv_pure", "n_sv_pure",
         "n_bump", "missing_rate", "min", "mean", "max", "n_bins",
     ]
     if not rows:
@@ -483,16 +514,29 @@ class VarExtractionInsights:
         Constructor arguments of the self-fitted ``MonotoneWOEBinner`` (``woe_engine="monotone"`` without
         ``woe_binner``). The key ``fit_params`` is passed on to its ``fit``. ``chi2_method``, ``chi2_p``,
         ``init_equi_bins`` and ``spec_values`` also feed that fit. ``None`` is stored as an empty dict.
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the IV on the bins of a WOE engine treats a class-pure bin (a bin without bad rows or without good rows,
+        whose WOE ``ln((bad_share + 1e-6) / (good_share + 1e-6))`` comes from the ``1e-6`` alone). ``"guarded"`` leaves
+        such bins out of the IV sum (their rows stay in the bad and good totals, so every other bin keeps its WOE and
+        IV; a special-value bin that the engine smoothed with ``sv_woe_smoothing="laplace"`` counts with its WOE);
+        ``"raw"`` counts every bin, the IV up to 0.9.1. The default binning (no engine) is not affected. Any other
+        value raises ``ValueError``.
 
     Attributes
     ----------
-    data, dep, plot_path, nbins, equal_freq, min_bin_prop, precision, chi2_method, chi2_p, init_equi_bins, tree_binning, include_missing, seed, missing_rate_ref, spec_values, woe_engine, woe_engine_params
+    data, dep, plot_path, nbins, equal_freq, min_bin_prop, precision, chi2_method, chi2_p, init_equi_bins, tree_binning, include_missing, seed, missing_rate_ref, spec_values, woe_engine, woe_engine_params, screen_iv_convention
         The constructor values.
     woe_binner : WOE_Master, MonotoneWOEBinner or None
         The engine of the constructor, or the self-fitted ``MonotoneWOEBinner`` after the first call that needed it.
     failed_variables : list of tuple
         ``(variable, exception type name)`` pairs of the variables that the last ``get_var_analysis_report`` call
         could not analyze.
+    iv_sv_pure_bins : pandas.DataFrame
+        The class-pure special-value bins found by the last ``get_var_analysis_report`` call on the bins of an engine,
+        one row per bin with the columns ``var``, ``special_value``, ``bin_label``, ``n`` (rows), ``bad``, ``good``,
+        ``bad_rate``, ``woe`` and ``iv`` (the bin's contribution) and ``low_count`` (``n < 30``). A bin whose rows are
+        all missing counts as one (``special_value`` NaN). Empty (with these columns) when there is none or no engine
+        is used. It is a list to review, for example as candidate rules; nothing acts on it.
 
     Examples
     --------
@@ -520,6 +564,7 @@ class VarExtractionInsights:
         woe_engine="master",
         woe_binner=None,
         woe_engine_params=None,
+        screen_iv_convention="guarded",
     ):
         self._base = _BaseVarExtractionInsights(
             data, dep, plot_path, nbins, equal_freq, min_bin_prop, precision,
@@ -544,7 +589,9 @@ class VarExtractionInsights:
         self.woe_engine = woe_engine
         self.woe_binner = woe_binner
         self.woe_engine_params = woe_engine_params or {}
+        self.screen_iv_convention = check_screen_iv_convention(screen_iv_convention)
         self.failed_variables = []
+        self.iv_sv_pure_bins = sv_pure_frame([])
 
     def __getattr__(self, name):
         return getattr(self._base, name)
@@ -587,7 +634,10 @@ class VarExtractionInsights:
             ``n_bins``, ``missing_rate``, ``min``, ``mean`` and ``max``. ``n_bump`` counts the rank-order breaks
             between the bins of the default binning, and equals the bin count when a WOE engine is used. The
             default binning sorts the rows by ``iv``, descending; with a WOE engine they follow ``varlist``. The
-            frame is empty (with these columns) when no variable could be analyzed.
+            frame is empty (with these columns) when no variable could be analyzed. With a WOE engine ``iv`` follows
+            ``screen_iv_convention`` (``iv_cut`` is applied to it), and the report adds ``iv_raw`` (every bin
+            counted), ``iv_sv_pure`` (the IV of the class-pure bins) and ``n_sv_pure`` (their rows); the class-pure
+            special-value bins are listed in ``iv_sv_pure_bins``.
 
         Warns
         -----
@@ -605,11 +655,13 @@ class VarExtractionInsights:
         if dep is None:
             dep = self.dep
         self.failed_variables = []
+        self.iv_sv_pure_bins = sv_pure_frame([])
         adapter = as_woe_engine(self.woe_binner) if self.woe_binner is not None else _make_monotone_adapter(self, data, varlist)
         if adapter is None:
             result = self._base.get_var_analysis_report(data, varlist, dep, iv_cut)
             self.failed_variables = getattr(self._base, "failed_variables", [])
             return result
+        sv_pure_rows: list[dict] = []
         result = _screening_summary_from_engine(
             data,
             varlist,
@@ -618,7 +670,10 @@ class VarExtractionInsights:
             iv_cut,
             self.missing_rate_ref,
             failed_variables=self.failed_variables,
+            screen_iv_convention=getattr(self, "screen_iv_convention", "guarded"),
+            sv_pure_rows=sv_pure_rows,
         )
+        self.iv_sv_pure_bins = sv_pure_frame(sv_pure_rows)
         if self.failed_variables:
             failed = [name for name, _ in self.failed_variables]
             warnings.warn(
@@ -728,10 +783,14 @@ class CorrelationFilter:
     woe_engine_params : dict or None, default None
         Constructor arguments of the self-fitted ``MonotoneWOEBinner``; the key ``fit_params`` is passed on to its
         ``fit``. ``None`` is stored as an empty dict.
+    screen_iv_convention : {"guarded", "raw"}, default "guarded"
+        How the IV from an engine's bins treats a class-pure bin: ``"guarded"`` leaves it out of the IV sum,
+        ``"raw"`` counts every bin (the IV up to 0.9.1). See ``VarExtractionInsights``. The default computation (no
+        engine) is not affected. Any other value raises ``ValueError``.
 
     Attributes
     ----------
-    data, dep, corr_cutpoint, method, tree_binning, chi2_method, seed, chi2_p, init_equi_bins, missing_rate_ref, spec_values, base_metric, woe_engine, woe_binner, woe_engine_params
+    data, dep, corr_cutpoint, method, tree_binning, chi2_method, seed, chi2_p, init_equi_bins, missing_rate_ref, spec_values, base_metric, woe_engine, woe_binner, woe_engine_params, screen_iv_convention
         The constructor values.
     correlated_dict : dict
         For each anchor variable of a correlated group, ``{"corr": pairs DataFrame, "gains": metric table}``.
@@ -761,6 +820,7 @@ class CorrelationFilter:
         woe_engine="master",
         woe_binner=None,
         woe_engine_params=None,
+        screen_iv_convention="guarded",
     ):
         self._base = _BaseCorrelationFilter(
             data, dep, corr_cutpoint, method, tree_binning, chi2_method, seed,
@@ -781,6 +841,7 @@ class CorrelationFilter:
         self.woe_engine = woe_engine
         self.woe_binner = woe_binner
         self.woe_engine_params = woe_engine_params or {}
+        self.screen_iv_convention = check_screen_iv_convention(screen_iv_convention)
         self.correlated_dict = {}
         self.filtered_varlist = []
         self._corr_matrix_cache = None
@@ -896,6 +957,7 @@ class CorrelationFilter:
                 woe_engine=self.woe_engine,
                 woe_binner=self.woe_binner,
                 woe_engine_params=self.woe_engine_params,
+                screen_iv_convention=getattr(self, "screen_iv_convention", "guarded"),
             )
             self._metric_summary_cache = insights.get_var_analysis_report(
                 self.data,
