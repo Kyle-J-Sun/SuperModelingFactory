@@ -559,6 +559,8 @@ _NESTED_FIELDS = {
         _nested("iv_upper_threshold", "Upper IV limit (leakage guard, 2.0 by default since 0.9.3; None switches it off). Tested on the floored or raw IV, never on the guarded IV.", "number"),
         _nested("iv_gap_ratio_warn", "Warn about a feature when iv_raw / iv reaches this value (possible leakage or unresolved class-pure bins).", "number"),
         _nested("iv_gap_abs_warn", "Warn about a feature when iv_raw - iv reaches this value.", "number"),
+        _nested("on_empty_stage", "What to do when a stage would drop every feature: keep_all_warn keeps the best fallback_top_k features by screening IV and never a leak-gate drop (raises when only those are left); keep_all is the fallback up to 0.9.3, which also revives leak-gate drops (for comparisons with old results only); raise stops.", "select", options=["keep_all_warn", "keep_all", "raise"]),
+        _nested("fallback_top_k", "Number of features the empty-stage fallback keeps (keep_all_warn).", "number", min_val=1, step=1),
         _nested("corr_enabled", "Whether to run correlation screening.", "toggle"),
         _nested("corr_threshold", "Correlation threshold.", "slider", min_val=0.0, max_val=1.0, step=0.01),
         _nested("corr_block_size", "Number of columns per feature block when computing the weighted correlation matrix.", "number", min_val=1, max_val=10000, step=1),

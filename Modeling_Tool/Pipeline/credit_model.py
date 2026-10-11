@@ -149,13 +149,20 @@ class CreditModelPipelineConfig:
         ``monotone_woe_params`` of this config, not from the dict. Any exception raised by the screening (for example an
         invalid setting, or a G03 or G04 gate setting, which needs evidence that this pipeline does not provide) is
         caught: it is recorded in ``feature_selection_summary['error']``, announced by a ``RuntimeWarning``, and every
-        feature is kept. The one exception is ``on_empty_stage="raise"``, which still raises ``EmptyStageError`` (a
-        ``ValueError``) when a stage would drop every feature. ``psi_compare_splits`` ignores case and spaces and accepts
+        feature is kept, except the leak-gate drops that the screening found before it failed (listed in
+        ``feature_selection_summary['hard_dropped']``; since 0.9.3). ``EmptyStageError`` (a ``ValueError``) is not
+        caught: it is raised when a stage would drop every feature and ``on_empty_stage="raise"``, or when every feature
+        the stage would drop is a leak-gate drop. ``on_empty_stage`` (default ``"keep_all_warn"``) and
+        ``fallback_top_k`` (default 5) set the empty-stage fallback, which never brings back a leak-gate drop (see
+        ``FeatureScreenConfig.on_empty_stage``; ``"keep_all"`` restores the fallback up to 0.9.3 for comparisons with
+        old results). The backward elimination falls back to the screened features only, so it cannot bring a
+        leak-gate drop back either. ``psi_compare_splits`` ignores case and spaces and accepts
         a bare string, ``corr_method`` and ``corr_base_metric`` set the correlation coefficient and the metric that
         decides between two correlated features. ``iv_upper_threshold`` (the leakage limit, 2.0 since 0.9.3; also the
         value taken when the key is missing) drops features above it, recorded in
-        ``feature_selection_summary['dropped_detail']``; pass ``None`` to switch it off. ``iv_gap_ratio_warn`` and
-        ``iv_gap_abs_warn`` set the leak warning of the screening on WOE bins (see ``FeatureScreenConfig``).
+        ``feature_selection_summary['dropped_detail']`` with a warning per feature; pass ``None`` to switch it off.
+        ``iv_gap_ratio_warn`` and ``iv_gap_abs_warn`` set the leak warning of the screening on WOE bins (see
+        ``FeatureScreenConfig``).
     woe_engine : str, default "equal_freq"
         WOE binning engine: ``"monotone"`` (case-insensitive) uses ``MonotoneWOEBinner`` with ``monotone_woe_params``,
         any other value uses ``WOE_Master`` with ``woe_params``. It is also the engine that the screening fits when
@@ -555,8 +562,10 @@ class CreditModelPipelineResult:
         (or one was synthesized with ``synthesize_missing_oot=True``) and it is not forbidden.
     feature_selection_summary : dict
         Outcome of the feature selection: ``initial_features`` and ``final_features``; the tables ``psi``, ``iv`` and
-        ``corr_dropped`` (when they exist), ``corr_features`` and ``screen_summary``; ``error`` when the screening failed
-        (all features were then kept); ``skipped`` or ``from_artifact`` and ``artifact_source`` for those modes; and
+        ``corr_dropped`` (when they exist), ``corr_features`` and ``screen_summary``; ``dropped_detail`` (the leak-gate
+        drops, the gate drops and the ``fallback_kept`` rows); ``error`` when the screening failed (all features were then
+        kept, except the leak-gate drops it had found, listed in ``hard_dropped``); ``skipped`` or ``from_artifact`` and
+        ``artifact_source`` for those modes; and
         ``lr_elimination`` (the dropped-feature trace) when the LR p-value elimination ran.
     woe_artifacts : dict
         The WOE step: ``engine`` (a ``WOE_Master`` or an adapter of the monotone binner), ``engine_name``, ``features``,
@@ -657,7 +666,8 @@ class CreditModelPipeline:
     Notes
     -----
     Several stages catch their own failures instead of stopping the run, and record the error in the result: the
-    feature selection (``feature_selection_summary["error"]``, every feature is kept), the backward elimination
+    feature selection (``feature_selection_summary["error"]``, every feature is kept except the leak-gate drops found
+    before the failure), the backward elimination
     (``backward_summary`` with the columns ``step`` and ``error``), each Optuna search (a table with the column
     ``error``) and the explanations (an ``error`` entry per model).
     """
@@ -1442,18 +1452,31 @@ class CreditModelPipeline:
             summary = self._screen_result_to_summary(result, feature_cols)
             return summary, list(result.selected_features)
         except EmptyStageError:
-            # ``on_empty_stage='raise'`` is a request to stop; it must not be turned into "keep everything"
+            # ``on_empty_stage='raise'``, or only leak-gate drops left (0.9.3): a request to stop, which must not be
+            # turned into "keep everything"
             raise
         except Exception as exc:
+            # the leak-gate drops that the screening found before it failed stay dropped (0.9.3), except under the
+            # explicit legacy ``on_empty_stage='keep_all'``
+            hard_dropped = dict(getattr(exc, "smf_hard_dropped", None) or {})
+            if screen_config.on_empty_stage == "keep_all":
+                hard_dropped = {}
+            kept = [col for col in feature_cols if col not in hard_dropped]
             summary["error"] = repr(exc)
-            summary["final_features"] = list(feature_cols)
+            summary["final_features"] = list(kept)
+            if hard_dropped:
+                summary["hard_dropped"] = dict(hard_dropped)
+            held = (
+                f" except the {len(hard_dropped)} leak-gate drop(s) {sorted(hard_dropped)}, which stay dropped"
+                if hard_dropped else ""
+            )
             warnings.warn(
                 f"CreditModelPipeline: the feature screening failed ({exc!r}), so every one of the "
-                f"{len(feature_cols)} features is kept. The error is in feature_selection_summary['error'].",
+                f"{len(feature_cols)} features is kept{held}. The error is in feature_selection_summary['error'].",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            return summary, list(feature_cols)
+            return summary, list(kept)
 
     def _screen_result_to_summary(
         self,

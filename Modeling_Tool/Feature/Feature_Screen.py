@@ -32,10 +32,16 @@ from .Weighted_Screen import (
     _fallback_weighted_iv,
     _corr_filter_dropped_audit,
     _gate_ranking_iv_map,
+    DEFAULT_FALLBACK_TOP_K,
     DEFAULT_IV_GAP_ABS_WARN,
     DEFAULT_IV_GAP_RATIO_WARN,
     DEFAULT_IV_UPPER_THRESHOLD,
+    EmptyStageError,
+    _check_fallback_top_k,
     _check_iv_gap_thresholds,
+    _check_on_empty_stage,
+    _warn_leak_gate_drops,
+    hard_dropped_features,
     _empty_iv_table,
     _flag_iv_gaps,
     _gate_iv_without_sv_pure,
@@ -118,8 +124,10 @@ class FeatureScreenConfig:
         counted), and ``iv_raw`` alone where the floored IV cannot be computed (non-numeric features); under
         ``"raw"`` and without WOE bins the test is that of 0.9.2. A feature that would not exceed the limit without its
         class-pure special-value bins (a special value that holds only bads can be a label leak) is dropped as well,
-        with the reason ``"iv_above_upper_sv_pure"`` so that a human can review it. ``None`` disables the limit (the
-        default up to 0.9.2).
+        with the reason ``"iv_above_upper_sv_pure"`` so that a human can review it. Every such drop warns ("possible
+        target leakage; check the field's time point (PIT) and source before training"; since 0.9.3) and is a hard drop
+        that no empty-stage fallback brings back (see ``on_empty_stage``). ``None`` disables the limit (the default up
+        to 0.9.2).
     iv_bins : int, default 10
         Maximum number of bins of the default IV binning: decision-tree leaves on unweighted runs, weighted
         equal-frequency bins on weighted runs (which also derive their PSI bins from it).
@@ -157,9 +165,18 @@ class FeatureScreenConfig:
     corr_block_size : int, default 256
         Number of feature columns per block of the weighted pairwise correlation matrix. A smaller value lowers peak
         memory without changing the result; it must be positive. Weighted runs only.
-    on_empty_stage : {"keep_all_warn", "raise"}, default "keep_all_warn"
-        What to do when a stage would drop every feature: ``"keep_all_warn"`` keeps all of them, adds a
-        ``<stage>_fallback`` row to the summary and warns; ``"raise"`` raises ``ValueError``.
+    on_empty_stage : {"keep_all_warn", "keep_all", "raise"}, default "keep_all_warn"
+        What to do when a stage would drop every feature (each fallback adds a ``<stage>_fallback`` row to the
+        summary). ``"keep_all_warn"`` (the name is kept for compatibility; since 0.9.3 it does not keep all) never
+        brings back a hard drop, a feature that the IV upper limit dropped (``dropped_detail`` reason
+        ``"iv_above_upper"`` or ``"iv_above_upper_sv_pure"``). From the IV stage on (the IV stage and the VIF,
+        group-stability and multi-target gates) it keeps the ``fallback_top_k`` other features with the highest
+        screening IV (the ``iv`` column, never ``iv_raw``), in that order, warns with their names and IVs, and marks
+        them in ``dropped_detail`` with the reason ``"fallback_kept"``; the missing-rate and PSI stages, which run
+        before any IV exists, keep every feature as before. When only hard drops are left it raises
+        ``EmptyStageError`` with their names and reasons; their leak warnings have been issued before. ``"keep_all"``
+        keeps every feature, hard drops included: the behavior up to 0.9.3, which can let a leak back in, so use it
+        only to compare with old results. ``"raise"`` raises ``EmptyStageError`` (a ``ValueError``).
     missing_rate_threshold : float or None, default None
         Maximum missing rate on INS: features with a higher missing rate are dropped before the PSI stage. ``None``
         skips the stage, and ``missing_rate_table`` and ``missing_rate_dropped`` then stay empty.
@@ -281,6 +298,10 @@ class FeatureScreenConfig:
     iv_gap_abs_warn : float, default 0.5
         Leak warning (0.9.3): flag and warn as above when ``iv_raw - iv`` is at or above this value. Must be positive
         (``inf`` switches the rule off; ``ValueError`` otherwise).
+    fallback_top_k : int, default 5
+        Number of features that the empty-stage fallback keeps under ``on_empty_stage="keep_all_warn"`` (0.9.3): the
+        ones with the highest screening IV among those the stage dropped, leak-gate drops excluded. A whole number of
+        at least 1 (``ValueError`` otherwise).
 
     Notes
     -----
@@ -311,7 +332,7 @@ class FeatureScreenConfig:
     corr_base_metric: str = "iv"
     corr_nan_policy: Literal["pairwise", "median_fill", "raise"] = "pairwise"
     corr_block_size: int = 256
-    on_empty_stage: Literal["keep_all_warn", "raise"] = "keep_all_warn"
+    on_empty_stage: Literal["keep_all_warn", "keep_all", "raise"] = "keep_all_warn"
     missing_rate_threshold: float | None = None
     missing_rate_ref: float | int = -999999
     woe_engine: str = "equal_freq"
@@ -360,6 +381,8 @@ class FeatureScreenConfig:
     # 0.9.3: warn about (and flag) features whose iv_raw is far above iv; never drops
     iv_gap_ratio_warn: float = DEFAULT_IV_GAP_RATIO_WARN
     iv_gap_abs_warn: float = DEFAULT_IV_GAP_ABS_WARN
+    # 0.9.3: number of soft drops that the empty-stage fallback keeps (never a leak-gate drop)
+    fallback_top_k: int = DEFAULT_FALLBACK_TOP_K
 
     def __post_init__(self) -> None:
         _check_iv_equal_freq(self.iv_equal_freq)
@@ -373,8 +396,8 @@ class FeatureScreenConfig:
         self.corr_base_metric = str(self.corr_base_metric).strip().lower()
         if self.corr_base_metric not in ("iv", "ks"):
             raise ValueError(f"corr_base_metric must be 'iv' or 'ks'; got {self.corr_base_metric!r}")
-        if self.on_empty_stage not in ("keep_all_warn", "raise"):
-            raise ValueError(f"on_empty_stage must be 'keep_all_warn' or 'raise'; got {self.on_empty_stage!r}")
+        _check_on_empty_stage(self.on_empty_stage)
+        _check_fallback_top_k(self.fallback_top_k)
 
 
 def _normalize_psi_compare_splits(value: Any) -> list[str]:
@@ -505,6 +528,7 @@ def screen_config_from_mapping(
         ),
         iv_gap_ratio_warn=float(cfg.get("iv_gap_ratio_warn", DEFAULT_IV_GAP_RATIO_WARN)),
         iv_gap_abs_warn=float(cfg.get("iv_gap_abs_warn", DEFAULT_IV_GAP_ABS_WARN)),
+        fallback_top_k=cfg.get("fallback_top_k", DEFAULT_FALLBACK_TOP_K),
     )
 
 
@@ -652,13 +676,15 @@ def _woe_bins_unweighted_screen(
     *,
     prefit_woe_engine: Any | None = None,
     selection_evidence: Any | None = None,
+    dropped_rows: list[dict] | None = None,
 ) -> FeatureScreenResult:
     from Modeling_Tool import CorrelationFilter, PSICalculator, VarExtractionInsights
 
     ins, oos, oot = splits["ins"], splits["oos"], splits["oot"]
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, None)]
-    dropped_rows: list[dict] = []
+    # filled in place, so that a caller still sees the hard drops when a later stage raises
+    dropped_rows = [] if dropped_rows is None else dropped_rows
     stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
@@ -746,6 +772,7 @@ def _woe_bins_unweighted_screen(
             )[_IV_TABLE_COLS]
             # under the guarded convention on WOE bins the upper limit also tests iv_raw, never the guarded iv (0.9.3)
             gate_raw_col = "iv_raw" if use_binner and config.screen_iv_convention == "guarded" else None
+            n_rows = len(dropped_rows)
             if config.iv_upper_threshold is not None:
                 gate_frame = iv_table[["var", "iv", "iv_raw"]].copy()
                 gate_frame["iv_floored"] = _unit_weight_floored_iv(
@@ -765,10 +792,13 @@ def _woe_bins_unweighted_screen(
                 )
             else:
                 keep = _iv_band_keep(iv, "iv", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
+            _warn_leak_gate_drops(dropped_rows[n_rows:], iv_table)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
                 on_empty_stage=config.on_empty_stage, threshold=config.iv_threshold,
+                dropped_rows=dropped_rows, fallback_iv=dict(zip(iv_table["var"], iv_table["iv"])),
+                fallback_top_k=config.fallback_top_k,
             )
             summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, None))
 
@@ -800,6 +830,7 @@ def _woe_bins_unweighted_screen(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
         weight_col=None, on_empty_stage=config.on_empty_stage,
+        fallback_iv=dict(zip(iv_table["var"], iv_table["iv"])) if config.iv_enabled else None,
         woe_frame_fn=(
             _vif_woe_frame_fn(ins, binner)
             if config.vif_enabled and config.vif_use_woe_bins
@@ -938,6 +969,7 @@ def _weighted_woe_bins_screen(
     *,
     prefit_woe_engine: Any | None = None,
     selection_evidence: Any | None = None,
+    dropped_rows: list[dict] | None = None,
 ) -> FeatureScreenResult:
     from Modeling_Tool.WOE.WOE_Adapter import as_woe_engine
 
@@ -946,7 +978,8 @@ def _weighted_woe_bins_screen(
     y_ins = ins[target_col].astype(float).to_numpy()
     current = list(feature_cols)
     summary_rows = [_summary_row("initial", len(feature_cols), len(current), None, weight_col)]
-    dropped_rows: list[dict] = []
+    # filled in place, so that a caller still sees the hard drops when a later stage raises
+    dropped_rows = [] if dropped_rows is None else dropped_rows
     stage_tables: dict[str, pd.DataFrame] = {}
     current, missing_rate_table, missing_rate_dropped = _apply_missing_rate_stage(
         ins,
@@ -1087,6 +1120,7 @@ def _weighted_woe_bins_screen(
         if not sv_pure_bins.empty:
             stage_tables["iv_sv_pure_bins"] = sv_pure_bins
         if not iv_table.empty:
+            n_rows = len(dropped_rows)
             if config.iv_upper_threshold is not None:
                 gate_frame = iv_table[["var", "iv_weighted", "iv_raw"]].copy()
                 gate_frame["iv_floored"] = gate_frame["var"].map(iv_floored_map)
@@ -1102,11 +1136,14 @@ def _weighted_woe_bins_screen(
                 )
             else:
                 keep = _iv_band_keep(iv_table, "iv_weighted", config.iv_threshold, config.iv_upper_threshold, dropped_rows)
+            _warn_leak_gate_drops(dropped_rows[n_rows:], iv_table)
             n_before = len(current)
             current = _apply_stage_keep(
                 current, keep, "iv", summary_rows,
                 on_empty_stage=config.on_empty_stage, weight_col=weight_col,
                 threshold=config.iv_threshold, intersect=True,
+                dropped_rows=dropped_rows, fallback_iv=dict(zip(iv_table["var"], iv_table["iv"])),
+                fallback_top_k=config.fallback_top_k,
             )
             summary_rows.append(_summary_row("iv", n_before, len(current), config.iv_threshold, weight_col))
     else:
@@ -1170,6 +1207,7 @@ def _weighted_woe_bins_screen(
         ins, current, config, selection_evidence, gate_iv_map,
         summary_rows, dropped_rows, stage_tables,
         weight_col=weight_col, on_empty_stage=config.on_empty_stage,
+        fallback_iv=dict(zip(iv_table["var"], iv_table["iv"])) if config.iv_enabled else None,
         woe_frame_fn=(
             _vif_woe_frame_fn(ins, binner)
             if config.vif_enabled and config.vif_use_woe_bins
@@ -1252,11 +1290,20 @@ def feature_screen(
     KeyError
         If ``splits`` lacks one of the three keys, or a frame that needs the weights lacks ``weight_col``.
     ValueError
-        If the weights are invalid, if ``on_empty_stage="raise"`` and a stage would drop every feature, if a G03 or G04
-        threshold is set without ``selection_evidence``, or if a gate setting is invalid (``target_rules``,
-        ``ranking_metric``, ``vif_tie_break_metric``).
+        If the weights are invalid, if a G03 or G04 threshold is set without ``selection_evidence``, or if a gate setting
+        is invalid (``target_rules``, ``ranking_metric``, ``vif_tie_break_metric``).
+    EmptyStageError
+        A ``ValueError``: a stage would drop every feature and ``on_empty_stage="raise"``, or (under the default
+        ``"keep_all_warn"``) every feature it would drop is a leak-gate drop, which no fallback may revive.
     ImportError
         If ``vif_enabled`` is True and ``statsmodels`` is not installed.
+
+    Warns
+    -----
+    UserWarning
+        For each feature that the IV upper limit drops (possible target leakage), for each feature with a large gap
+        between ``iv_raw`` and ``iv`` (see ``FeatureScreenConfig.iv_gap_ratio_warn``), and for each empty-stage
+        fallback.
 
     Notes
     -----
@@ -1286,6 +1333,39 @@ def feature_screen(
         if not bool(observed.all()):
             splits = {**splits, "ins": splits["ins"][observed]}
 
+    # The stages fill this list in place. When a stage raises after the IV stage, the hard drops found so far travel
+    # on the exception (``smf_hard_dropped``), so that a caller that keeps going, such as ``CreditModelPipeline``,
+    # cannot bring them back (0.9.3).
+    dropped_rows: list[dict] = []
+    try:
+        return _dispatch_feature_screen(
+            splits, feature_cols, target_col, weight_col, cfg, use_woe_bins,
+            prefit_woe_engine=prefit_woe_engine, selection_evidence=selection_evidence, dropped_rows=dropped_rows,
+        )
+    except EmptyStageError:
+        raise
+    except Exception as exc:
+        hard = hard_dropped_features(dropped_rows)
+        if hard:
+            try:
+                exc.smf_hard_dropped = hard  # type: ignore[attr-defined]
+            except AttributeError:  # an exception type without an instance dict
+                pass
+        raise
+
+
+def _dispatch_feature_screen(
+    splits: dict[str, pd.DataFrame],
+    feature_cols: list[str],
+    target_col: str,
+    weight_col: str | None,
+    cfg: FeatureScreenConfig,
+    use_woe_bins: bool,
+    *,
+    prefit_woe_engine: Any | None,
+    selection_evidence: Any | None,
+    dropped_rows: list[dict],
+) -> FeatureScreenResult:
     if weight_col is not None:
         if use_woe_bins or prefit_woe_engine is not None:
             return _weighted_woe_bins_screen(
@@ -1296,6 +1376,7 @@ def feature_screen(
                 cfg,
                 prefit_woe_engine=prefit_woe_engine,
                 selection_evidence=selection_evidence,
+                dropped_rows=dropped_rows,
             )
         return _weighted_screen_impl(
             splits,
@@ -1326,6 +1407,8 @@ def feature_screen(
             missing_rate_ref=cfg.missing_rate_ref,
             gates_config=cfg,
             selection_evidence=selection_evidence,
+            fallback_top_k=cfg.fallback_top_k,
+            dropped_rows=dropped_rows,
         )
 
     if use_woe_bins or prefit_woe_engine is not None:
@@ -1336,6 +1419,7 @@ def feature_screen(
             cfg,
             prefit_woe_engine=prefit_woe_engine,
             selection_evidence=selection_evidence,
+            dropped_rows=dropped_rows,
         )
 
     return _legacy_unweighted_screen(
@@ -1365,6 +1449,8 @@ def feature_screen(
         content=cfg.content,
         corr_method=cfg.corr_method,
         corr_base_metric=cfg.corr_base_metric,
+        fallback_top_k=cfg.fallback_top_k,
+        dropped_rows=dropped_rows,
     )
 
 

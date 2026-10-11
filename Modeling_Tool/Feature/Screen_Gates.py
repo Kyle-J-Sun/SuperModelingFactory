@@ -26,7 +26,7 @@ import pandas as pd
 
 from Modeling_Tool.Core.sample_weight_utils import resolve_sample_weight
 
-from .Weighted_Screen import _apply_stage_keep, _check_tie_breaker, _summary_row
+from .Weighted_Screen import DEFAULT_FALLBACK_TOP_K, _apply_stage_keep, _check_tie_breaker, _summary_row
 
 
 def point_biserial_direction(
@@ -147,6 +147,7 @@ def apply_vif_stage(
     weight_col: str | None,
     on_empty_stage: str,
     woe_frame_fn: Callable[[list[str]], pd.DataFrame] | None = None,
+    fallback_iv: dict[str, float] | None = None,
 ) -> list[str]:
     """G06: iteratively drop the highest-VIF feature until all VIFs fall
     below ``vif_threshold`` or only ``vif_min_features`` remain.
@@ -179,10 +180,13 @@ def apply_vif_stage(
         Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
     weight_col : str or None
         Sample-weight column of ``ins``; when given the VIF is computed with these weights.
-    on_empty_stage : {"keep_all_warn", "raise"}
+    on_empty_stage : {"keep_all_warn", "keep_all", "raise"}
         What happens when the stage would remove every feature (see ``_apply_stage_keep``).
     woe_frame_fn : callable or None, default None
         ``fn(features) -> DataFrame`` returning the WOE-encoded INS columns; required when ``vif_use_woe_bins`` is true.
+    fallback_iv : dict of str to float or None, default None
+        Feature to screening IV (the ``iv`` column), which ranks the features that the empty-stage fallback keeps;
+        ``None`` keeps every one (see ``_apply_stage_keep``).
 
     Returns
     -------
@@ -347,6 +351,8 @@ def apply_vif_stage(
         current, survivors + excluded, "vif", summary_rows,
         on_empty_stage=on_empty_stage, weight_col=weight_col,
         threshold=threshold, intersect=True,
+        dropped_rows=dropped_rows, fallback_iv=fallback_iv,
+        fallback_top_k=getattr(config, "fallback_top_k", DEFAULT_FALLBACK_TOP_K),
     )
     audit: dict[str, Any] = {}
     if excluded:
@@ -375,6 +381,7 @@ def apply_group_stability_stage(
     *,
     weight_col: str | None,
     on_empty_stage: str,
+    fallback_iv: dict[str, float] | None = None,
 ) -> list[str]:
     """G03: per-group (e.g. monthly) IV floor, IV CV cap, and direction
     consistency floor. Features with too few eligible groups are handled per
@@ -399,8 +406,11 @@ def apply_group_stability_stage(
         Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
     weight_col : str or None
         Weight column name, recorded in the summary row.
-    on_empty_stage : {"keep_all_warn", "raise"}
-        What happens when the stage would remove every feature.
+    on_empty_stage : {"keep_all_warn", "keep_all", "raise"}
+        What happens when the stage would remove every feature (see ``_apply_stage_keep``).
+    fallback_iv : dict of str to float or None, default None
+        Feature to screening IV (the ``iv`` column), which ranks the features that the empty-stage fallback keeps;
+        ``None`` keeps every one.
 
     Returns
     -------
@@ -498,6 +508,8 @@ def apply_group_stability_stage(
     kept = _apply_stage_keep(
         current, keep, "group_stability", summary_rows,
         on_empty_stage=on_empty_stage, weight_col=weight_col, intersect=True,
+        dropped_rows=dropped_rows, fallback_iv=fallback_iv,
+        fallback_top_k=getattr(config, "fallback_top_k", DEFAULT_FALLBACK_TOP_K),
     )
     summary_rows.append(_summary_row(
         "group_stability", len(current), len(kept), None, weight_col,
@@ -518,6 +530,7 @@ def apply_multi_target_stage(
     *,
     weight_col: str | None,
     on_empty_stage: str,
+    fallback_iv: dict[str, float] | None = None,
 ) -> list[str]:
     """G04: joint gate across several labels — a feature must pass its
     per-target IV range / direction alignment on all / any / >=K targets.
@@ -541,8 +554,11 @@ def apply_multi_target_stage(
         Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
     weight_col : str or None
         Weight column name, recorded in the summary row.
-    on_empty_stage : {"keep_all_warn", "raise"}
-        What happens when the stage would remove every feature.
+    on_empty_stage : {"keep_all_warn", "keep_all", "raise"}
+        What happens when the stage would remove every feature (see ``_apply_stage_keep``).
+    fallback_iv : dict of str to float or None, default None
+        Feature to screening IV (the ``iv`` column), which ranks the features that the empty-stage fallback keeps;
+        ``None`` keeps every one.
 
     Returns
     -------
@@ -625,6 +641,8 @@ def apply_multi_target_stage(
     kept = _apply_stage_keep(
         current, keep, "multi_target", summary_rows,
         on_empty_stage=on_empty_stage, weight_col=weight_col, intersect=True,
+        dropped_rows=dropped_rows, fallback_iv=fallback_iv,
+        fallback_top_k=getattr(config, "fallback_top_k", DEFAULT_FALLBACK_TOP_K),
     )
     summary_rows.append(_summary_row(
         "multi_target", len(current), len(kept), None, weight_col,
@@ -740,6 +758,7 @@ def apply_post_corr_gates(
     weight_col: str | None,
     on_empty_stage: str,
     woe_frame_fn: Callable[[list[str]], pd.DataFrame] | None = None,
+    fallback_iv: dict[str, float] | None = None,
 ) -> list[str]:
     """Orchestrate the post-corr gates: vif -> group_stability ->
     multi_target -> truncation. Raises when G03/G04 thresholds are set but no
@@ -766,10 +785,12 @@ def apply_post_corr_gates(
         Accumulator of per-stage detail tables; the stage adds its table under its own key in place.
     weight_col : str or None
         Sample-weight column name.
-    on_empty_stage : {"keep_all_warn", "raise"}
-        What happens when a stage would remove every feature.
+    on_empty_stage : {"keep_all_warn", "keep_all", "raise"}
+        What happens when a stage would remove every feature (see ``_apply_stage_keep``).
     woe_frame_fn : callable or None, default None
         Provider of the WOE-encoded frame for ``vif_use_woe_bins``.
+    fallback_iv : dict of str to float or None, default None
+        Feature to screening IV (the ``iv`` column), which ranks the features that an empty-stage fallback keeps.
 
     Returns
     -------
@@ -792,16 +813,16 @@ def apply_post_corr_gates(
     current = apply_vif_stage(
         ins, current, config, iv_map, summary_rows, dropped_rows, stage_tables,
         weight_col=weight_col, on_empty_stage=on_empty_stage,
-        woe_frame_fn=woe_frame_fn,
+        woe_frame_fn=woe_frame_fn, fallback_iv=fallback_iv,
     )
     if evidence is not None:
         current = apply_group_stability_stage(
             current, config, evidence, summary_rows, dropped_rows, stage_tables,
-            weight_col=weight_col, on_empty_stage=on_empty_stage,
+            weight_col=weight_col, on_empty_stage=on_empty_stage, fallback_iv=fallback_iv,
         )
         current = apply_multi_target_stage(
             current, config, evidence, summary_rows, dropped_rows, stage_tables,
-            weight_col=weight_col, on_empty_stage=on_empty_stage,
+            weight_col=weight_col, on_empty_stage=on_empty_stage, fallback_iv=fallback_iv,
         )
     current = apply_truncation_stage(
         current, config, iv_map, summary_rows, dropped_rows, stage_tables,

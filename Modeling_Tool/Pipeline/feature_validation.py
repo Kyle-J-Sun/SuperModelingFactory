@@ -238,7 +238,9 @@ class FeatureValidationPipelineConfig:
         ``insufficient_group_policy``, ``target_rules``, ``min_pass_count``, ``per_target_iv_range``,
         ``direction_reference_target``. VIF: ``vif_enabled``, ``vif_threshold``, ``vif_min_features``,
         ``vif_tie_break_metric``, ``vif_use_woe_bins``. Others: ``ranking_metric``, ``tie_breaker``,
-        ``missing_rate_ref``, ``on_empty_stage`` (``'keep_all_warn'`` or ``'raise'``), ``corr_method`` and
+        ``missing_rate_ref``, ``on_empty_stage`` (``'keep_all_warn'``, ``'keep_all'`` or ``'raise'``; see
+        ``FeatureScreenConfig.on_empty_stage``: since 0.9.3 the default never brings back a leak-gate drop),
+        ``fallback_top_k`` (5), ``corr_method`` and
         ``corr_base_metric`` (default to ``corr_params['method']`` and ``['base_metric']``) and the stage switches and
         binning options derived from the other config fields (for example ``psi_enabled``, ``iv_nbins``,
         ``corr_max_iterations``). ``psi_compare_splits`` ignores case and spaces and accepts a bare string.
@@ -926,7 +928,7 @@ class FeatureValidationPipeline:
                     warnings.filterwarnings("ignore", message=r".*missing or unknown label in '_smf_batch_split'.*")
                     # a batch whose features all fail a stage keeps them as candidates; the global pass decides
                     warnings.filterwarnings(
-                        "ignore", message=r".*keeping all of them \(on_empty_stage='keep_all_warn'\).*"
+                        "ignore", message=r".*keeping all of them.*\(on_empty_stage='keep_all'\).*"
                     )
                     batch_pipeline = FeatureValidationPipeline(batch_cfg)
                     batch_pipeline._nested_run = True
@@ -951,10 +953,20 @@ class FeatureValidationPipeline:
 
         global_selection = None
         if cfg.selection_enabled and target_cols:
-            candidates = self._dedupe([feat for res in batch_results for feat in as_list(res.selected_features)])
+            candidates, hard_dropped = self._batch_candidates(batch_results)
             if candidates:
                 global_selection = self._run_batch_global_selection(
                     csv_path, header, target_cols, split_labels, candidates
+                )
+            elif hard_dropped:
+                from Modeling_Tool.Feature.Weighted_Screen import EmptyStageError
+
+                listed = ", ".join(f"{var} ({reason})" for var, reason in hard_dropped.items())
+                raise EmptyStageError(
+                    "feature validation batches: every candidate of the selection was dropped by the leak gate, which "
+                    f"no fallback may revive: {listed}. Check these fields for target leakage (time point and source) "
+                    "before training; on_empty_stage='keep_all' restores the fallback up to 0.9.3 and is only meant "
+                    "for comparing with old results"
                 )
         result = self._merge_batch_results(
             batch_results=batch_results,
@@ -980,11 +992,31 @@ class FeatureValidationPipeline:
             "vif_enabled": False,
             "max_selected_features": None,
             "min_selected_features": None,
-            # a batch whose features all fail a stage keeps them as candidates: the global pass decides, and raises
-            # there when on_empty_stage='raise' and a stage drops every candidate
-            "on_empty_stage": "keep_all_warn",
+            # a batch whose features all fail a stage keeps them as candidates: the global pass decides (and applies
+            # the user's on_empty_stage there). The leak-gate drops that this keeps are taken out of the candidates by
+            # ``_batch_candidates``, so they never reach the global pass (0.9.3)
+            "on_empty_stage": "keep_all",
         })
         return params
+
+    def _batch_candidates(
+        self, batch_results: list[FeatureValidationPipelineResult]
+    ) -> tuple[list[str], dict[str, str]]:
+        """The candidates of the global selection pass and the hard drops of the batch passes (feature -> reason).
+
+        A batch pass keeps every feature of a stage that would drop them all, leak-gate drops included, so those drops
+        (recorded in its ``dropped_detail``) are taken out of the candidates here: no fallback may bring them back
+        (0.9.3). Under ``on_empty_stage='keep_all'`` they stay, as up to 0.9.3.
+        """
+        from Modeling_Tool.Feature.Weighted_Screen import hard_dropped_features
+
+        candidates = self._dedupe([feat for res in batch_results for feat in as_list(res.selected_features)])
+        hard_dropped: dict[str, str] = {}
+        for res in batch_results:
+            hard_dropped.update(hard_dropped_features((res.selection_summary or {}).get("dropped_detail")))
+        if (self.config.selection_params or {}).get("on_empty_stage", "keep_all_warn") == "keep_all":
+            return candidates, hard_dropped
+        return [feat for feat in candidates if feat not in hard_dropped], hard_dropped
 
     def _run_batch_global_selection(
         self,
@@ -1321,7 +1353,7 @@ class FeatureValidationPipeline:
     ) -> tuple[list[str], dict[str, Any], Any | None]:
         """Selection outputs of a batch run: the features, stage tables and artifact of the global pass, with the
         per-feature tables of every batch (they cover the features that never became candidates)."""
-        candidates = self._dedupe([feat for res in batch_results for feat in as_list(res.selected_features)])
+        candidates, _ = self._batch_candidates(batch_results)
         global_summary = dict(global_selection.selection_summary or {}) if global_selection is not None else {}
         selected = list(global_selection.selected_features) if global_selection is not None else []
         snapshot = self._selection_config_snapshot(config_snapshot, self._build_selection_config(), incumbent_features)
@@ -2314,6 +2346,7 @@ class FeatureValidationPipeline:
             "vif_tie_break_metric": params.get("vif_tie_break_metric", "iv"),
             "vif_use_woe_bins": params.get("vif_use_woe_bins", False),
             "on_empty_stage": params.get("on_empty_stage", "keep_all_warn"),
+            "fallback_top_k": params.get("fallback_top_k", FeatureScreenConfig().fallback_top_k),
         }
         return screen_config_from_mapping(
             mapping,
@@ -2640,6 +2673,7 @@ class FeatureValidationPipeline:
             "corr_method": screen_cfg.corr_method,
             "corr_base_metric": screen_cfg.corr_base_metric,
             "on_empty_stage": screen_cfg.on_empty_stage,
+            "fallback_top_k": screen_cfg.fallback_top_k,
             "missing_rate_ref": screen_cfg.missing_rate_ref,
         })
         return selection_config_snapshot

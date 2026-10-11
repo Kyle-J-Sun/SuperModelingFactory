@@ -61,8 +61,12 @@ Documented exceptions:
 - **0.9.3** is a patch release that changes which features are selected: `iv_upper_threshold` (the leakage limit of the
   screening) defaults to 2.0 instead of `None` and, on WOE bins under the guarded convention, tests `iv_raw` rather than
   the guarded IV, so features that 0.9.2 kept can be dropped. A new leak warning and `iv_gap_flag` column change no
-  number. `iv_upper_threshold=None` (with `screen_iv_convention="raw"` for 0.9.1 numbers) restores the 0.9.2 selections.
-  See the "Behavior changes (exception to RELEASING.md)" box of `docs/changelog/v0.9.3.md` in the doc repository.
+  number. The empty-stage fallback (`on_empty_stage="keep_all_warn"`) no longer brings back a feature that the limit
+  dropped: from the IV stage on it keeps the `fallback_top_k` (5) other features with the highest screening IV and
+  raises `EmptyStageError` when only leak drops are left, and every leak-gate drop warns. `iv_upper_threshold=None`
+  (with `screen_iv_convention="raw"` for 0.9.1 numbers, and `on_empty_stage="keep_all"` where a stage emptied) restores
+  the 0.9.2 selections. See the "Behavior changes (exception to RELEASING.md)" box of `docs/changelog/v0.9.3.md` in the
+  doc repository.
 
 ## Coordinating the repositories
 

@@ -273,7 +273,7 @@ Design rules:
 |---|---|
 | [SuperModelingFactory](https://github.com/Kyle-J-Sun/SuperModelingFactory) | This repository: the package source |
 | [SuperModelingFactory_doc](https://github.com/Kyle-J-Sun/SuperModelingFactory_doc) | MkDocs documentation site ([live](https://kyle-j-sun.github.io/SuperModelingFactory_doc/)) |
-| [SuperModelingFactory_pytest](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest) | Full regression test suite (1852 tests at v0.9.3) |
+| [SuperModelingFactory_pytest](https://github.com/Kyle-J-Sun/SuperModelingFactory_pytest) | Full regression test suite (1896 tests at v0.9.3) |
 | [SuperModelingFactory_agent](https://github.com/Kyle-J-Sun/SuperModelingFactory_agent) | An AI-assistant skill that answers SMF questions and drafts Pipeline calls |
 
 ---
